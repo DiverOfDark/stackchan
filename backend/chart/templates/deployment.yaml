@@ -15,6 +15,10 @@ spec:
       {{- include "voice-assistant.selectorLabels" . | nindent 6 }}
   template:
     metadata:
+      annotations:
+        # Roll the pod whenever the ConfigMap (system prompt, model, voice,
+        # ESP32_COMPAT, …) changes; env vars from envFrom don't reload otherwise.
+        checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
       labels:
         {{- include "voice-assistant.selectorLabels" . | nindent 8 }}
         {{- with .Values.podLabels }}
