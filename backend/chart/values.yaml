@@ -125,3 +125,10 @@ resources:
 
 # Extra env entries appended to the bot container.
 extraEnv: []
+
+# ── Pod scheduling ───────────────────────────────────────────────────────
+# Pin to a specific node, tolerate taints, or use full affinity rules.
+# All empty by default -> scheduler picks any eligible node.
+nodeSelector: {}
+tolerations: []
+affinity: {}
