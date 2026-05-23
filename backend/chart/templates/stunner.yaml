@@ -66,10 +66,16 @@ metadata:
     {{- include "voice-assistant.labels" . | nindent 4 }}
 spec:
   parentRefs:
-    - name: {{ include "voice-assistant.fullname" . }}-stunner
+    # group/kind are defaulted by the CRD; declaring them explicitly keeps
+    # ArgoCD from seeing a drift on every reconcile.
+    - group: gateway.networking.k8s.io
+      kind: Gateway
+      name: {{ include "voice-assistant.fullname" . }}-stunner
   rules:
     - backendRefs:
         # Permit the TURN relay to reach this app's pods (peer IPs come from
         # the Service's endpoints).
-        - name: {{ include "voice-assistant.fullname" . }}
+        - group: ""
+          kind: Service
+          name: {{ include "voice-assistant.fullname" . }}
           namespace: {{ .Release.Namespace }}
