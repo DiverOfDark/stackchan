@@ -1,0 +1,17 @@
+[project]
+name = "voice-assistant"
+version = "0.1.0"
+description = "Self-hosted Russian streaming voice assistant (Pipecat + SmallWebRTC)"
+requires-python = ">=3.11"
+dependencies = [
+    # Pipecat with the local-only stack: SmallWebRTC transport, faster-whisper
+    # STT, Silero VAD, OpenAI-compatible LLM client, in-process Piper TTS.
+    "pipecat-ai[webrtc,whisper,silero,openai,piper]>=1.0.0",
+    "fastapi[all]",
+    "uvicorn",
+    "loguru",
+]
+
+# This is a plain app, not an installable package — uv only manages the deps.
+[tool.uv]
+package = false

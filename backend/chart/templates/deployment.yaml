@@ -1,0 +1,95 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "voice-assistant.fullname" . }}
+  labels:
+    {{- include "voice-assistant.labels" . | nindent 4 }}
+spec:
+  progressDeadlineSeconds: 1200
+  strategy:
+    type: Recreate
+  replicas: {{ .Values.replicaCount }}
+  revisionHistoryLimit: 1
+  selector:
+    matchLabels:
+      {{- include "voice-assistant.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "voice-assistant.selectorLabels" . | nindent 8 }}
+        {{- with .Values.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      volumes:
+        - name: models
+          persistentVolumeClaim:
+            claimName: {{ include "voice-assistant.fullname" . }}-models
+      # Pre-fetch the Whisper model + Piper voice onto the PVC. Idempotent:
+      # a pod restart finds them present and skips the download.
+      initContainers:
+        - name: download-models
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command: ["uv", "run", "--no-dev", "python", "download_models.py"]
+          envFrom:
+            - configMapRef:
+                name: {{ include "voice-assistant.fullname" . }}
+          volumeMounts:
+            - name: models
+              mountPath: /models
+          resources:
+            {{- toYaml .Values.resources.initContainer | nindent 12 }}
+      containers:
+        - name: voice-assistant
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          ports:
+            - containerPort: {{ .Values.service.targetPort }}
+              name: http
+              protocol: TCP
+          envFrom:
+            - configMapRef:
+                name: {{ include "voice-assistant.fullname" . }}
+          env:
+            - name: HERMES_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "voice-assistant.hermesSecretName" . }}
+                  key: {{ .Values.hermes.apiKey.secretKey }}
+            - name: STUNNER_TURN_USERNAME
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "voice-assistant.turnSecretName" . }}
+                  key: {{ .Values.stunner.auth.existingSecretKeys.username }}
+            - name: STUNNER_TURN_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "voice-assistant.turnSecretName" . }}
+                  key: {{ .Values.stunner.auth.existingSecretKeys.password }}
+            {{- with .Values.extraEnv }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          volumeMounts:
+            - name: models
+              mountPath: /models
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: {{ .Values.service.targetPort }}
+            initialDelaySeconds: 15
+            periodSeconds: 10
+            timeoutSeconds: 5
+            successThreshold: 1
+            failureThreshold: 18
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: {{ .Values.service.targetPort }}
+            initialDelaySeconds: 45
+            periodSeconds: 30
+            timeoutSeconds: 10
+            successThreshold: 1
+            failureThreshold: 3
+          resources:
+            {{- toYaml .Values.resources.bot | nindent 12 }}

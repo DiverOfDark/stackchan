@@ -1,0 +1,178 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Голосовой помощник</title>
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; min-height: 100vh; display: flex; align-items: center;
+    justify-content: center; font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+    background: radial-gradient(1200px 600px at 50% -10%, #1e293b, #0b1120);
+    color: #e2e8f0;
+  }
+  .card {
+    width: min(440px, 92vw); background: #111827; border: 1px solid #1f2937;
+    border-radius: 18px; padding: 32px; text-align: center;
+    box-shadow: 0 24px 60px rgba(0,0,0,.5);
+  }
+  h1 { margin: 0 0 4px; font-size: 22px; font-weight: 650; }
+  .sub { margin: 0 0 24px; font-size: 13px; color: #94a3b8; }
+  .orb {
+    width: 96px; height: 96px; margin: 8px auto 20px; border-radius: 50%;
+    background: #1e293b; border: 2px solid #334155;
+    display: flex; align-items: center; justify-content: center; font-size: 38px;
+    transition: all .2s ease;
+  }
+  .orb.live { border-color: #22c55e; box-shadow: 0 0 0 8px rgba(34,197,94,.12); }
+  .orb.connecting { border-color: #eab308; }
+  button {
+    width: 100%; padding: 13px 20px; font-size: 15px; font-weight: 600;
+    border: none; border-radius: 11px; cursor: pointer; color: #fff;
+    background: #2563eb; transition: background .15s ease;
+  }
+  button:hover { background: #1d4ed8; }
+  button.stop { background: #dc2626; }
+  button.stop:hover { background: #b91c1c; }
+  .status { margin: 16px 0 0; font-size: 13px; color: #94a3b8; }
+  .status b { color: #e2e8f0; }
+  #log {
+    margin-top: 18px; text-align: left; font-size: 11px; line-height: 1.5;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    color: #64748b; max-height: 130px; overflow-y: auto;
+    background: #0b1120; border: 1px solid #1f2937; border-radius: 9px; padding: 10px;
+  }
+</style>
+</head>
+<body>
+<div class="card">
+  <h1>Голосовой помощник</h1>
+  <p class="sub">Локальный ассистент · STT · LLM · TTS · WebRTC</p>
+  <div class="orb" id="orb">🎙️</div>
+  <button id="btn">Подключиться и говорить</button>
+  <p class="status">Состояние: <b id="state">отключено</b></p>
+  <div id="log"></div>
+  <audio id="audio" autoplay></audio>
+</div>
+<script>
+const btn = document.getElementById("btn");
+const orb = document.getElementById("orb");
+const stateEl = document.getElementById("state");
+const audioEl = document.getElementById("audio");
+const logEl = document.getElementById("log");
+
+let pc = null;
+let micStream = null;
+let active = false;
+
+function log(msg) {
+  const t = new Date().toLocaleTimeString("ru-RU");
+  logEl.innerHTML += `[${t}] ${msg}<br>`;
+  logEl.scrollTop = logEl.scrollHeight;
+}
+function setState(text, cls) {
+  stateEl.textContent = text;
+  orb.className = "orb" + (cls ? " " + cls : "");
+}
+
+// ICE servers come from the bot — they point the browser at the in-cluster
+// STUNner TURN relay, which is how browser media reaches the pod network.
+async function getIceServers() {
+  try {
+    const r = await fetch("/ice-servers");
+    const j = await r.json();
+    log(`ICE-серверов получено: ${j.iceServers.length}`);
+    return j.iceServers || [];
+  } catch (e) {
+    log("Не удалось получить ICE-серверы: " + e);
+    return [];
+  }
+}
+
+async function sendCandidate(candidate) {
+  await fetch("/api/offer", {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      pc_id: pc.pc_id,
+      candidates: [{
+        candidate: candidate.candidate,
+        sdp_mid: candidate.sdpMid,
+        sdp_mline_index: candidate.sdpMLineIndex,
+      }],
+    }),
+  });
+}
+
+async function connect() {
+  setState("подключение…", "connecting");
+  btn.textContent = "Отключиться";
+  btn.className = "stop";
+  active = true;
+
+  micStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+  const iceServers = await getIceServers();
+  pc = new RTCPeerConnection({ iceServers });
+  pc.pendingCandidates = [];
+  pc.canSend = false;
+
+  pc.ontrack = (e) => { audioEl.srcObject = e.streams[0]; };
+
+  pc.oniceconnectionstatechange = () => log("ICE: " + pc.iceConnectionState);
+  pc.onconnectionstatechange = () => {
+    log("Соединение: " + pc.connectionState);
+    if (pc.connectionState === "connected") setState("на связи — говорите", "live");
+    else if (["disconnected", "failed", "closed"].includes(pc.connectionState)) {
+      if (active) disconnect();
+    }
+  };
+  pc.onicecandidate = async (e) => {
+    if (!e.candidate) return;
+    if (pc.canSend && pc.pc_id) await sendCandidate(e.candidate);
+    else pc.pendingCandidates.push(e.candidate);
+  };
+
+  // SmallWebRTCTransport expects both an audio and a video transceiver.
+  pc.addTransceiver(micStream.getAudioTracks()[0], { direction: "sendrecv" });
+  pc.addTransceiver("video", { direction: "sendrecv" });
+
+  await pc.setLocalDescription(await pc.createOffer());
+  const resp = await fetch("/api/offer", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ sdp: pc.localDescription.sdp, type: pc.localDescription.type }),
+  });
+  const answer = await resp.json();
+  pc.pc_id = answer.pc_id;
+  await pc.setRemoteDescription(answer);
+  log("Ответ SDP получен, pc_id=" + answer.pc_id);
+
+  pc.canSend = true;
+  for (const c of pc.pendingCandidates) await sendCandidate(c);
+  pc.pendingCandidates = [];
+}
+
+function disconnect() {
+  active = false;
+  if (pc) { pc.close(); pc = null; }
+  if (micStream) { micStream.getTracks().forEach((t) => t.stop()); micStream = null; }
+  setState("отключено", "");
+  btn.textContent = "Подключиться и говорить";
+  btn.className = "";
+}
+
+btn.addEventListener("click", async () => {
+  try {
+    if (!active) await connect();
+    else disconnect();
+  } catch (e) {
+    log("Ошибка: " + e);
+    setState("ошибка", "");
+    disconnect();
+  }
+});
+</script>
+</body>
+</html>

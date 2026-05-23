@@ -1,0 +1,71 @@
+# STUNner WebRTC gateway resources for this release.
+# The STUNner OPERATOR must be installed separately:
+#   helm repo add stunner https://l7mp.io/stunner
+#   helm install stunner stunner/stunner --create-namespace -n stunner-system
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: GatewayClass
+metadata:
+  name: {{ include "voice-assistant.gatewayClassName" . }}
+  labels:
+    {{- include "voice-assistant.labels" . | nindent 4 }}
+spec:
+  controllerName: "stunner.l7mp.io/gateway-operator"
+  parametersRef:
+    group: stunner.l7mp.io
+    kind: GatewayConfig
+    name: {{ include "voice-assistant.fullname" . }}
+    namespace: {{ .Release.Namespace }}
+  description: "STUNner WebRTC gateway for {{ .Release.Name }}"
+---
+apiVersion: stunner.l7mp.io/v1
+kind: GatewayConfig
+metadata:
+  name: {{ include "voice-assistant.fullname" . }}
+  labels:
+    {{- include "voice-assistant.labels" . | nindent 4 }}
+spec:
+  realm: {{ .Values.stunner.realm }}
+  # Static TURN credentials come from this Secret (keys: type, username, password).
+  authRef:
+    name: {{ include "voice-assistant.turnSecretName" . }}
+    namespace: {{ .Release.Namespace }}
+  {{- if or .Values.stunner.loadBalancerIP .Values.stunner.loadBalancerServiceAnnotations }}
+  # Annotations applied to the LoadBalancer Service STUNner creates for the Gateway.
+  loadBalancerServiceAnnotations:
+    {{- if .Values.stunner.loadBalancerIP }}
+    metallb.universe.tf/loadBalancerIPs: {{ .Values.stunner.loadBalancerIP | quote }}
+    {{- end }}
+    {{- with .Values.stunner.loadBalancerServiceAnnotations }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+  {{- end }}
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata:
+  name: {{ include "voice-assistant.fullname" . }}
+  labels:
+    {{- include "voice-assistant.labels" . | nindent 4 }}
+spec:
+  gatewayClassName: {{ include "voice-assistant.gatewayClassName" . }}
+  listeners:
+    - name: turn-udp
+      port: 3478
+      protocol: TURN-UDP
+---
+apiVersion: stunner.l7mp.io/v1
+kind: UDPRoute
+metadata:
+  name: {{ include "voice-assistant.fullname" . }}
+  labels:
+    {{- include "voice-assistant.labels" . | nindent 4 }}
+spec:
+  parentRefs:
+    - name: {{ include "voice-assistant.fullname" . }}
+  rules:
+    - backendRefs:
+        # Permit the TURN relay to reach this app's pods (peer IPs come from
+        # the Service's endpoints).
+        - name: {{ include "voice-assistant.fullname" . }}
+          namespace: {{ .Release.Namespace }}

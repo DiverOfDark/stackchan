@@ -1,0 +1,127 @@
+# Default values for the voice-assistant chart.
+# See https://github.com/DiverOfDark/pipecat-voice-assistant for full docs.
+
+image:
+  repository: ghcr.io/diverofdark/pipecat-voice-assistant
+  tag: latest
+  pullPolicy: Always
+
+replicaCount: 1
+nameOverride: ""
+fullnameOverride: ""
+podLabels: {}
+
+# ── Local LLM (OpenAI-compatible API) ────────────────────────────────────
+hermes:
+  # Base URL of the OpenAI-compatible endpoint — must include /v1.
+  baseUrl: "http://your-llm.example.com:8000/v1"
+  # Exact model name (see GET /v1/models on your endpoint).
+  model: ""
+  apiKey:
+    # Key under which the API key is stored in the K8s Secret.
+    secretKey: HERMES_API_KEY
+    # Pick ONE source of the API key:
+    #   1) externalSecret.enabled = true  (External Secrets Operator)
+    #   2) value = "sk-..."                (inline; insecure, OK for dev)
+    #   3) existingSecret = "my-secret"    (you create it yourself)
+    externalSecret:
+      enabled: false
+      store: openbao-store
+      storeKind: ClusterSecretStore
+      refreshInterval: "1h"
+      remoteKey: "voice-assistant/hermes"
+      property: "api_key"
+    value: ""
+    existingSecret: ""
+
+# ── Whisper STT (faster-whisper, in-process) ─────────────────────────────
+whisper:
+  model: medium          # tiny | base | small | medium | large-v3
+  computeType: int8      # int8 | int8_float16 | float16 | float32
+  ompThreads: 6          # bounds ctranslate2 CPU threads to your pod's limit
+
+# ── Piper TTS (in-process; voice files auto-downloaded once) ─────────────
+piper:
+  voice: ru_RU-irina-medium   # alt: ru_RU-dmitri-medium, ru_RU-ruslan-medium
+
+# ── System prompt (Russian, voice-shaped by default) ─────────────────────
+systemPrompt: |-
+  Ты — голосовой помощник. Всегда отвечай только на русском языке.
+  Говори кратко и естественно, как в живом разговоре. Не используй
+  разметку, списки, эмодзи или код — только обычные законченные
+  предложения, которые человек произнёс бы вслух.
+
+# ── ESP32 forward-compat (see README ESP32 section) ──────────────────────
+esp32Compat: false
+
+# ── STUNner WebRTC gateway (per-app resources; operator must be installed
+#    separately — `helm install stunner stunner/stunner -n stunner-system`) ─
+stunner:
+  # The TURN URI handed to browser clients via /ice-servers. Usually
+  # turn:<loadBalancerIP>:3478?transport=udp
+  turnUri: "turn:192.0.2.1:3478?transport=udp"
+  realm: stunner.l7mp.io
+  # If set, this IP is pinned via loadBalancerServiceAnnotations below
+  # (a MetalLB annotation by default).
+  loadBalancerIP: ""
+  loadBalancerServiceAnnotations: {}
+  # Cluster-scoped GatewayClass name. Empty -> defaults to the release fullname.
+  gatewayClassName: ""
+  auth:
+    username: voiceassistant
+    # Pick ONE source of the TURN password — same rules as hermes.apiKey.
+    externalSecret:
+      enabled: false
+      store: openbao-store
+      storeKind: ClusterSecretStore
+      refreshInterval: "1h"
+      remoteKey: "voice-assistant/turn"
+      usernameProperty: username
+      passwordProperty: password
+    password: ""
+    existingSecret: ""
+    existingSecretKeys:
+      username: username
+      password: password
+
+# ── Model storage (Whisper + Piper persist here) ─────────────────────────
+persistence:
+  size: 8Gi
+  storageClassName: ""       # empty -> cluster default
+  accessModes: [ReadWriteOnce]
+
+# ── HTTP signaling / web client service ──────────────────────────────────
+service:
+  type: ClusterIP
+  port: 80
+  targetPort: 7860
+
+# ── Ingress (TLS web client + signaling) ─────────────────────────────────
+ingress:
+  enabled: true
+  className: ""              # e.g. traefik, nginx; empty uses cluster default
+  annotations: {}
+  host: voice-assistant.example.com
+  tls:
+    enabled: true
+    secretName: ""           # empty -> "<fullname>-tls"
+
+# ── Resources ────────────────────────────────────────────────────────────
+resources:
+  bot:
+    requests:
+      cpu: "3"
+      memory: 4Gi
+    limits:
+      cpu: "6"
+      memory: 8Gi
+  initContainer:
+    requests:
+      cpu: "500m"
+      memory: 2Gi
+    limits:
+      cpu: "4"
+      memory: 6Gi
+
+# Extra env entries appended to the bot container.
+extraEnv: []
