@@ -99,6 +99,109 @@ def test_narration_always_appended_even_when_prompt_overridden(monkeypatch):
 # ---------------------------------------------------------------------------
 
 
+# ---------------------------------------------------------------------------
+# FastWhisperSTTService — beam_size / best_of wrapping
+# ---------------------------------------------------------------------------
+
+
+def test_fast_whisper_injects_beam_size_and_best_of(monkeypatch):
+    """The FastWhisperSTTService subclass must wrap the underlying
+    WhisperModel.transcribe so beam_size and best_of get injected on every
+    call. Without this wrap, faster-whisper falls back to beam_size=5 /
+    best_of=5, costing ~30-50% CPU time.
+
+    We mock faster_whisper.WhisperModel so the test doesn't download weights.
+    """
+    import faster_whisper
+
+    captured_kwargs: dict = {}
+
+    class FakeWhisperModel:
+        def __init__(self, *args, **kwargs):
+            # Mimic the real constructor signature (model_name, device=..., compute_type=...).
+            pass
+
+        def transcribe(self, audio, **kwargs):  # noqa: D401
+            captured_kwargs.update(kwargs)
+            return iter([]), object()  # (segments, info)
+
+    monkeypatch.setattr(faster_whisper, "WhisperModel", FakeWhisperModel)
+
+    from pipecat.services.whisper.stt import WhisperSTTService
+    from pipecat.transcriptions.language import Language
+
+    from whisper_fast import FastWhisperSTTService
+
+    stt = FastWhisperSTTService(
+        device="cpu",
+        compute_type="int8",
+        beam_size=1,
+        best_of=1,
+        settings=WhisperSTTService.Settings(model="tiny", language=Language.RU),
+    )
+    # The wrap should be installed on the underlying model instance.
+    stt._model.transcribe(b"dummy-audio-bytes")
+
+    assert captured_kwargs.get("beam_size") == 1
+    assert captured_kwargs.get("best_of") == 1
+
+
+def test_fast_whisper_caller_kwargs_win_over_defaults(monkeypatch):
+    """If a caller explicitly passes beam_size, our wrap must NOT clobber it.
+    Uses setdefault semantics. Guards against accidentally pinning the
+    decoding params at the wrong layer.
+    """
+    import faster_whisper
+
+    captured_kwargs: dict = {}
+
+    class FakeWhisperModel:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def transcribe(self, audio, **kwargs):
+            captured_kwargs.update(kwargs)
+            return iter([]), object()
+
+    monkeypatch.setattr(faster_whisper, "WhisperModel", FakeWhisperModel)
+
+    from pipecat.services.whisper.stt import WhisperSTTService
+    from pipecat.transcriptions.language import Language
+
+    from whisper_fast import FastWhisperSTTService
+
+    stt = FastWhisperSTTService(
+        device="cpu",
+        compute_type="int8",
+        beam_size=1,
+        best_of=1,
+        settings=WhisperSTTService.Settings(model="tiny", language=Language.RU),
+    )
+    # Caller explicitly overrides → our defaults must NOT apply.
+    stt._model.transcribe(b"dummy", beam_size=5, best_of=3)
+
+    assert captured_kwargs["beam_size"] == 5
+    assert captured_kwargs["best_of"] == 3
+
+
+def test_bot_module_uses_fast_whisper(monkeypatch):
+    """bot.py must construct STT via FastWhisperSTTService, not the stock
+    WhisperSTTService. Regression guard against a refactor accidentally
+    putting the slow service back.
+    """
+    monkeypatch.delenv("WHISPER_BEAM_SIZE", raising=False)
+    monkeypatch.delenv("WHISPER_BEST_OF", raising=False)
+    import bot
+
+    importlib.reload(bot)
+    assert bot.WHISPER_BEAM_SIZE == 1
+    assert bot.WHISPER_BEST_OF == 1
+
+    from whisper_fast import FastWhisperSTTService
+
+    assert bot.FastWhisperSTTService is FastWhisperSTTService
+
+
 def test_openai_llm_service_uses_streaming():
     """Sanity check that pipecat's OpenAILLMService produces stream=True in
     its chat-completion params. bot.py relies on this so Hermes' mid-turn

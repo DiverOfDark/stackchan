@@ -31,6 +31,8 @@ from pipecat.processors.aggregators.llm_response_universal import (
 from pipecat.services.openai.llm import OpenAILLMService
 from pipecat.services.piper.tts import PiperTTSService
 from pipecat.services.whisper.stt import WhisperSTTService
+
+from whisper_fast import FastWhisperSTTService
 from pipecat.transcriptions.language import Language
 from pipecat.transports.base_transport import TransportParams
 from pipecat.transports.smallwebrtc.request_handler import (
@@ -51,6 +53,10 @@ HERMES_API_KEY = os.getenv("HERMES_API_KEY", "")
 
 WHISPER_MODEL = os.getenv("WHISPER_MODEL", "deepdml/faster-whisper-large-v3-turbo-ct2")
 WHISPER_COMPUTE_TYPE = os.getenv("WHISPER_COMPUTE_TYPE", "int8")
+# faster-whisper defaults are beam_size=5 / best_of=5; we run 1/1 for ~30-50%
+# CPU STT speedup at a small accuracy cost. Override per-deploy if needed.
+WHISPER_BEAM_SIZE = int(os.getenv("WHISPER_BEAM_SIZE", "1"))
+WHISPER_BEST_OF = int(os.getenv("WHISPER_BEST_OF", "1"))
 
 PIPER_VOICE = os.getenv("PIPER_VOICE", "ru_RU-irina-medium")
 PIPER_DOWNLOAD_DIR = Path(os.getenv("PIPER_DOWNLOAD_DIR", "/models/piper"))
@@ -157,10 +163,15 @@ async def run_bot(webrtc_connection):
 
     # STT — faster-whisper, Russian, INT8 on CPU. Models are cached on the PVC
     # via HF_HOME; the OS page cache keeps repeat loads fast.
-    stt = WhisperSTTService(
+    # FastWhisperSTTService wraps the underlying WhisperModel.transcribe to
+    # inject beam_size/best_of (pipecat's stock WhisperSTTService doesn't
+    # expose them).
+    stt = FastWhisperSTTService(
         model=WHISPER_MODEL,
         device="cpu",
         compute_type=WHISPER_COMPUTE_TYPE,
+        beam_size=WHISPER_BEAM_SIZE,
+        best_of=WHISPER_BEST_OF,
         settings=WhisperSTTService.Settings(language=Language.RU),
     )
 
@@ -295,8 +306,9 @@ def _prewarm_piper(app: FastAPI) -> None:
 async def lifespan(app: FastAPI):
     logger.info(
         f"Voice assistant starting on :{HTTP_PORT} "
-        f"(whisper={WHISPER_MODEL}/{WHISPER_COMPUTE_TYPE}, piper={PIPER_VOICE}, "
-        f"esp32_compat={ESP32_COMPAT})"
+        f"(whisper={WHISPER_MODEL}/{WHISPER_COMPUTE_TYPE} "
+        f"beam={WHISPER_BEAM_SIZE} best_of={WHISPER_BEST_OF}, "
+        f"piper={PIPER_VOICE}, esp32_compat={ESP32_COMPAT})"
     )
     if not HERMES_MODEL:
         logger.warning("HERMES_MODEL is empty — set it in the ConfigMap.")

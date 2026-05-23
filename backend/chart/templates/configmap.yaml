@@ -10,6 +10,8 @@ data:
   HERMES_MODEL: {{ .Values.hermes.model | quote }}
   WHISPER_MODEL: {{ .Values.whisper.model | quote }}
   WHISPER_COMPUTE_TYPE: {{ .Values.whisper.computeType | quote }}
+  WHISPER_BEAM_SIZE: {{ .Values.whisper.beamSize | quote }}
+  WHISPER_BEST_OF: {{ .Values.whisper.bestOf | quote }}
   OMP_NUM_THREADS: {{ .Values.whisper.ompThreads | quote }}
   PIPER_VOICE: {{ .Values.piper.voice | quote }}
   HF_HOME: "/models/hf"
