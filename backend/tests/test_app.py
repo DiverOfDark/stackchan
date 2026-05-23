@@ -99,3 +99,80 @@ def test_lifespan_tolerates_prewarm_failure(bot_module, monkeypatch):
     with TestClient(bot_module.app) as client:
         resp = client.get("/health")
     assert resp.status_code == 200
+
+
+# ---------------------------------------------------------------------------
+# /api/text — testing-only endpoint that bypasses STT
+# ---------------------------------------------------------------------------
+
+
+def _stub_session(bot_module, monkeypatch, pc_id: str):
+    """Install a fake (context, task) session under the given pc_id and
+    return capture dicts so the test can assert what was called.
+    """
+    from pipecat.frames.frames import LLMRunFrame
+
+    captured: dict = {"messages": [], "queued_frames": []}
+
+    class FakeContext:
+        def add_message(self, msg):
+            captured["messages"].append(msg)
+
+    class FakeTask:
+        async def queue_frames(self, frames):
+            captured["queued_frames"].extend(frames)
+
+    monkeypatch.setitem(
+        bot_module._active_sessions, pc_id, (FakeContext(), FakeTask())
+    )
+    captured["LLMRunFrame"] = LLMRunFrame
+    return captured
+
+
+def test_text_endpoint_injects_into_session(bot_module, mocked_prewarm, monkeypatch):
+    """POST /api/text with an active pc_id appends a user message to the
+    context and queues an LLMRunFrame — same mechanism as the greeting path.
+    """
+    captured = _stub_session(bot_module, monkeypatch, pc_id="abc-123")
+
+    with TestClient(bot_module.app) as client:
+        resp = client.post(
+            "/api/text", json={"pc_id": "abc-123", "text": "какая погода"}
+        )
+
+    assert resp.status_code == 200
+    assert resp.json() == {"status": "ok"}
+    assert captured["messages"] == [{"role": "user", "content": "какая погода"}]
+    assert len(captured["queued_frames"]) == 1
+    assert isinstance(captured["queued_frames"][0], captured["LLMRunFrame"])
+
+
+def test_text_endpoint_404_for_unknown_pc_id(bot_module, mocked_prewarm):
+    """POST /api/text with no matching active session returns 404."""
+    with TestClient(bot_module.app) as client:
+        resp = client.post(
+            "/api/text", json={"pc_id": "does-not-exist", "text": "hi"}
+        )
+    assert resp.status_code == 404
+    assert "no active session" in resp.json()["error"]
+
+
+def test_text_endpoint_400_for_empty_text(bot_module, mocked_prewarm, monkeypatch):
+    """Empty / whitespace text is a client error, not a silent no-op — we
+    don't want to fire pointless LLM calls.
+    """
+    _stub_session(bot_module, monkeypatch, pc_id="abc-123")
+
+    with TestClient(bot_module.app) as client:
+        resp = client.post("/api/text", json={"pc_id": "abc-123", "text": "   "})
+
+    assert resp.status_code == 400
+    assert resp.json() == {"error": "text is empty"}
+
+
+def test_text_endpoint_validates_request_shape(bot_module, mocked_prewarm):
+    """Missing fields should be rejected by FastAPI's validation, not 500."""
+    with TestClient(bot_module.app) as client:
+        # Missing text field
+        resp = client.post("/api/text", json={"pc_id": "abc-123"})
+    assert resp.status_code == 422

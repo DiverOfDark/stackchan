@@ -36,6 +36,25 @@
   button:hover { background: #1d4ed8; }
   button.stop { background: #dc2626; }
   button.stop:hover { background: #b91c1c; }
+  button:disabled { background: #334155; cursor: not-allowed; }
+  button:disabled:hover { background: #334155; }
+  .text-row {
+    display: flex; gap: 8px; margin-top: 14px;
+  }
+  .text-row input[type="text"] {
+    flex: 1; padding: 11px 14px; font-size: 14px;
+    background: #0b1120; border: 1px solid #334155; border-radius: 11px;
+    color: #e2e8f0; font-family: inherit;
+  }
+  .text-row input[type="text"]:focus {
+    outline: none; border-color: #2563eb;
+  }
+  .text-row input[type="text"]:disabled {
+    background: #0b1120; color: #475569;
+  }
+  .text-row button {
+    width: auto; padding: 11px 18px; font-size: 14px;
+  }
   .status { margin: 16px 0 0; font-size: 13px; color: #94a3b8; }
   .status b { color: #e2e8f0; }
   #log {
@@ -52,6 +71,10 @@
   <p class="sub">Локальный ассистент · STT · LLM · TTS · WebRTC</p>
   <div class="orb" id="orb">🎙️</div>
   <button id="btn">Подключиться и говорить</button>
+  <div class="text-row">
+    <input type="text" id="text-input" placeholder="…или напечатайте текст" disabled />
+    <button id="text-send-btn" disabled>Отправить</button>
+  </div>
   <p class="status">Состояние: <b id="state">отключено</b></p>
   <div id="log"></div>
   <audio id="audio" autoplay></audio>
@@ -62,10 +85,18 @@ const orb = document.getElementById("orb");
 const stateEl = document.getElementById("state");
 const audioEl = document.getElementById("audio");
 const logEl = document.getElementById("log");
+const textInput = document.getElementById("text-input");
+const textSendBtn = document.getElementById("text-send-btn");
 
 let pc = null;
 let micStream = null;
 let active = false;
+
+function setTextInputEnabled(enabled) {
+  textInput.disabled = !enabled;
+  textSendBtn.disabled = !enabled;
+  if (!enabled) textInput.value = "";
+}
 
 function log(msg) {
   const t = new Date().toLocaleTimeString("ru-RU");
@@ -123,8 +154,10 @@ async function connect() {
   pc.oniceconnectionstatechange = () => log("ICE: " + pc.iceConnectionState);
   pc.onconnectionstatechange = () => {
     log("Соединение: " + pc.connectionState);
-    if (pc.connectionState === "connected") setState("на связи — говорите", "live");
-    else if (["disconnected", "failed", "closed"].includes(pc.connectionState)) {
+    if (pc.connectionState === "connected") {
+      setState("на связи — говорите", "live");
+      setTextInputEnabled(true);
+    } else if (["disconnected", "failed", "closed"].includes(pc.connectionState)) {
       if (active) disconnect();
     }
   };
@@ -161,6 +194,31 @@ function disconnect() {
   setState("отключено", "");
   btn.textContent = "Подключиться и говорить";
   btn.className = "";
+  setTextInputEnabled(false);
+}
+
+async function sendText() {
+  const text = textInput.value.trim();
+  if (!text || !pc || !pc.pc_id) return;
+  log(`Текст → "${text}"`);
+  textSendBtn.disabled = true;
+  try {
+    const r = await fetch("/api/text", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ pc_id: pc.pc_id, text }),
+    });
+    if (!r.ok) {
+      const e = await r.json().catch(() => ({}));
+      log(`Ошибка: ${e.error || r.status}`);
+      return;
+    }
+    textInput.value = "";
+  } catch (e) {
+    log("Ошибка отправки: " + e);
+  } finally {
+    if (active) textSendBtn.disabled = false;
+  }
 }
 
 btn.addEventListener("click", async () => {
@@ -172,6 +230,11 @@ btn.addEventListener("click", async () => {
     setState("ошибка", "");
     disconnect();
   }
+});
+
+textSendBtn.addEventListener("click", sendText);
+textInput.addEventListener("keydown", (e) => {
+  if (e.key === "Enter") sendText();
 });
 </script>
 </body>

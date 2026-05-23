@@ -16,6 +16,7 @@ import uvicorn
 from fastapi import BackgroundTasks, FastAPI
 from fastapi.responses import FileResponse, JSONResponse
 from loguru import logger
+from pydantic import BaseModel
 
 from pipecat.audio.vad.silero import SileroVADAnalyzer
 from pipecat.frames.frames import LLMRunFrame
@@ -238,25 +239,42 @@ async def run_bot(webrtc_connection):
         observers=[latency_observer],
     )
 
+    # Register this session so /api/text can find it. Done before the
+    # pipeline runs so the test client can POST as soon as it's connected.
+    pc_id = webrtc_connection.pc_id
+    _active_sessions[pc_id] = (context, task)
+
     @transport.event_handler("on_client_connected")
     async def on_client_connected(transport, client):
-        logger.info("Client connected — sending greeting")
+        logger.info(f"Client connected (pc_id={pc_id}) — sending greeting")
         context.add_message({"role": "user", "content": GREETING})
         await task.queue_frames([LLMRunFrame()])
 
     @transport.event_handler("on_client_disconnected")
     async def on_client_disconnected(transport, client):
-        logger.info("Client disconnected")
+        logger.info(f"Client disconnected (pc_id={pc_id})")
+        _active_sessions.pop(pc_id, None)
         await task.cancel()
 
     runner = PipelineRunner(handle_sigint=False)
-    await runner.run(task)
+    try:
+        await runner.run(task)
+    finally:
+        # Safety net in case the disconnect handler didn't fire (e.g. on
+        # abnormal close): make sure the session map doesn't leak entries.
+        _active_sessions.pop(pc_id, None)
 
 
 # --------------------------------------------------------------------------
 # HTTP — WebRTC signaling (/api/offer) + the browser test client
 # --------------------------------------------------------------------------
 _handler = SmallWebRTCRequestHandler()
+
+# pc_id -> (context, task) for /api/text injection. Lets the browser test page
+# bypass STT by POSTing text directly; the LLM/TTS path runs as usual and the
+# audio comes back over the existing WebRTC connection. Populated by run_bot()
+# on connect, cleaned up on disconnect.
+_active_sessions: dict[str, tuple[LLMContext, PipelineTask]] = {}
 
 
 def _prewarm_whisper(app: FastAPI) -> None:
@@ -357,6 +375,37 @@ async def ice_candidate(request: SmallWebRTCPatchRequest):
     """WebRTC signaling: receive trickled ICE candidates from the browser."""
     await _handler.handle_patch_request(request)
     return {"status": "success"}
+
+
+class TextInputRequest(BaseModel):
+    """Body for /api/text — testing-only hook that bypasses STT."""
+
+    pc_id: str
+    text: str
+
+
+@app.post("/api/text")
+async def text_input(request: TextInputRequest):
+    """Inject text into an active session as if it came from STT.
+
+    Useful for testing the LLM/TTS path without speaking into a microphone.
+    The audio response still comes back over the existing WebRTC connection.
+    """
+    session = _active_sessions.get(request.pc_id)
+    if session is None:
+        return JSONResponse(
+            {"error": f"no active session for pc_id={request.pc_id!r}"},
+            status_code=404,
+        )
+    text = request.text.strip()
+    if not text:
+        return JSONResponse({"error": "text is empty"}, status_code=400)
+
+    context, task = session
+    logger.info(f"Injecting text into pc_id={request.pc_id}: {text!r}")
+    context.add_message({"role": "user", "content": text})
+    await task.queue_frames([LLMRunFrame()])
+    return {"status": "ok"}
 
 
 @app.get("/ice-servers")
