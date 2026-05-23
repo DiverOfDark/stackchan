@@ -24,8 +24,9 @@ WORKDIR /app
 COPY pyproject.toml uv.lock* ./
 RUN uv sync --no-dev --no-install-project
 
-# Application code.
-COPY bot.py download_models.py test-client.html ./
+# Application code. Glob *.py so adding new modules doesn't silently break
+# the image (tests/ is a subdir and is not matched by *.py at the top level).
+COPY *.py test-client.html ./
 
 EXPOSE 7860
 
