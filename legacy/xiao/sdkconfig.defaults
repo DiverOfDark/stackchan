@@ -31,3 +31,8 @@ CONFIG_ESP_MAIN_TASK_STACK_SIZE=8192
 
 # Compiler — let -O2 ride; size-optimized hurts Opus too much
 CONFIG_COMPILER_OPTIMIZATION_PERF=y
+
+# TLS — bundle the standard public-CA roots so HTTPS to the backend works
+# without per-deployment cert pinning. Full bundle is ~80 KB.
+CONFIG_MBEDTLS_CERTIFICATE_BUNDLE=y
+CONFIG_MBEDTLS_CERTIFICATE_BUNDLE_DEFAULT_FULL=y

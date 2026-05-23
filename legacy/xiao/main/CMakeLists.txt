@@ -4,14 +4,19 @@ idf_component_register(
         "audio_io.c"
         "wifi_provision.c"
         "captive_portal_index_html.c"
+        "pipecat_signaling.c"
     INCLUDE_DIRS
         "."
     REQUIRES
         esp_driver_i2s
         esp_driver_gpio
         esp_event
+        esp_http_client
         esp_http_server
+        esp-tls
         esp_netif
         esp_wifi
         nvs_flash
+    PRIV_REQUIRES
+        espressif__cjson
 )
