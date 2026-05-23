@@ -8,7 +8,7 @@
 import os
 from pathlib import Path
 
-WHISPER_MODEL = os.getenv("WHISPER_MODEL", "medium")
+WHISPER_MODEL = os.getenv("WHISPER_MODEL", "deepdml/faster-whisper-large-v3-turbo-ct2")
 WHISPER_COMPUTE_TYPE = os.getenv("WHISPER_COMPUTE_TYPE", "int8")
 PIPER_VOICE = os.getenv("PIPER_VOICE", "ru_RU-irina-medium")
 PIPER_DOWNLOAD_DIR = Path(os.getenv("PIPER_DOWNLOAD_DIR", "/models/piper"))

@@ -36,7 +36,10 @@ hermes:
 
 # ── Whisper STT (faster-whisper, in-process) ─────────────────────────────
 whisper:
-  model: medium          # tiny | base | small | medium | large-v3
+  # large-v3-turbo is a distilled large-v3 variant: ~6× faster than large-v3
+  # and faster than `medium` on CPU+int8, with comparable Russian quality.
+  # Fallbacks if you need them: tiny | base | small | medium | large-v3
+  model: deepdml/faster-whisper-large-v3-turbo-ct2
   computeType: int8      # int8 | int8_float16 | float16 | float32
   ompThreads: 6          # bounds ctranslate2 CPU threads to your pod's limit
 

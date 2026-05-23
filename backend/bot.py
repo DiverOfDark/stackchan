@@ -19,6 +19,7 @@ from loguru import logger
 
 from pipecat.audio.vad.silero import SileroVADAnalyzer
 from pipecat.frames.frames import LLMRunFrame
+from pipecat.observers.user_bot_latency_observer import UserBotLatencyObserver
 from pipecat.pipeline.pipeline import Pipeline
 from pipecat.pipeline.runner import PipelineRunner
 from pipecat.pipeline.task import PipelineParams, PipelineTask
@@ -48,7 +49,7 @@ HERMES_BASE_URL = os.getenv(
 HERMES_MODEL = os.getenv("HERMES_MODEL", "")
 HERMES_API_KEY = os.getenv("HERMES_API_KEY", "")
 
-WHISPER_MODEL = os.getenv("WHISPER_MODEL", "medium")
+WHISPER_MODEL = os.getenv("WHISPER_MODEL", "deepdml/faster-whisper-large-v3-turbo-ct2")
 WHISPER_COMPUTE_TYPE = os.getenv("WHISPER_COMPUTE_TYPE", "int8")
 
 PIPER_VOICE = os.getenv("PIPER_VOICE", "ru_RU-irina-medium")
@@ -179,12 +180,27 @@ async def run_bot(webrtc_connection):
         ]
     )
 
+    # Per-stage latency observer. Emits a per-turn breakdown of
+    # user-turn / STT / LLM / TTS TTFB so we can attribute end-to-end latency
+    # to a specific stage. Requires enable_metrics=True (set just below).
+    latency_observer = UserBotLatencyObserver()
+
+    @latency_observer.event_handler("on_latency_measured")
+    async def _on_latency_measured(observer, latency_seconds: float):
+        logger.info(f"latency: user->bot {latency_seconds:.3f}s")
+
+    @latency_observer.event_handler("on_latency_breakdown")
+    async def _on_latency_breakdown(observer, breakdown):
+        for label in breakdown.chronological_events():
+            logger.info(f"latency-breakdown: {label}")
+
     task = PipelineTask(
         pipeline,
         params=PipelineParams(
             enable_metrics=True,
             enable_usage_metrics=True,
         ),
+        observers=[latency_observer],
     )
 
     @transport.event_handler("on_client_connected")
@@ -208,6 +224,49 @@ async def run_bot(webrtc_connection):
 _handler = SmallWebRTCRequestHandler()
 
 
+def _prewarm_whisper(app: FastAPI) -> None:
+    """Load faster-whisper once at startup and run a tiny warmup transcribe.
+
+    The loaded WhisperModel is held on app.state for the process lifetime, so
+    the on-disk weights stay in the OS page cache and CTranslate2's library
+    state stays initialized. Per-connection WhisperSTTService instances still
+    construct their own WhisperModel, but with page-cache + JIT already warm
+    that construction is much faster than cold.
+    """
+    import numpy as np
+    from faster_whisper import WhisperModel
+
+    logger.info(f"warmup: loading whisper '{WHISPER_MODEL}' ({WHISPER_COMPUTE_TYPE})")
+    model = WhisperModel(WHISPER_MODEL, device="cpu", compute_type=WHISPER_COMPUTE_TYPE)
+    # 1s of silence -> exercises the decode path without producing real text.
+    silence = np.zeros(16000, dtype=np.float32)
+    segments, _ = model.transcribe(silence, language="ru", beam_size=1)
+    for _ in segments:
+        pass
+    app.state.whisper_model = model
+    logger.info("warmup: whisper ready")
+
+
+def _prewarm_piper(app: FastAPI) -> None:
+    """Load the configured Piper voice once at startup and run a tiny synth."""
+    from piper import PiperVoice
+    from piper.download_voices import download_voice
+
+    voice_path = PIPER_DOWNLOAD_DIR / f"{PIPER_VOICE}.onnx"
+    if not voice_path.exists():
+        logger.info(f"warmup: downloading piper voice '{PIPER_VOICE}'")
+        PIPER_DOWNLOAD_DIR.mkdir(parents=True, exist_ok=True)
+        download_voice(PIPER_VOICE, PIPER_DOWNLOAD_DIR)
+
+    logger.info(f"warmup: loading piper voice '{PIPER_VOICE}'")
+    voice = PiperVoice.load(voice_path)
+    # Synthesize one short phrase to exercise the ONNX inference path.
+    for _ in voice.synthesize("привет"):
+        pass
+    app.state.piper_voice = voice
+    logger.info("warmup: piper ready")
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     logger.info(
@@ -219,6 +278,20 @@ async def lifespan(app: FastAPI):
         logger.warning("HERMES_MODEL is empty — set it in the ConfigMap.")
     if not HERMES_API_KEY:
         logger.warning("HERMES_API_KEY is empty — set it via the ExternalSecret.")
+
+    # Warm up the heavy local models so the first WebRTC connection doesn't
+    # pay the cold-load cost (Whisper mmap + CTranslate2 JIT, Piper ONNX init).
+    # We hold the model handles on app.state for the process lifetime so the
+    # OS page cache and library state stay warm across connections.
+    try:
+        _prewarm_whisper(app)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(f"warmup: whisper preload skipped ({exc!r})")
+    try:
+        _prewarm_piper(app)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(f"warmup: piper preload skipped ({exc!r})")
+
     yield
     await _handler.close()
 

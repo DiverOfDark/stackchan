@@ -12,7 +12,7 @@ WebRTC TURN gateway.
 ```
  LAN browser ──HTTPS signaling──► Ingress ──► voice-assistant (FastAPI :7860)
             └──WebRTC media (UDP)──► STUNner TURN ──relay──► bot pod
- bot pod: Whisper medium INT8 · Silero VAD · Piper (ru) · OpenAI client ─► your LLM
+ bot pod: Whisper large-v3-turbo INT8 · Silero VAD · Piper (ru) · OpenAI client ─► your LLM
 ```
 
 No cloud STT/TTS/LLM. Everything in the hot path runs in the cluster.
@@ -23,7 +23,7 @@ No cloud STT/TTS/LLM. Everything in the hot path runs in the cluster.
 
 | | |
 |---|---|
-| **STT** | `faster-whisper` (`medium`, INT8, CPU) — Russian by default |
+| **STT** | `faster-whisper` (`large-v3-turbo`, INT8, CPU) — Russian by default |
 | **TTS** | Piper, in-process — Russian voice `ru_RU-irina-medium` by default |
 | **LLM** | `OpenAILLMService` against any OpenAI-compatible endpoint you run |
 | **VAD / barge-in** | Silero VAD via Pipecat (server-side, sub-300 ms interruptions) |
@@ -144,7 +144,9 @@ stunner:
 
 ```yaml
 whisper:
-  model: medium       # tiny | base | small | medium | large-v3
+  # Default is large-v3-turbo (fastest with strong Russian accuracy).
+  # Override with a smaller model if RAM/CPU is tight.
+  model: deepdml/faster-whisper-large-v3-turbo-ct2   # or: tiny | base | small | medium | large-v3
   computeType: int8
   ompThreads: 6
 
