@@ -7,6 +7,8 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
+#include "audio_io.h"
+
 static const char *TAG = "main";
 
 void app_main(void)
@@ -26,6 +28,9 @@ void app_main(void)
 
     size_t psram_bytes = esp_psram_get_size();
     ESP_LOGI(TAG, "psram=%u KB", (unsigned)(psram_bytes / 1024));
+
+    ESP_ERROR_CHECK(audio_io_init());
+    ESP_ERROR_CHECK(audio_io_start_loopback());
 
     while (1) {
         vTaskDelay(pdMS_TO_TICKS(10000));
