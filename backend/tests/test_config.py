@@ -53,3 +53,81 @@ def test_latency_observer_import_path_stable():
     # bot.py registers handlers for both events; they must exist.
     assert "on_latency_measured" in observer._event_handlers
     assert "on_latency_breakdown" in observer._event_handlers
+
+
+# ---------------------------------------------------------------------------
+# Narration instruction wiring (bot.py SYSTEM_PROMPT composition)
+# ---------------------------------------------------------------------------
+
+
+def test_narration_present_in_default_prompt(monkeypatch):
+    """Default SYSTEM_PROMPT must include the tool-narration instruction.
+
+    Why this matters: Hermes' agent loop adds seconds of tool-running latency
+    per turn. Without narration the user hears silence until the final answer;
+    with narration the model emits one short sentence before each tool call
+    that TTS speaks immediately. Regression here = silent voice during agent
+    work.
+    """
+    monkeypatch.delenv("SYSTEM_PROMPT", raising=False)
+    import bot
+
+    importlib.reload(bot)
+    assert bot._DEFAULT_SYSTEM_PROMPT in bot.SYSTEM_PROMPT
+    assert bot._NARRATION_INSTRUCTION in bot.SYSTEM_PROMPT
+    # Spot-check Russian content so a future "translate to English" mistake
+    # is loud in CI.
+    assert "Сейчас проверю погоду" in bot.SYSTEM_PROMPT
+
+
+def test_narration_always_appended_even_when_prompt_overridden(monkeypatch):
+    """The narration instruction is intentionally unconditional — even when an
+    operator overrides SYSTEM_PROMPT via env, narration is still appended.
+    Perceived-latency in voice is too important to leave up to whoever sets
+    the env var remembering to include it.
+    """
+    monkeypatch.setenv("SYSTEM_PROMPT", "Custom prompt only.")
+    import bot
+
+    importlib.reload(bot)
+    assert "Custom prompt only." in bot.SYSTEM_PROMPT
+    assert bot._NARRATION_INSTRUCTION in bot.SYSTEM_PROMPT
+
+
+# ---------------------------------------------------------------------------
+# Streaming completions are on (pipecat default)
+# ---------------------------------------------------------------------------
+
+
+def test_openai_llm_service_uses_streaming():
+    """Sanity check that pipecat's OpenAILLMService produces stream=True in
+    its chat-completion params. bot.py relies on this so Hermes' mid-turn
+    narration deltas reach TTS as they arrive.
+
+    If pipecat ever flips this default (or moves the knob), this test fails
+    loudly — better than discovering silence at runtime.
+    """
+    from pipecat.services.openai.llm import OpenAILLMService
+
+    llm = OpenAILLMService(
+        api_key="test",
+        base_url="http://example.invalid/v1",
+        settings=OpenAILLMService.Settings(model="hermes-agent"),
+    )
+
+    # Minimal OpenAILLMInvocationParams shape: just messages, no tools.
+    from pipecat.adapters.services.open_ai_adapter import OpenAILLMInvocationParams
+
+    invocation_params: OpenAILLMInvocationParams = {
+        "messages": [{"role": "user", "content": "hi"}],
+        "tools": [],
+        "tool_choice": None,
+    }
+    params = llm.build_chat_completion_params(invocation_params)
+
+    assert params.get("stream") is True, (
+        "OpenAILLMService must produce stream=True; otherwise narration "
+        "deltas can't reach TTS until the LLM finishes the whole turn"
+    )
+    # Usage chunk is required for the latency observer's TTFB metrics.
+    assert params.get("stream_options", {}).get("include_usage") is True

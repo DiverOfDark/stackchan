@@ -72,7 +72,27 @@ _DEFAULT_SYSTEM_PROMPT = (
     "разметку, списки, эмодзи или код — только обычные законченные "
     "предложения, которые человек произнёс бы вслух."
 )
-SYSTEM_PROMPT = os.getenv("SYSTEM_PROMPT", _DEFAULT_SYSTEM_PROMPT)
+
+# Tool-narration instruction: with Hermes-agent the assistant may run several
+# tools per turn, each adding seconds of wall-clock time. Asking the model to
+# announce what it's about to do in one short Russian sentence *before* each
+# tool call gives the streaming pipeline something to speak immediately, so
+# the user hears the bot within ~2s instead of waiting for the whole agent
+# loop. Probed against Hermes 2026-05-23 — narration arrives as standard
+# `content` deltas ahead of every `hermes.tool.progress` event.
+#
+# Always-on: the instruction is appended even when SYSTEM_PROMPT is overridden,
+# because perceived-latency in voice is too important to leave up to operators
+# remembering to include it.
+_NARRATION_INSTRUCTION = (
+    "Если для ответа нужно вызвать инструмент, сначала произнеси одно "
+    "короткое русское предложение о том, что собираешься сделать "
+    "(например «Сейчас проверю погоду» или «Подожди, смотрю в календаре»). "
+    "Не повторяйся в финальном ответе. Делай минимум вызовов инструментов."
+)
+SYSTEM_PROMPT = (
+    os.getenv("SYSTEM_PROMPT", _DEFAULT_SYSTEM_PROMPT) + " " + _NARRATION_INSTRUCTION
+)
 
 # Instruction used to make the assistant open the conversation on connect.
 GREETING = os.getenv(
@@ -144,7 +164,11 @@ async def run_bot(webrtc_connection):
         settings=WhisperSTTService.Settings(language=Language.RU),
     )
 
-    # LLM — Hermes via its OpenAI-compatible API. Token streaming is on by default.
+    # LLM — Hermes via its OpenAI-compatible API.
+    # Streaming is hardcoded on by pipecat (BaseOpenAILLMService._build_chat_completion_params
+    # always sets stream=True). Critical here: Hermes' agent loop emits narration
+    # text deltas between tool calls, and we want TTS to consume them as they arrive
+    # rather than waiting for the whole turn. See test_streaming_enabled().
     llm = OpenAILLMService(
         api_key=HERMES_API_KEY or "none",
         base_url=HERMES_BASE_URL,
