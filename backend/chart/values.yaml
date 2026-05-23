@@ -110,20 +110,24 @@ ingress:
     secretName: ""           # empty -> "<fullname>-tls"
 
 # ── Resources ────────────────────────────────────────────────────────────
+# Memory limits stay (OOM protection). CPU limits intentionally omitted:
+# CFS quota throttling on CPU limits can hurt tail latency even when nodes
+# have spare cores. CPU `requests` still govern proportional share under
+# contention. Add `cpu:` under limits if you really need a hard cap.
 resources:
   bot:
     requests:
-      cpu: "3"
+      cpu: "2"
       memory: 4Gi
     limits:
-      cpu: "6"
       memory: 8Gi
   initContainer:
+    # Init is short-lived and bursty (model download / decode). Let it use
+    # spare cores while it runs.
     requests:
       cpu: "500m"
       memory: 2Gi
     limits:
-      cpu: "4"
       memory: 6Gi
 
 # Extra env entries appended to the bot container.
