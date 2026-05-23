@@ -94,6 +94,32 @@ def test_narration_always_appended_even_when_prompt_overridden(monkeypatch):
     assert bot._NARRATION_INSTRUCTION in bot.SYSTEM_PROMPT
 
 
+def test_tts_formatting_instruction_present(monkeypatch):
+    """The TTS-formatting instruction must be in the default SYSTEM_PROMPT.
+
+    Piper synthesises text literally — without this instruction the model
+    emits "26°C" which becomes garbled audio. Spot-checks the most common
+    example phrasings so a translation/wording regression is loud.
+    """
+    monkeypatch.delenv("SYSTEM_PROMPT", raising=False)
+    import bot
+
+    importlib.reload(bot)
+    assert bot._TTS_FORMATTING_INSTRUCTION in bot.SYSTEM_PROMPT
+    # Specific examples that should survive any future re-wording.
+    assert "градусов Цельсия" in bot.SYSTEM_PROMPT
+    assert "процентов" in bot.SYSTEM_PROMPT
+
+
+def test_tts_formatting_appended_with_custom_prompt(monkeypatch):
+    """Like narration, the TTS-formatting instruction is unconditional."""
+    monkeypatch.setenv("SYSTEM_PROMPT", "Custom prompt only.")
+    import bot
+
+    importlib.reload(bot)
+    assert bot._TTS_FORMATTING_INSTRUCTION in bot.SYSTEM_PROMPT
+
+
 # ---------------------------------------------------------------------------
 # Streaming completions are on (pipecat default)
 # ---------------------------------------------------------------------------

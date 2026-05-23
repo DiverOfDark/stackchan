@@ -97,8 +97,28 @@ _NARRATION_INSTRUCTION = (
     "(например «Сейчас проверю погоду» или «Подожди, смотрю в календаре»). "
     "Не повторяйся в финальном ответе. Делай минимум вызовов инструментов."
 )
+
+# TTS-formatting instruction: Piper synthesises text literally — "26°C" becomes
+# "двадцать шесть цэ" or worse. Tell the model to spell out units, symbols and
+# common abbreviations as a human would say them aloud. Probed against Hermes
+# 2026-05-24 — "погода в Берлине" answer came back as "градуса Цельсия",
+# "километров в час", "процента", no raw symbols.
+_TTS_FORMATTING_INSTRUCTION = (
+    "Текст ответа будет озвучен синтезатором речи, поэтому пиши его так, "
+    "как человек произнёс бы его вслух. Все единицы измерения, символы и "
+    "сокращения раскрывай словами: «градусов Цельсия» вместо «°C», "
+    "«метров в секунду» вместо «м/с», «километров в час» вместо «км/ч», "
+    "«процентов» вместо «%», «евро» вместо «€», «долларов» вместо «$», "
+    "«то есть» вместо «т.е.», «и так далее» вместо «и т.д.». Время и даты "
+    "тоже произноси словами («половина третьего», «двадцать четвёртого мая»). "
+    "Не используй специальные символы, формулы или код."
+)
 SYSTEM_PROMPT = (
-    os.getenv("SYSTEM_PROMPT", _DEFAULT_SYSTEM_PROMPT) + " " + _NARRATION_INSTRUCTION
+    os.getenv("SYSTEM_PROMPT", _DEFAULT_SYSTEM_PROMPT)
+    + " "
+    + _NARRATION_INSTRUCTION
+    + " "
+    + _TTS_FORMATTING_INSTRUCTION
 )
 
 # Instruction used to make the assistant open the conversation on connect.
