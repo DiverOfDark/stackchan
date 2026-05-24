@@ -7,30 +7,51 @@
 #include "esp_peer.h"
 #include "esp_peer_default.h"
 #include "freertos/FreeRTOS.h"
+#include "freertos/stream_buffer.h"
 #include "freertos/task.h"
 #include "opus.h"
 
 #include "audio_io.h"
 #include "button.h"
+#include "leds.h"
 #include "pipecat_signaling.h"
 
 static const char *TAG = "webrtc";
 
 #define MAIN_LOOP_TASK_STACK   4096
 #define CAPTURE_TASK_STACK     8192
-#define CAPTURE_FRAMES_PER_PKT 320     // 20 ms @ 16 kHz — matches Opus VoIP framing
+#define PLAYBACK_TASK_STACK    8192
+#define FRAMES_PER_PKT         320     // 20 ms @ 16 kHz — matches Opus VoIP framing
 #define OPUS_MAX_PACKET_BYTES  600     // worst-case 20 ms @ 32 kbps + headroom
+#define OPUS_MAX_DECODED_BYTES (FRAMES_PER_PKT * 6 * sizeof(int16_t))  // 6× headroom for misframed packets
 #define OPUS_BITRATE_BPS       24000   // 24 kbps mono voice — comfortable margin
 #define OPUS_COMPLEXITY        5       // 0..10; 5 is the practical S3 sweet spot
+
+// Playback jitter buffer: 200 ms of mono int16 @ 16 kHz. Long enough to
+// absorb network bursts, short enough that barge-in feels responsive.
+#define PLAYBACK_BUFFER_BYTES  (16000 * 2 / 5)
+// Mark as "speaking" if a TTS frame arrived within this window.
+#define SPEAKING_HOLD_MS       400
+
+// Channel mapping of TTS playback inside the stereo I2S TX frame to XVF3800.
+// XMOS docs say AEC reference goes on the **left** channel of XVF3800's I2S
+// input; we keep this as a #define so flipping it on the bench is one line.
+#ifndef AEC_REF_TX_CHANNEL
+#define AEC_REF_TX_CHANNEL  0    // 0 = L, 1 = R
+#endif
 
 typedef struct {
     esp_peer_handle_t      peer;
     pipecat_signaling_t   *sig;
     OpusEncoder           *opus_enc;
+    OpusDecoder           *opus_dec;
+    StreamBufferHandle_t   playback_buf;
     TaskHandle_t           main_loop_task;
     TaskHandle_t           capture_task;
+    TaskHandle_t           playback_task;
     volatile bool          running;
     volatile bool          connected;
+    volatile TickType_t    last_rx_frame_tick;
     uint32_t               pts;        // monotonic frame timestamp
 } session_t;
 
@@ -43,11 +64,40 @@ static int on_state(esp_peer_state_t state, void *ctx)
     ESP_LOGI(TAG, "peer state = %d", (int)state);
     if (state == ESP_PEER_STATE_CONNECTED) {
         s_session.connected = true;
+        leds_set(LED_STATE_LISTENING);
     } else if (state == ESP_PEER_STATE_DISCONNECTED ||
                state == ESP_PEER_STATE_CLOSED ||
                state == ESP_PEER_STATE_CONNECT_FAILED) {
         s_session.connected = false;
+        leds_set(LED_STATE_CONNECTING);
     }
+    return 0;
+}
+
+// Inbound TTS audio from the backend. Decode Opus → mono int16 → push to
+// the jitter buffer. The dedicated playback task drains it to I2S.
+static int on_audio_data(esp_peer_audio_frame_t *frame, void *ctx)
+{
+    if (!frame || !frame->data || !s_session.opus_dec) return -1;
+
+    static int16_t pcm[FRAMES_PER_PKT * 6];   // headroom for any well-formed Opus packet
+    int decoded = opus_decode(s_session.opus_dec,
+                              frame->data, frame->size,
+                              pcm, sizeof(pcm) / sizeof(pcm[0]),
+                              /*decode_fec=*/0);
+    if (decoded <= 0) {
+        ESP_LOGW(TAG, "opus_decode err %d", decoded);
+        return -1;
+    }
+    size_t bytes = (size_t)decoded * sizeof(int16_t);
+    size_t sent  = xStreamBufferSend(s_session.playback_buf, pcm, bytes, 0);
+    if (sent < bytes) {
+        // Buffer full → drop the oldest by resetting. Network bursts can
+        // outpace I2S draining briefly; a clean drop avoids stair-stepping
+        // latency upward forever.
+        ESP_LOGW(TAG, "playback buffer full, dropped %u bytes", (unsigned)(bytes - sent));
+    }
+    s_session.last_rx_frame_tick = xTaskGetTickCount();
     return 0;
 }
 
@@ -113,8 +163,8 @@ static void capture_task(void *arg)
 {
     // Reads stereo 32-bit frames from XVF3800, downmixes to mono int16,
     // Opus-encodes 20 ms packets, hands them to esp_peer for SRTP transit.
-    static int32_t stereo[CAPTURE_FRAMES_PER_PKT * AUDIO_IO_CHANNELS];
-    static int16_t mono[CAPTURE_FRAMES_PER_PKT];
+    static int32_t stereo[FRAMES_PER_PKT * AUDIO_IO_CHANNELS];
+    static int16_t mono[FRAMES_PER_PKT];
     static uint8_t opus_buf[OPUS_MAX_PACKET_BYTES];
 
     while (s_session.running) {
@@ -122,7 +172,7 @@ static void capture_task(void *arg)
             vTaskDelay(pdMS_TO_TICKS(50));
             continue;
         }
-        if (audio_io_read(stereo, CAPTURE_FRAMES_PER_PKT) != ESP_OK) {
+        if (audio_io_read(stereo, FRAMES_PER_PKT) != ESP_OK) {
             continue;
         }
         if (button_is_muted()) {
@@ -130,11 +180,11 @@ static void capture_task(void *arg)
         }
         // Channel 0 of XVF3800 = processed mono audio. 32-bit MSB-aligned →
         // shift to int16. (XMOS conventionally outputs Q1.31; right-shift 16.)
-        for (size_t i = 0; i < CAPTURE_FRAMES_PER_PKT; ++i) {
+        for (size_t i = 0; i < FRAMES_PER_PKT; ++i) {
             mono[i] = (int16_t)(stereo[i * AUDIO_IO_CHANNELS] >> 16);
         }
 
-        int n = opus_encode(s_session.opus_enc, mono, CAPTURE_FRAMES_PER_PKT,
+        int n = opus_encode(s_session.opus_enc, mono, FRAMES_PER_PKT,
                             opus_buf, sizeof(opus_buf));
         if (n < 0) {
             ESP_LOGW(TAG, "opus_encode err %d", n);
@@ -148,7 +198,54 @@ static void capture_task(void *arg)
         if (esp_peer_send_audio(s_session.peer, &f) != 0) {
             ESP_LOGW(TAG, "send_audio dropped");
         }
-        s_session.pts += CAPTURE_FRAMES_PER_PKT;  // 16 kHz sample-count clock
+        s_session.pts += FRAMES_PER_PKT;  // 16 kHz sample-count clock
+    }
+    vTaskDelete(NULL);
+}
+
+// Drains the decoded-PCM jitter buffer into I2S TX. Always writes — when no
+// TTS audio is pending, writes silence so the I2S clock stays alive (and so
+// XVF3800's AEC reference channel sees a defined zero rather than DMA
+// garbage).
+static void playback_task(void *arg)
+{
+    static int16_t mono[FRAMES_PER_PKT];
+    static int32_t stereo[FRAMES_PER_PKT * AUDIO_IO_CHANNELS];
+
+    while (s_session.running) {
+        // Block for up to 50 ms waiting for decoded PCM; on timeout, write
+        // silence to keep the clock alive.
+        size_t want = sizeof(mono);
+        size_t got  = xStreamBufferReceive(s_session.playback_buf,
+                                           mono, want, pdMS_TO_TICKS(50));
+        size_t frames = got / sizeof(int16_t);
+        if (frames == 0) {
+            memset(mono, 0, sizeof(mono));
+            frames = FRAMES_PER_PKT;
+        } else if (frames < FRAMES_PER_PKT) {
+            // Pad the rest of the packet with silence rather than splitting it.
+            memset(mono + frames, 0, sizeof(mono) - got);
+            frames = FRAMES_PER_PKT;
+        }
+
+        // mono int16 → stereo int32 MSB-aligned. TTS goes on the AEC-ref
+        // channel; the other channel is silence (XVF3800 ignores it).
+        for (size_t i = 0; i < frames; ++i) {
+            int32_t sample = ((int32_t)mono[i]) << 16;
+            stereo[i * AUDIO_IO_CHANNELS + AEC_REF_TX_CHANNEL]       = sample;
+            stereo[i * AUDIO_IO_CHANNELS + (1 - AEC_REF_TX_CHANNEL)] = 0;
+        }
+        audio_io_write(stereo, frames);
+
+        // LED state follows recent receive activity.
+        TickType_t now = xTaskGetTickCount();
+        bool speaking = (now - s_session.last_rx_frame_tick) <
+                        pdMS_TO_TICKS(SPEAKING_HOLD_MS);
+        if (s_session.connected) {
+            leds_set(button_is_muted() ? LED_STATE_MUTED
+                     : speaking         ? LED_STATE_SPEAKING
+                                        : LED_STATE_LISTENING);
+        }
     }
     vTaskDelete(NULL);
 }
@@ -178,6 +275,26 @@ esp_err_t webrtc_session_start(const char *backend_url)
     opus_encoder_ctl(s_session.opus_enc, OPUS_SET_INBAND_FEC(1));
     opus_encoder_ctl(s_session.opus_enc, OPUS_SET_PACKET_LOSS_PERC(10));
 
+    s_session.opus_dec = opus_decoder_create(AUDIO_IO_SAMPLE_RATE, 1, &opus_err);
+    if (!s_session.opus_dec || opus_err != OPUS_OK) {
+        ESP_LOGE(TAG, "opus_decoder_create failed: %d", opus_err);
+        opus_encoder_destroy(s_session.opus_enc);
+        s_session.opus_enc = NULL;
+        pipecat_signaling_destroy(s_session.sig);
+        s_session.sig = NULL;
+        return ESP_ERR_NO_MEM;
+    }
+
+    s_session.playback_buf = xStreamBufferCreate(PLAYBACK_BUFFER_BYTES,
+                                                  sizeof(int16_t));
+    if (!s_session.playback_buf) {
+        ESP_LOGE(TAG, "playback buffer alloc failed");
+        opus_decoder_destroy(s_session.opus_dec); s_session.opus_dec = NULL;
+        opus_encoder_destroy(s_session.opus_enc); s_session.opus_enc = NULL;
+        pipecat_signaling_destroy(s_session.sig); s_session.sig = NULL;
+        return ESP_ERR_NO_MEM;
+    }
+
     // Self-signed cert generation is expensive; warm it up before opening
     // the first peer connection so the first call doesn't stall the event
     // loop for several seconds.
@@ -196,6 +313,7 @@ esp_err_t webrtc_session_start(const char *backend_url)
         .ice_trans_policy = ESP_PEER_ICE_TRANS_POLICY_ALL,
         .on_state         = on_state,
         .on_msg           = on_msg,
+        .on_audio_data    = on_audio_data,
     };
 
     int r = esp_peer_open(&cfg, esp_peer_get_default_impl(), &s_session.peer);
@@ -214,6 +332,9 @@ esp_err_t webrtc_session_start(const char *backend_url)
     xTaskCreatePinnedToCore(capture_task,   "rtc_cap",
                             CAPTURE_TASK_STACK, NULL, 8,
                             &s_session.capture_task, 1);
+    xTaskCreatePinnedToCore(playback_task,  "rtc_play",
+                            PLAYBACK_TASK_STACK, NULL, 8,
+                            &s_session.playback_task, 1);
 
     // Triggers offer generation; the resulting SDP arrives via on_msg.
     esp_peer_new_connection(s_session.peer);
@@ -232,6 +353,14 @@ void webrtc_session_stop(void)
         esp_peer_disconnect(s_session.peer);
         esp_peer_close(s_session.peer);
         s_session.peer = NULL;
+    }
+    if (s_session.playback_buf) {
+        vStreamBufferDelete(s_session.playback_buf);
+        s_session.playback_buf = NULL;
+    }
+    if (s_session.opus_dec) {
+        opus_decoder_destroy(s_session.opus_dec);
+        s_session.opus_dec = NULL;
     }
     if (s_session.opus_enc) {
         opus_encoder_destroy(s_session.opus_enc);
