@@ -141,6 +141,17 @@ GREETING = os.getenv(
     "GREETING",
     "Поприветствуй меня одним коротким предложением и спроси, чем можешь помочь.",
 )
+# Don't greet again if a client reconnects within this window. ICE/DTLS can
+# flap and pipecat tears down + recreates the pipeline on each disconnect;
+# without a cooldown the user hears "Привет, Кирилл" every 30s. 10 min
+# default — long enough that a fresh visit feels welcomed, short enough
+# that a deliberate device reboot after lunch still gets a greeting.
+GREETING_COOLDOWN_SECS = float(os.getenv("GREETING_COOLDOWN_SECS", "600"))
+# Wall-clock monotonic seconds at which the most recent greeting fired.
+# Process-global — fine for the single-device deployment we have today; if
+# we ever support multiple concurrent devices, key this by client identity
+# (remote IP or a token the device sends in the offer).
+_last_greeted_at: float = 0.0
 
 APP_DIR = Path(__file__).resolve().parent
 
@@ -333,6 +344,17 @@ async def run_bot(webrtc_connection):
 
     @transport.event_handler("on_client_connected")
     async def on_client_connected(transport, client):
+        global _last_greeted_at
+        import time
+        now = time.monotonic()
+        elapsed = now - _last_greeted_at
+        if elapsed < GREETING_COOLDOWN_SECS:
+            logger.info(
+                f"Client connected (pc_id={pc_id}) — skipping greeting "
+                f"({elapsed:.0f}s since last, cooldown {GREETING_COOLDOWN_SECS:.0f}s)"
+            )
+            return
+        _last_greeted_at = now
         logger.info(f"Client connected (pc_id={pc_id}) — sending greeting")
         context.add_message({"role": "user", "content": GREETING})
         await task.queue_frames([LLMRunFrame()])
