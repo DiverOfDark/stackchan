@@ -106,9 +106,26 @@ static void dtls_srtp_x509_digest(const mbedtls_x509_crt* crt, char* buf) {
   *(--buf) = '\0';
 }
 
-// Do not verify CA
+// Do not verify CA — WebRTC DTLS-SRTP validates the peer's identity
+// by matching the cert fingerprint against the SDP a=fingerprint:
+// line AFTER the handshake completes (see fingerprint check at the end
+// of dtls_srtp_handshake). The certificates exchanged during the
+// handshake are self-signed and unverifiable via any CA chain, so
+// mbedTLS's verification must always pass.
+//
+// PATCH(libpeer): upstream cleared only NOT_TRUSTED / CN_MISMATCH /
+// BAD_KEY flags. mbedTLS 3.6 sets additional flags (e.g.
+// MBEDTLS_X509_BADCERT_BAD_MD if the cert uses an ECDSA hash mbedtls
+// considers weak in its current config, MBEDTLS_X509_BADCERT_BAD_PK,
+// etc.) which the original mask did not clear. The any-non-zero flag
+// left over triggers a fatal alert at the end of cert verify, and
+// handshake_step converts that to MBEDTLS_ERR_SSL_INTERNAL_ERROR
+// (-0x6C00) via the pending-alert path. Clearing all flags
+// unconditionally is the correct posture for WebRTC: trust mbedTLS's
+// crypto-level parsing, defer identity to fingerprint matching.
 static int dtls_srtp_cert_verify(void* data, mbedtls_x509_crt* crt, int depth, uint32_t* flags) {
-  *flags &= ~(MBEDTLS_X509_BADCERT_NOT_TRUSTED | MBEDTLS_X509_BADCERT_CN_MISMATCH | MBEDTLS_X509_BADCERT_BAD_KEY);
+  (void)data; (void)crt; (void)depth;
+  *flags = 0;
   return 0;
 }
 
@@ -222,7 +239,16 @@ int dtls_srtp_init(DtlsSrtp* dtls_srtp, DtlsSrtpRole role, void* user_data) {
 
   mbedtls_ssl_conf_verify(&dtls_srtp->conf, dtls_srtp_cert_verify, NULL);
 
-  mbedtls_ssl_conf_authmode(&dtls_srtp->conf, MBEDTLS_SSL_VERIFY_REQUIRED);
+  /* PATCH(libpeer): VERIFY_OPTIONAL instead of VERIFY_REQUIRED.
+   * Both modes still request the peer's certificate (we need it for
+   * fingerprint matching post-handshake) but OPTIONAL doesn't abort
+   * if the cert chain doesn't validate to a trusted CA — which it
+   * never will, the peer cert is self-signed. With VERIFY_REQUIRED
+   * the verify callback's flag-clearing isn't enough on mbedTLS 3.6;
+   * something sets ssl->send_alert with INTERNAL_ERROR reason and
+   * the handshake bails at state 7 (CLIENT_CERTIFICATE) via the
+   * pending-alert path. VERIFY_OPTIONAL skips that final-fail. */
+  mbedtls_ssl_conf_authmode(&dtls_srtp->conf, MBEDTLS_SSL_VERIFY_OPTIONAL);
 
   mbedtls_ssl_conf_ca_chain(&dtls_srtp->conf, &dtls_srtp->cert, NULL);
 
