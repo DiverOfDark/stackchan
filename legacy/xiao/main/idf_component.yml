@@ -7,15 +7,25 @@ dependencies:
   # M3: cJSON for HTTP signaling request/response bodies. IDF 6.x dropped the
   # bundled `json` component; pull from the registry.
   espressif/cjson: "^1.7.18"
-  # M4+: WebRTC stack. We use the lower-level espressif/esp_peer directly
-  # rather than the esp_webrtc convenience wrapper. Rationale: esp_webrtc's
-  # in-monorepo `override_path` deps (tempotian/media_lib_sal, av_render) have
-  # incompatible esp_codec_dev pin ranges across versions, making it
-  # impractical to consume via Component Manager. esp_peer alone gives us the
-  # peer-connection lifecycle + Opus + DTLS-SRTP + ICE and lets us own the
-  # audio path completely — which we want anyway for the XVF3800 + AEC + wake
-  # word gating + format conversion glue.
-  espressif/esp_peer: "~1.4"
+  # M4+: WebRTC stack — `aconchillo/libpeer`, the open-source upstream of
+  # Espressif's `esp_peer`. We tried esp_peer 1.4.1 first; its closed-source
+  # `peer_connection.c` + libpeer_default.a binary fed a TURN Channel-Bind
+  # response to the mbedTLS DTLS server before the handshake was ready,
+  # causing UNEXPECTED_MESSAGE (-0x7700) and aiortc to time out client-side
+  # (esp-webrtc-solution#175-adjacent bug, opaque demux race). libpeer is
+  # what pipecat-esp32 (Pipecat's officially-supported ESP32 client) uses,
+  # has full source so we can patch any future bugs, and reuses our existing
+  # /api/offer signaling (without trickle ICE — libpeer gathers
+  # synchronously, emits one local SDP with all candidates inlined).
+  #
+  # NOT consumed via the Component Registry — `sepfy/libpeer` v0.0.3 is
+  # stale, and `aconchillo/libpeer` is GitHub-only. Pulled in as a git
+  # submodule at firmware/deps/libpeer and wrapped by a thin IDF component
+  # shim at firmware/components/libpeer/.
+  #
+  # SRTP support libpeer needs comes from sepfy/srtp (NOT espressif/esp_libsrtp
+  # — different API, esp_peer's transitive dep).
+  sepfy/srtp: "^2.0.4"
   # Opus encoder/decoder for the WebRTC audio path. esphome/micro-opus is a
   # direct libopus port with Xtensa DSP + PSRAM optimizations for ESP32-S3,
   # smaller than espressif/esp_audio_codec which bundles many codecs we don't
