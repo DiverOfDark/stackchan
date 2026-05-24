@@ -36,6 +36,7 @@ from pipecat.services.whisper.stt import WhisperSTTService
 from whisper_fast import FastWhisperSTTService
 from pipecat.transcriptions.language import Language
 from pipecat.transports.base_transport import TransportParams
+from pipecat.transports.smallwebrtc.connection import IceServer
 from pipecat.transports.smallwebrtc.request_handler import (
     SmallWebRTCPatchRequest,
     SmallWebRTCRequest,
@@ -288,7 +289,26 @@ async def run_bot(webrtc_connection):
 # --------------------------------------------------------------------------
 # HTTP — WebRTC signaling (/api/offer) + the browser test client
 # --------------------------------------------------------------------------
-_handler = SmallWebRTCRequestHandler()
+# Build the STUNner TURN entry that aiortc will use to gather its own relay
+# candidate. Without this, the backend's SDP answer only contains a host
+# candidate at the pod IP (10.244.x.x), which an external client (the
+# firmware on a LAN) cannot reach. With this set, aiortc allocates a TURN
+# session at STUNner and adds a relay candidate to the answer — the client
+# (already configured with the same TURN server via /ice-servers) then picks
+# the relay×relay pair through STUNner.
+_handler_ice_servers: list[IceServer] = []
+if STUNNER_TURN_URI and STUNNER_TURN_USERNAME:
+    _handler_ice_servers.append(
+        IceServer(
+            urls=STUNNER_TURN_URI,
+            username=STUNNER_TURN_USERNAME,
+            credential=STUNNER_TURN_PASSWORD,
+        )
+    )
+
+_handler = SmallWebRTCRequestHandler(
+    ice_servers=_handler_ice_servers or None,
+)
 
 # pc_id -> (context, task) for /api/text injection. Lets the browser test page
 # bypass STT by POSTing text directly; the LLM/TTS path runs as usual and the
