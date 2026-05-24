@@ -74,6 +74,12 @@ production — see `config.example.env`.
 
 ## Directory layout
 
+The firmware is undergoing a multi-phase refactor toward a layered C++17
+architecture (HAL / Transport / Domain / App). During the migration the
+legacy C source in `main/` still drives the runtime; new C++ classes land
+alongside in `components/pv_*/` and get swapped in module-by-module. See
+`host_test/README.md` for the unit-test runner for the Domain layer.
+
 ```
 firmware/
 ├── platformio.ini                 # PlatformIO + ESP-IDF config
@@ -81,8 +87,13 @@ firmware/
 ├── sdkconfig.defaults             # IDF kconfig (PSRAM, DTLS-SRTP, X.509, ...)
 ├── CMakeLists.txt                 # top-level IDF project
 ├── components/
-│   └── json/                      # shim that aliases espressif/cjson to
-│                                  # satisfy legacy esp_peer dependency
+│   ├── pv_domain/                 # pure C++17, no ESP-IDF deps — host-testable
+│   ├── pv_hal/                    # RAII wrappers around ESP-IDF C APIs
+│   ├── pv_transport/              # RAII wrappers around libpeer / opus / TFLM
+│   ├── pv_app/                    # orchestration: FreeRTOS tasks, session
+│   ├── libpeer/                   # vendored WebRTC stack (untouched)
+│   └── wake_word/                 # TFLite Micro wake-word component
+├── host_test/                     # Catch2 + CMake host-side test runner
 ├── main/
 │   ├── CMakeLists.txt
 │   ├── idf_component.yml          # managed component manifest
