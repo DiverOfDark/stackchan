@@ -7,15 +7,21 @@
 #
 # Everything (STT, LLM, TTS, VAD) runs locally — no cloud calls in the hot path.
 #
+<<<<<<< Updated upstream
 import logging
+=======
+import asyncio
+import json
+>>>>>>> Stashed changes
 import os
 import re
+import time
 from contextlib import asynccontextmanager
 from pathlib import Path
 
 import uvicorn
-from fastapi import BackgroundTasks, FastAPI
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi import BackgroundTasks, FastAPI, Request
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from loguru import logger
 from pydantic import BaseModel
 
@@ -34,8 +40,16 @@ logging.getLogger("aiortc").setLevel(logging.DEBUG)
 logging.getLogger("aioice").setLevel(logging.DEBUG)
 
 from pipecat.audio.vad.silero import SileroVADAnalyzer
-from pipecat.frames.frames import LLMRunFrame
+from pipecat.frames.frames import (
+    LLMFullResponseEndFrame,
+    LLMFullResponseStartFrame,
+    LLMRunFrame,
+    LLMTextFrame,
+    TranscriptionFrame,
+)
+from pipecat.observers.base_observer import BaseObserver, FramePushed
 from pipecat.observers.user_bot_latency_observer import UserBotLatencyObserver
+from pipecat.services.stt_service import STTService
 from pipecat.pipeline.pipeline import Pipeline
 from pipecat.pipeline.runner import PipelineRunner
 from pipecat.pipeline.task import PipelineParams, PipelineTask
@@ -328,18 +342,20 @@ async def run_bot(webrtc_connection):
         for label in breakdown.chronological_events():
             logger.info(f"latency-breakdown: {label}")
 
+    pc_id = webrtc_connection.pc_id
+    transcript_observer = TranscriptObserver(pc_id)
+
     task = PipelineTask(
         pipeline,
         params=PipelineParams(
             enable_metrics=True,
             enable_usage_metrics=True,
         ),
-        observers=[latency_observer],
+        observers=[latency_observer, transcript_observer],
     )
 
     # Register this session so /api/text can find it. Done before the
     # pipeline runs so the test client can POST as soon as it's connected.
-    pc_id = webrtc_connection.pc_id
     _active_sessions[pc_id] = (context, task)
 
     @transport.event_handler("on_client_connected")
@@ -384,6 +400,77 @@ _handler = SmallWebRTCRequestHandler()
 # audio comes back over the existing WebRTC connection. Populated by run_bot()
 # on connect, cleaned up on disconnect.
 _active_sessions: dict[str, tuple[LLMContext, PipelineTask]] = {}
+
+
+# --------------------------------------------------------------------------
+# Live transcript stream — SSE feed of every parsed user input + assistant
+# reply across all sessions. Drives the live-log panel on the test client.
+# --------------------------------------------------------------------------
+# Set of asyncio.Queue subscribers. Each /api/transcripts/stream connection
+# gets its own queue; transcript events are fan-out broadcast to all of them.
+# A bounded maxsize protects against a slow/dead subscriber backing up the
+# pipeline — overflow events are dropped for that subscriber only.
+_transcript_subscribers: set[asyncio.Queue] = set()
+_TRANSCRIPT_QUEUE_MAXSIZE = 256
+
+
+def broadcast_transcript(event: dict) -> None:
+    """Fan out a transcript event to every connected SSE subscriber.
+
+    Safe to call from any task — uses put_nowait, drops events on slow
+    consumers rather than blocking the pipeline.
+    """
+    event = {"ts": time.time(), **event}
+    dead = []
+    for q in _transcript_subscribers:
+        try:
+            q.put_nowait(event)
+        except asyncio.QueueFull:
+            # Subscriber is too slow — let it fall behind rather than
+            # stalling the producer. The browser will see a gap.
+            pass
+        except Exception:  # noqa: BLE001
+            dead.append(q)
+    for q in dead:
+        _transcript_subscribers.discard(q)
+
+
+class TranscriptObserver(BaseObserver):
+    """Pipeline observer that broadcasts parsed user + assistant text.
+
+    User side: a TranscriptionFrame emerging from any STTService is the
+    finalised STT result for one user turn — emit immediately.
+
+    Assistant side: the LLM streams tokens as LLMTextFrames between an
+    LLMFullResponseStartFrame and an LLMFullResponseEndFrame. We
+    accumulate the chunks and emit a single "assistant" event when the
+    response ends, so the live log shows one row per turn.
+    """
+
+    def __init__(self, pc_id: str):
+        super().__init__()
+        self._pc_id = pc_id
+        self._assistant_buffer: list[str] = []
+        self._in_response = False
+
+    async def on_push_frame(self, data: FramePushed):
+        frame = data.frame
+        if isinstance(frame, TranscriptionFrame) and isinstance(data.source, STTService):
+            text = (frame.text or "").strip()
+            if text:
+                broadcast_transcript({"pc_id": self._pc_id, "role": "user", "text": text})
+        elif isinstance(frame, LLMFullResponseStartFrame):
+            self._assistant_buffer = []
+            self._in_response = True
+        elif isinstance(frame, LLMTextFrame) and self._in_response:
+            if frame.text:
+                self._assistant_buffer.append(frame.text)
+        elif isinstance(frame, LLMFullResponseEndFrame):
+            self._in_response = False
+            text = "".join(self._assistant_buffer).strip()
+            self._assistant_buffer = []
+            if text:
+                broadcast_transcript({"pc_id": self._pc_id, "role": "assistant", "text": text})
 
 
 def _prewarm_whisper(app: FastAPI) -> None:
@@ -517,6 +604,11 @@ async def text_input(request: TextInputRequest):
 
     context, task = session
     logger.info(f"Injecting text into pc_id={request.pc_id}: {text!r}")
+    # Emit a "user" event manually — the LLMTextFrame chain still fires
+    # through the observer for the assistant reply, but the user side
+    # never passes through STT (which is what TranscriptObserver listens
+    # for) so we have to broadcast it ourselves.
+    broadcast_transcript({"pc_id": request.pc_id, "role": "user", "text": text, "via": "text"})
     context.add_message({"role": "user", "content": text})
     await task.queue_frames([LLMRunFrame()])
     return {"status": "ok"}
@@ -535,6 +627,42 @@ async def ice_servers():
             }
         )
     return JSONResponse({"iceServers": servers})
+
+
+@app.get("/api/transcripts/stream")
+async def transcripts_stream(request: Request):
+    """Server-Sent Events feed of every user / assistant transcript.
+
+    Each event is a JSON object: {"ts": float, "pc_id": str, "role":
+    "user"|"assistant", "text": str, "via"?: "text"}. The browser test
+    client subscribes here and prints them into the live log panel.
+    """
+    queue: asyncio.Queue = asyncio.Queue(maxsize=_TRANSCRIPT_QUEUE_MAXSIZE)
+    _transcript_subscribers.add(queue)
+    logger.info(f"transcript subscriber added ({len(_transcript_subscribers)} total)")
+
+    async def gen():
+        try:
+            # Tiny hello so the browser knows the channel is live even
+            # before any conversation happens.
+            yield f": connected at {time.time():.3f}\n\n"
+            while True:
+                if await request.is_disconnected():
+                    break
+                try:
+                    event = await asyncio.wait_for(queue.get(), timeout=15.0)
+                    yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
+                except asyncio.TimeoutError:
+                    # Keep-alive heartbeat so proxies don't close the
+                    # connection on idle.
+                    yield ": ping\n\n"
+        finally:
+            _transcript_subscribers.discard(queue)
+            logger.info(
+                f"transcript subscriber removed ({len(_transcript_subscribers)} remaining)"
+            )
+
+    return StreamingResponse(gen(), media_type="text/event-stream")
 
 
 @app.get("/health")

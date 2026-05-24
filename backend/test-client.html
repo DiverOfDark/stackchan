@@ -63,6 +63,33 @@
     color: #64748b; max-height: 130px; overflow-y: auto;
     background: #0b1120; border: 1px solid #1f2937; border-radius: 9px; padding: 10px;
   }
+  /* Live transcript log — every parsed user input + assistant reply, across all sessions. */
+  .transcripts-header {
+    margin: 22px 0 6px; text-align: left;
+    display: flex; align-items: baseline; gap: 8px;
+  }
+  .transcripts-header h2 {
+    margin: 0; font-size: 13px; font-weight: 600;
+    text-transform: uppercase; letter-spacing: 0.04em; color: #94a3b8;
+  }
+  .transcripts-header .live-dot {
+    display: inline-block; width: 8px; height: 8px; border-radius: 50%;
+    background: #64748b; transition: background 0.2s;
+  }
+  .transcripts-header .live-dot.connected { background: #22c55e; }
+  #transcripts {
+    text-align: left; font-size: 13px; line-height: 1.45;
+    max-height: 280px; overflow-y: auto;
+    background: #0b1120; border: 1px solid #1f2937; border-radius: 9px;
+    padding: 10px;
+  }
+  .tr-row { padding: 5px 0; border-bottom: 1px solid #111827; }
+  .tr-row:last-child { border-bottom: none; }
+  .tr-meta { display: block; font-size: 10px; color: #64748b; font-family: ui-monospace, monospace; }
+  .tr-role { font-weight: 600; }
+  .tr-role.user { color: #60a5fa; }
+  .tr-role.assistant { color: #f472b6; }
+  .tr-text { color: #e2e8f0; }
 </style>
 </head>
 <body>
@@ -77,6 +104,11 @@
   </div>
   <p class="status">Состояние: <b id="state">отключено</b></p>
   <div id="log"></div>
+  <div class="transcripts-header">
+    <h2>Транскрипт (все сессии)</h2>
+    <span class="live-dot" id="transcripts-dot" title="SSE статус"></span>
+  </div>
+  <div id="transcripts"></div>
   <audio id="audio" autoplay></audio>
 </div>
 <script>
@@ -236,6 +268,73 @@ textSendBtn.addEventListener("click", sendText);
 textInput.addEventListener("keydown", (e) => {
   if (e.key === "Enter") sendText();
 });
+
+// ---- Live transcript stream (SSE) -----------------------------------
+// One persistent connection per page load. Survives the WebRTC session
+// going up/down; reconnects with backoff if the server restarts.
+const transcriptsEl = document.getElementById("transcripts");
+const transcriptsDot = document.getElementById("transcripts-dot");
+let transcriptsES = null;
+let transcriptsBackoffMs = 1000;
+const MAX_TRANSCRIPT_ROWS = 200;
+
+function addTranscriptRow(ev) {
+  const dt = new Date(ev.ts * 1000);
+  const hh = String(dt.getHours()).padStart(2, "0");
+  const mm = String(dt.getMinutes()).padStart(2, "0");
+  const ss = String(dt.getSeconds()).padStart(2, "0");
+  const time = `${hh}:${mm}:${ss}`;
+  const pcShort = (ev.pc_id || "").split("-").pop().slice(0, 8) || "—";
+  const via = ev.via ? ` (${ev.via})` : "";
+
+  const row = document.createElement("div");
+  row.className = "tr-row";
+  const meta = document.createElement("span");
+  meta.className = "tr-meta";
+  meta.textContent = `${time} · pc=${pcShort}${via}`;
+  const body = document.createElement("span");
+  const role = document.createElement("span");
+  role.className = `tr-role ${ev.role}`;
+  role.textContent = ev.role === "user" ? "👤 " : "🤖 ";
+  const text = document.createElement("span");
+  text.className = "tr-text";
+  text.textContent = ev.text;
+  body.appendChild(role);
+  body.appendChild(text);
+  row.appendChild(meta);
+  row.appendChild(body);
+
+  transcriptsEl.appendChild(row);
+  while (transcriptsEl.children.length > MAX_TRANSCRIPT_ROWS) {
+    transcriptsEl.removeChild(transcriptsEl.firstChild);
+  }
+  transcriptsEl.scrollTop = transcriptsEl.scrollHeight;
+}
+
+function connectTranscripts() {
+  if (transcriptsES) transcriptsES.close();
+  transcriptsES = new EventSource("/api/transcripts/stream");
+  transcriptsES.onopen = () => {
+    transcriptsDot.classList.add("connected");
+    transcriptsBackoffMs = 1000;
+  };
+  transcriptsES.onmessage = (e) => {
+    try {
+      addTranscriptRow(JSON.parse(e.data));
+    } catch (err) {
+      console.warn("bad transcript event", e.data, err);
+    }
+  };
+  transcriptsES.onerror = () => {
+    transcriptsDot.classList.remove("connected");
+    transcriptsES.close();
+    transcriptsES = null;
+    setTimeout(connectTranscripts, transcriptsBackoffMs);
+    transcriptsBackoffMs = Math.min(transcriptsBackoffMs * 2, 15000);
+  };
+}
+
+connectTranscripts();
 </script>
 </body>
 </html>
