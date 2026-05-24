@@ -134,6 +134,14 @@ static void on_ice_state(PeerConnectionState state, void *userdata)
             ESP_LOGI(TAG, "session ready for media");
         }
         s_session.connected = true;
+        // Auto-arm uplink the moment DTLS comes up. The backend bot.py
+        // fires a GREETING immediately on connect ("Привет, Кирилл …"),
+        // so we need to be ready to stream the user's reply right away —
+        // waiting for a wake-word means a confused user-says-something,
+        // backend-times-out cycle. Wake word still functions as a UX
+        // accelerator (re-opens uplink after the 10 s idle timeout).
+        s_session.conv_active        = true;
+        s_session.last_activity_tick = xTaskGetTickCount();
         leds_set(LED_STATE_LISTENING);
         break;
     case PEER_CONNECTION_FAILED:
