@@ -2,76 +2,145 @@
 
 ESP-IDF firmware for the Seeed **ReSpeaker XVF3800 + XIAO ESP32-S3** dev kit.
 Connects to the pipecat backend in `../app/` over WebRTC and acts as a hardware
-voice client (mic → STT → LLM → TTS → speaker, with on-chip AEC).
+voice client (mic → STT → LLM → TTS → speaker, with on-chip AEC and
+custom-trained Russian wake word).
 
-See `/var/home/diverofdark/.claude/plans/now-let-s-work-on-eager-pond.md` for the
-full architecture plan.
+Architecture plan: `/var/home/diverofdark/.claude/plans/now-let-s-work-on-eager-pond.md`.
 
 ## Status
 
-| Milestone | Description | Status |
-|---|---|---|
-| M0 | PlatformIO scaffold, boots and logs chip info | in progress |
-| M1 | I2S loopback through XVF3800 | todo |
-| M2 | Wi-Fi SoftAP provisioning | todo |
-| M3 | HTTP signaling adapter for `/api/offer` | todo |
-| M4 | One-way mic → backend | todo |
-| M5 | Bidirectional + AEC reference | todo |
-| M6a | Train Russian wake word (offline) | todo |
-| M6b | On-device wake word gating (microWakeWord + esp-tflite-micro) | todo |
-| M7 | LED ring + button polish | todo |
-| M8 | OTA + this README finalized | todo |
+| Milestone | Description | State | Hardware-verified? |
+|---|---|---|---|
+| M0 | PlatformIO scaffold | done | n/a |
+| M1 | I2S loopback through XVF3800 | done | **pending** — ear-test once hardware lands |
+| M2 | Wi-Fi SoftAP captive-portal provisioning | done | **pending** |
+| M3 | HTTP signaling adapter for `/api/offer` | done | **pending** |
+| M4 | One-way mic → backend | scaffold (Opus encoder TODO) | **pending** |
+| M5 | Bidirectional + AEC reference | not started | — |
+| M6a | Train Russian wake word offline | tooling done; user runs training | — |
+| M6b | On-device wake word gating | not started | — |
+| M7 | Mute button + LED state machine | done (LED I2C cmds stubbed) | **pending** |
+| M8 | OTA + this README | done | **pending** |
+| Backend prep | `ESP32_COMPAT` documented | done | n/a |
 
-## Build (PlatformIO)
+Hardware verification is a single user-side milestone: flash, listen, watch
+the backend logs. Each module logs enough state that bisection should be
+straightforward.
+
+## Build, flash, monitor
 
 ```bash
-# from repo root
 cd firmware
-
-# install PlatformIO if you don't have it:
-#   pipx install platformio   (or pip install --user platformio)
-
-pio run                            # build
-pio run --target upload            # flash over USB-C
-pio device monitor                 # serial console at 115200
+pio run                       # ~30 s incremental build
+pio run --target upload       # flash over USB-C
+pio device monitor            # 115200 baud serial console
 ```
 
-PlatformIO will fetch ESP-IDF and toolchain on first run. We pin IDF >= 5.3 via
-`platformio.ini`; if the stock `espressif32` platform falls behind, see the
-comment in that file for the pioarduino fork override.
+PlatformIO downloads ESP-IDF and the toolchain on first run. We pin IDF ≥ 5.3
+via `platformio.ini`; if the stock `espressif32` platform falls behind, see
+the comment in that file for the pioarduino fork override.
 
 ## Hardware
 
-- **Board**: Seeed ReSpeaker XVF3800 (4-mic linear array, AEC/AGC/beamforming on XMOS chip) with XIAO ESP32-S3 host.
-- **I2S pins** (fixed by carrier board): BCK=8, WS=7, TX=44, RX=43.
-- **I2C** to XVF3800 for runtime config: pins documented in M1 once wired.
-- **AEC reference**: TTS playback must travel through XVF3800 on the channel that XVF3800 treats as its AEC reference input (left of its I2S RX). The first M5 test confirms exact channel mapping.
+- **Board**: Seeed ReSpeaker XVF3800 (4-mic linear array, AEC/AGC/beamforming on XMOS chip) + XIAO ESP32-S3 host. Item page: <https://www.seeedstudio.com/ReSpeaker-XVF3800-4-Mic-Array-With-XIAO-ESP32S3-p-6489.html>.
+- **I2S pins** (fixed by carrier): BCK=8, WS=7, TX=44, RX=43. XVF3800 is I2S master.
+- **Audio format on the wire**: 16 kHz, stereo, 32-bit Philips standard.
+- **I2C** to XVF3800 for runtime config: pins documented in `xvf3800.c` once that wires in (M5/M7 follow-up).
+- **AEC reference**: TTS playback travels through XVF3800 on the channel it treats as AEC ref (left of XVF3800's I2S input). First M5 hardware test confirms exact channel mapping.
 
-## Provisioning (after M2 lands)
+## First-time provisioning
 
-On first boot the device exposes a Wi-Fi AP named `pipecat-voice-XXXX`.
-Connect, open `http://192.168.4.1/`, enter Wi-Fi SSID + password + backend URL
-(e.g. `https://your.backend.example/api/offer`). Credentials persist in NVS;
-long-press the user button to wipe and re-provision.
+On first boot the device exposes a Wi-Fi AP named `pipecat-voice-XXXX` (last
+2 bytes of the STA MAC, hex). Connect from a phone/laptop:
+
+1. Join the open AP.
+2. Open `http://192.168.4.1/`.
+3. Enter Wi-Fi SSID + password + backend URL (e.g. `https://your.backend.example`).
+4. Tap "Save & reboot". Device reconnects to the saved network and starts the
+   WebRTC session.
+
+If you typo the password and bricks itself into a reconnect loop, hold the
+BOOT button on the XIAO for 5 s — `button.c` wipes Wi-Fi creds from NVS and
+reboots into provisioning mode.
 
 ## Backend prerequisites
 
-The backend in `../app/` already includes `esp32_munge()` in `app/bot.py:136`
-that rewrites SDP answers for minimal embedded WebRTC stacks. Set
-`ESP32_COMPAT=true` in the backend environment so the answer is digestible by
-esp-webrtc-solution.
+Set `ESP32_COMPAT=true` in the backend env. This activates `esp32_munge()` in
+`app/bot.py:136` which trims sha-384/sha-512 fingerprints from the SDP answer
+(ESP32 mbedTLS does sha-256 only) and rewrites STUNner relay candidates as
+host candidates so the minimal embedded SDP parser can chew them. Browser
+clients in the same deployment may need re-testing if you flip this in
+production — see `config.example.env`.
 
 ## Directory layout
 
 ```
 firmware/
-├── platformio.ini        # PlatformIO + ESP-IDF config
-├── partitions.csv        # flash layout (single-app for M0..M7, OTA at M8)
-├── sdkconfig.defaults    # IDF kconfig defaults (PSRAM, flash size, …)
-├── CMakeLists.txt        # top-level IDF project
+├── platformio.ini                 # PlatformIO + ESP-IDF config
+├── partitions.csv                 # 8 MB flash, 2× 3 MB OTA slots + storage
+├── sdkconfig.defaults             # IDF kconfig (PSRAM, DTLS-SRTP, X.509, ...)
+├── CMakeLists.txt                 # top-level IDF project
+├── components/
+│   └── json/                      # shim that aliases espressif/cjson to
+│                                  # satisfy legacy esp_peer dependency
 ├── main/
 │   ├── CMakeLists.txt
-│   ├── idf_component.yml # managed component manifest (per-milestone)
-│   └── main.c            # app_main entry
-└── (tools/, components/, models/ added in later milestones)
+│   ├── idf_component.yml          # managed component manifest
+│   ├── main.c                     # app_main: wires every module in turn
+│   ├── audio_io.{c,h}             # M1 — I2S RX/TX + loopback task
+│   ├── wifi_provision.{c,h}       # M2 — STA-connect or SoftAP captive portal
+│   ├── captive_portal_index.html  # provisioning form (source of truth)
+│   ├── captive_portal_index_html.c# generated byte-array (regen via tools/embed_html.py)
+│   ├── pipecat_signaling.{c,h}    # M3 — POST/PATCH /api/offer over HTTPS
+│   ├── webrtc_session.{c,h}       # M4 — esp_peer + signaling + capture glue
+│   ├── button.{c,h}               # M7 — mute toggle + long-press wipe
+│   ├── leds.{c,h}                 # M7 — state-mapped LED ring API
+│   ├── ota.{c,h}                  # M8 — esp_https_ota wrapper
+│   └── models/
+│       └── wake_word_ru.tflite    # M6 — produced by tools/train_wake_word/train.py
+├── tools/
+│   ├── embed_html.py              # rebuild captive_portal_index_html.c from .html
+│   └── train_wake_word/           # Piper + microWakeWord training pipeline
+└── README.md                      # this file
 ```
+
+## OTA
+
+```c
+#include "ota.h"
+ota_check_and_update("https://your.host/firmware/firmware.bin");
+```
+
+`ota.c` uses `esp_https_ota` with the bundled public-CA cert bundle (so the
+URL just has to be on a TLS-terminated host with a real cert; no manual cert
+pinning). On success the new image is written to the inactive OTA slot,
+otadata flips, the device reboots into the new firmware. Failed downloads
+leave the running slot untouched — safe.
+
+There's no built-in trigger UI yet; you'd typically call this from a button
+combo, a backend-issued data-channel message, or a periodic check.
+
+## Troubleshooting
+
+**No log output on `pio device monitor`** — reset the board after starting the
+monitor; the XIAO ESP32-S3 sometimes reboots into USB DFU instead of CDC.
+Press the RESET button.
+
+**SoftAP doesn't appear** — wait 10 s after boot; the AP comes up after NVS is
+checked. Make sure `ESP_LOGI(wifi_prov, "SoftAP up: SSID=...")` showed up
+during boot.
+
+**`pio run` says component `media_lib_sal` not found** — the deps have drifted;
+update `main/idf_component.yml`. We pin `espressif/esp_peer ~1.4` rather than
+the full `esp_webrtc` wrapper precisely to avoid that dep tree.
+
+**TLS handshake to backend fails** — check `CONFIG_MBEDTLS_CERTIFICATE_BUNDLE`
+is still on in sdkconfig and that the backend cert is signed by a public CA
+in the IDF bundle. For self-signed backends, switch from
+`crt_bundle_attach = esp_crt_bundle_attach` to a pinned `cert_pem` in
+`pipecat_signaling.c`.
+
+**AEC isn't suppressing** — likely a channel-mapping mistake in the M5
+playback path. Confirm with `xvf3800_send_cmd(...AEC_ENABLE=0)`; if that
+makes self-transcription appear in backend logs, AEC was working but on the
+wrong channel.
