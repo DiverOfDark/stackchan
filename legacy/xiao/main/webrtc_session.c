@@ -58,10 +58,13 @@ static const char *TAG = "webrtc";
 #define SPEAKING_PCM_THRESHOLD 1000
 
 // Mic-side energy gate that drives the TALKING LED. The capture path
-// already applies an 18 dB software boost (>>13 instead of >>16), so a
-// quiet room sits around 50-200, normal speech peaks 3000-8000. 1500
-// is comfortably above ambient and below normal speech.
-#define MIC_ACTIVE_THRESHOLD     1500
+// applies an 18 dB software boost (>>13), so:
+//   true idle (quiet room)             peaks ~  500
+//   bot-TTS echo through AEC residual  peaks ~ 5000-9000
+//   user speech directly into device   peaks ~15000-25000
+// Pick 10000 so the AEC residual from the bot's own TTS playback can't
+// trip TALKING during the SPEAKING_HOLD_MS tail after a TTS chunk ends.
+#define MIC_ACTIVE_THRESHOLD    10000
 // How long after the last loud mic frame we keep showing TALKING.
 // Bridges natural sub-syllable silences without flickering.
 #define TALKING_HOLD_MS          600
@@ -480,8 +483,14 @@ static void playback_task(void *arg)
         TickType_t now = xTaskGetTickCount();
         bool speaking = (now - s_session.last_rx_frame_tick) <
                         pdMS_TO_TICKS(SPEAKING_HOLD_MS);
-        bool talking  = (now - s_session.last_mic_active_tick) <
-                        pdMS_TO_TICKS(TALKING_HOLD_MS);
+        // TALKING is suppressed while bot is speaking — even at 10k mic
+        // threshold the AEC residual from our own speaker output can
+        // sometimes clear it, and a brief "user talking" flash during the
+        // bot's reply would just be noise. Barge-in remains possible via
+        // the backend's Silero VAD, which sees the raw uplink directly.
+        bool talking  = !speaking &&
+                        (now - s_session.last_mic_active_tick) <
+                            pdMS_TO_TICKS(TALKING_HOLD_MS);
         bool thinking = !talking && !speaking &&
                         ((now - s_session.last_mic_active_tick) <
                             pdMS_TO_TICKS(TALKING_HOLD_MS + THINKING_MAX_MS));
