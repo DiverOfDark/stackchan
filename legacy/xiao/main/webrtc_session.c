@@ -23,8 +23,8 @@ static const char *TAG = "webrtc";
 #define CAPTURE_TASK_STACK     8192
 #define PLAYBACK_TASK_STACK    8192
 #define FRAMES_PER_PKT         320     // 20 ms @ 16 kHz — matches Opus VoIP framing
+#define PCM_BYTES_PER_PKT      (FRAMES_PER_PKT * sizeof(int16_t))
 #define OPUS_MAX_PACKET_BYTES  600     // worst-case 20 ms @ 32 kbps + headroom
-#define OPUS_MAX_DECODED_BYTES (FRAMES_PER_PKT * 6 * sizeof(int16_t))  // 6× headroom for misframed packets
 #define OPUS_BITRATE_BPS       24000   // 24 kbps mono voice — comfortable margin
 #define OPUS_COMPLEXITY        5       // 0..10; 5 is the practical S3 sweet spot
 
@@ -179,7 +179,13 @@ static void capture_task(void *arg)
             vTaskDelay(pdMS_TO_TICKS(50));
             continue;
         }
-        if (audio_io_read(stereo, FRAMES_PER_PKT) != ESP_OK) {
+        esp_err_t rd = audio_io_read(stereo, FRAMES_PER_PKT);
+        if (rd != ESP_OK) {
+            // Don't tight-loop on partial reads / I2S stalls (XVF3800 clock
+            // briefly pauses on config writes); 20 ms keeps us roughly aligned
+            // with the next DMA descriptor.
+            ESP_LOGW(TAG, "audio_io_read: %s", esp_err_to_name(rd));
+            vTaskDelay(pdMS_TO_TICKS(20));
             continue;
         }
         // Channel 0 of XVF3800 = processed mono audio. 32-bit MSB-aligned →
@@ -315,8 +321,11 @@ esp_err_t webrtc_session_start(const char *backend_url)
         return ESP_ERR_NO_MEM;
     }
 
+    // Trigger level = one full playback packet (640 bytes) — otherwise
+    // xStreamBufferReceive returns on the first 2 bytes and the playback
+    // task pads the rest with silence, producing audible clicking.
     s_session.playback_buf = xStreamBufferCreate(PLAYBACK_BUFFER_BYTES,
-                                                  sizeof(int16_t));
+                                                  PCM_BYTES_PER_PKT);
     if (!s_session.playback_buf) {
         ESP_LOGE(TAG, "playback buffer alloc failed");
         opus_decoder_destroy(s_session.opus_dec); s_session.opus_dec = NULL;
@@ -329,6 +338,25 @@ esp_err_t webrtc_session_start(const char *backend_url)
     // the first peer connection so the first call doesn't stall the event
     // loop for several seconds.
     esp_peer_pre_generate_cert();
+
+    // Without extra_cfg the default peer implementation falls back to
+    // its baked-in defaults (per esp_peer_default.h: 100 KB jitter buffer,
+    // 400 KB send pool, 256-slot send queue, 16 max ICE candidates) which
+    // blow the heap once Wi-Fi + DTLS are also loaded. Scale down for our
+    // audio-only short-burst use case.
+    static esp_peer_default_cfg_t peer_default_cfg = {
+        .agent_recv_timeout = 100,
+        .data_ch_cfg = {
+            .recv_cache_size = 4096,    // we don't use data channels
+            .send_cache_size = 4096,
+        },
+        .rtp_cfg = {
+            .audio_recv_jitter = { .cache_size = 16 * 1024 },  // ~500 ms @ 24 kbps Opus
+            .send_pool_size    = 16 * 1024,
+            .send_queue_num    = 32,
+        },
+        .max_candidates    = 8,
+    };
 
     esp_peer_cfg_t cfg = {
         .role             = ESP_PEER_ROLE_CONTROLLING,
@@ -344,6 +372,8 @@ esp_err_t webrtc_session_start(const char *backend_url)
         .on_state         = on_state,
         .on_msg           = on_msg,
         .on_audio_data    = on_audio_data,
+        .extra_cfg        = &peer_default_cfg,
+        .extra_size       = sizeof(peer_default_cfg),
     };
 
     int r = esp_peer_open(&cfg, esp_peer_get_default_impl(), &s_session.peer);

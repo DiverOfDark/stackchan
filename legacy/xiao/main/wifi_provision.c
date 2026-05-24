@@ -33,6 +33,7 @@ static wifi_provision_state_t s_state         = WIFI_PROV_STATE_BOOT;
 static char                   s_backend_url[MAX_BACKEND_URL_LEN] = {0};
 static EventGroupHandle_t     s_wifi_events   = NULL;
 static httpd_handle_t         s_http_server   = NULL;
+static esp_netif_t           *s_sta_netif     = NULL;
 static int                    s_connect_tries = 0;
 
 #define WIFI_EVENT_BIT_CONNECTED BIT0
@@ -70,6 +71,10 @@ static esp_err_t nvs_save_credentials(const char *ssid, const char *psk, const c
     nvs_handle_t h;
     esp_err_t err = nvs_open(NVS_NAMESPACE, NVS_READWRITE, &h);
     if (err != ESP_OK) return err;
+    // Wipe first so a partial save (e.g. SSID OK then backend fails) doesn't
+    // strand stale credentials that look loadable but point at the wrong
+    // network.
+    nvs_erase_all(h);
     err = nvs_set_str(h, NVS_KEY_SSID, ssid);
     if (err == ESP_OK) err = nvs_set_str(h, NVS_KEY_PSK, psk);
     if (err == ESP_OK) err = nvs_set_str(h, NVS_KEY_BACKEND, backend);
@@ -96,6 +101,10 @@ static void wifi_event_handler(void *arg, esp_event_base_t base,
     } else if (base == IP_EVENT && event_id == IP_EVENT_STA_GOT_IP) {
         ip_event_got_ip_t *evt = (ip_event_got_ip_t *)event_data;
         ESP_LOGI(TAG, "got ip " IPSTR, IP2STR(&evt->ip_info.ip));
+        // Reset so a later transient disconnect (which fires
+        // STA_DISCONNECTED → connect retry loop) doesn't carry over the
+        // pre-association attempt count and immediately declare failure.
+        s_connect_tries = 0;
         s_state = WIFI_PROV_STATE_CONNECTED;
         xEventGroupSetBits(s_wifi_events, WIFI_EVENT_BIT_CONNECTED);
     }
@@ -103,7 +112,7 @@ static void wifi_event_handler(void *arg, esp_event_base_t base,
 
 static esp_err_t wifi_sta_connect(const char *ssid, const char *psk)
 {
-    esp_netif_create_default_wifi_sta();
+    s_sta_netif = esp_netif_create_default_wifi_sta();
     wifi_init_config_t init_cfg = WIFI_INIT_CONFIG_DEFAULT();
     ESP_ERROR_CHECK(esp_wifi_init(&init_cfg));
     ESP_ERROR_CHECK(esp_event_handler_register(WIFI_EVENT, ESP_EVENT_ANY_ID,
@@ -296,8 +305,19 @@ esp_err_t wifi_provision_start(void)
             nvs_commit(h);
             nvs_close(h);
         }
+        // Tear down the STA stack cleanly. Without these, the wifi handlers
+        // stay bound to s_wifi_events and fire on SoftAP events too, and
+        // the STA netif lingers as a phantom interface.
+        esp_event_handler_unregister(WIFI_EVENT, ESP_EVENT_ANY_ID,
+                                     &wifi_event_handler);
+        esp_event_handler_unregister(IP_EVENT, IP_EVENT_STA_GOT_IP,
+                                     &wifi_event_handler);
         esp_wifi_stop();
         esp_wifi_deinit();
+        if (s_sta_netif) {
+            esp_netif_destroy_default_wifi(s_sta_netif);
+            s_sta_netif = NULL;
+        }
     } else {
         ESP_LOGI(TAG, "no saved credentials; entering provisioning mode");
     }
