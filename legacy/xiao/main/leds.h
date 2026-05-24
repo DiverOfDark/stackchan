@@ -16,9 +16,11 @@ typedef enum {
     LED_STATE_PROVISIONING,    // SoftAP up, waiting for credentials
     LED_STATE_CONNECTING,      // STA-connecting or signaling handshake
     LED_STATE_NEGOTIATING,     // WebRTC peer past signaling, ICE/DTLS in progress
-    LED_STATE_LISTENING,       // session live, waiting for wake-word / speech
+    LED_STATE_LISTENING,       // session live, waiting for the user to start
+    LED_STATE_TALKING,         // local-mic energy → user is speaking now
+    LED_STATE_THINKING,        // user just stopped, backend STT/LLM/TTS in flight
     LED_STATE_WAKE_ACK,        // brief flash on wake-word detected
-    LED_STATE_SPEAKING,        // TTS playback in progress
+    LED_STATE_SPEAKING,        // TTS playback in progress (inbound audio energy)
     LED_STATE_MUTED,           // mic muted by button
     LED_STATE_ERROR,
 } led_state_t;

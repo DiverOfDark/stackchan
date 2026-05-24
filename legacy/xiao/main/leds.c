@@ -29,6 +29,8 @@ static const char *TAG = "leds";
 #define RGB_WHITE       0xFF, 0xFF, 0xFF
 #define RGB_PINK        0xFF, 0x30, 0x80     // distinct from RED (mute) at a glance
 #define RGB_PURPLE      0x80, 0x20, 0xFF     // negotiating — no green channel so the diffuser can't read "greenish" on this hw
+#define RGB_CYAN        0x00, 0xC0, 0xFF     // TALKING — distinct from LISTENING green
+// RGB_AMBER is defined above for the old NEGOTIATING state; reused for THINKING.
 
 // How long a WAKE_ACK flash holds before the regular state machine takes
 // over. Long enough to be visible against the LISTENING state right after.
@@ -45,6 +47,8 @@ static const char *state_name(led_state_t s)
     case LED_STATE_CONNECTING:    return "connecting";
     case LED_STATE_NEGOTIATING:   return "negotiating";
     case LED_STATE_LISTENING:     return "listening";
+    case LED_STATE_TALKING:       return "talking";
+    case LED_STATE_THINKING:      return "thinking";
     case LED_STATE_WAKE_ACK:      return "wake!";
     case LED_STATE_SPEAKING:      return "speaking";
     case LED_STATE_MUTED:         return "muted";
@@ -105,6 +109,20 @@ void leds_set(led_state_t s)
     case LED_STATE_LISTENING:
         xvf3800_set_led_color(RGB_GREEN);
         xvf3800_set_led_effect(EFFECT_SOLID);
+        break;
+    case LED_STATE_TALKING:
+        // Cyan solid while the user is speaking — distinct enough from
+        // LISTENING green that "I see you speaking" is unambiguous, but
+        // similar enough in hue that it doesn't feel like an error state.
+        xvf3800_set_led_color(RGB_CYAN);
+        xvf3800_set_led_effect(EFFECT_SOLID);
+        break;
+    case LED_STATE_THINKING:
+        // Amber breath while the backend round-trip is in flight. Slow
+        // breath conveys "working" without being urgent.
+        xvf3800_set_led_color(RGB_AMBER);
+        xvf3800_set_led_speed(0x40);
+        xvf3800_set_led_effect(EFFECT_BREATH);
         break;
     case LED_STATE_WAKE_ACK:
         // Bright white flash, held for WAKE_ACK_HOLD_MS so the playback

@@ -56,6 +56,19 @@ static const char *TAG = "webrtc";
 // Set well above any comfort-noise or codec artefact so a quiet room
 // stays in LISTENING reliably.
 #define SPEAKING_PCM_THRESHOLD 1000
+
+// Mic-side energy gate that drives the TALKING LED. The capture path
+// already applies an 18 dB software boost (>>13 instead of >>16), so a
+// quiet room sits around 50-200, normal speech peaks 3000-8000. 1500
+// is comfortably above ambient and below normal speech.
+#define MIC_ACTIVE_THRESHOLD     1500
+// How long after the last loud mic frame we keep showing TALKING.
+// Bridges natural sub-syllable silences without flickering.
+#define TALKING_HOLD_MS          600
+// After TALKING releases, we show THINKING for up to this long while
+// waiting for backend TTS to start arriving. If TTS lands sooner the
+// SPEAKING latch takes priority and pre-empts THINKING.
+#define THINKING_MAX_MS          5000
 // End the conversation if no wake event AND no inbound TTS for this long.
 #define SESSION_IDLE_TIMEOUT_MS  10000
 
@@ -86,6 +99,11 @@ typedef struct {
     volatile bool          conv_active;     // currently in a wake-triggered conversation
     volatile TickType_t    last_rx_frame_tick;
     volatile TickType_t    last_activity_tick;  // wake event or inbound TTS
+    // Last tick at which the local mic peak crossed MIC_ACTIVE_THRESHOLD.
+    // Drives the LED_STATE_TALKING ↔ LED_STATE_THINKING transitions —
+    // device-side approximation of "user is currently speaking" without
+    // waiting for the backend's Silero VAD to weigh in.
+    volatile TickType_t    last_mic_active_tick;
     // 0 = no retry pending; nonzero = tick at which main_loop_task should
     // tear down the failed PC and recreate it. libpeer doesn't have an
     // esp_peer-style new_connection-on-existing-handle path — every retry
@@ -349,11 +367,17 @@ static void capture_task(void *arg)
         // (peaks ~5% of dynamic range during speech). Shift fewer bits +
         // saturate to bring voice up into the 30-50% range microWakeWord
         // expects. >>13 is a 3-bit (18 dB) software boost.
+        int32_t mic_peak = 0;
         for (size_t i = 0; i < FRAMES_PER_PKT; ++i) {
             int32_t s = stereo[i * AUDIO_IO_CHANNELS] >> 13;
             if (s >  INT16_MAX) s = INT16_MAX;
             if (s <  INT16_MIN) s = INT16_MIN;
             mono[i] = (int16_t)s;
+            int32_t a = s < 0 ? -s : s;
+            if (a > mic_peak) mic_peak = a;
+        }
+        if (mic_peak >= MIC_ACTIVE_THRESHOLD) {
+            s_session.last_mic_active_tick = xTaskGetTickCount();
         }
 
         // Always feed the wake-word detector — needs to run even before
@@ -441,21 +465,32 @@ static void playback_task(void *arg)
         }
         audio_io_write(stereo, frames);
 
-        // LED state follows recent receive activity. Only push an update
-         // when it actually changes — the playback loop runs at the I2S
-         // packet rate (~20 ms) and naive per-iteration leds_set calls
-         // saturate the XVF3800 I2C bus with effect-change commands, each
-         // of which momentarily blanks the ring. The visible result was a
-         // "fast pulsing barely-powered" green/pink flicker. leds_set's
-         // own s_prev dedup catches identical calls, but the extra I2C
-         // round-trip-on-no-op (the speed/brightness writes inside the
-         // case bodies) was enough to be visible.
+        // LED state follows recent receive activity AND local mic energy.
+         // Only push an update when it changes — the playback loop runs at
+         // the I2S packet rate (~20 ms) and naive per-iteration leds_set
+         // calls saturate the XVF3800 I2C bus, momentarily blanking the
+         // ring on each effect-change command.
+         //
+         // Priority (highest first):
+         //   MUTED      — hardware switch trumps everything
+         //   SPEAKING   — inbound TTS energy in last 1.5 s
+         //   TALKING    — local mic energy in last 600 ms
+         //   THINKING   — mic just dropped, no TTS yet, within 5 s window
+         //   LISTENING  — default idle
         TickType_t now = xTaskGetTickCount();
         bool speaking = (now - s_session.last_rx_frame_tick) <
                         pdMS_TO_TICKS(SPEAKING_HOLD_MS);
+        bool talking  = (now - s_session.last_mic_active_tick) <
+                        pdMS_TO_TICKS(TALKING_HOLD_MS);
+        bool thinking = !talking && !speaking &&
+                        ((now - s_session.last_mic_active_tick) <
+                            pdMS_TO_TICKS(TALKING_HOLD_MS + THINKING_MAX_MS));
+
         if (s_session.connected) {
             led_state_t want = button_is_muted() ? LED_STATE_MUTED
                              : speaking          ? LED_STATE_SPEAKING
+                             : talking           ? LED_STATE_TALKING
+                             : thinking          ? LED_STATE_THINKING
                                                  : LED_STATE_LISTENING;
             static led_state_t last_pushed = LED_STATE_OFF;
             if (want != last_pushed) {
