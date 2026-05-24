@@ -21,5 +21,10 @@ dependencies:
   # smaller than espressif/esp_audio_codec which bundles many codecs we don't
   # need (AAC/G.711/etc.).
   esphome/micro-opus: "~0.3"
+  # M6b: TensorFlow Lite Micro for the wake-word model inference. Lives in
+  # the isolated `wake_word` component (firmware/components/wake_word/) so
+  # its C++ build flags don't pollute the C sources in main/. Declared here
+  # so the Component Manager fetches it on first build.
+  espressif/esp-tflite-micro: "^1.3.0"
   # M6b: TensorFlow Lite Micro for microWakeWord inference
   # espressif/esp-tflite-micro: "^1.3.0"

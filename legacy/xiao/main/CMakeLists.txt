@@ -22,6 +22,7 @@ idf_component_register(
         esp_netif
         esp_wifi
         nvs_flash
+        wake_word
     PRIV_REQUIRES
         espressif__cjson
         espressif__esp_peer

@@ -10,6 +10,7 @@
 #include "audio_io.h"
 #include "button.h"
 #include "leds.h"
+#include "wake_word.h"
 #include "webrtc_session.h"
 #include "wifi_provision.h"
 
@@ -36,6 +37,13 @@ void app_main(void)
     ESP_ERROR_CHECK(audio_io_init());
     ESP_ERROR_CHECK(button_init());
     ESP_ERROR_CHECK(leds_init());
+    // Load the wake-word model + allocate TFLM tensors. Logs the model's
+    // tensor shapes so M6b can confirm the trained .tflite was embedded
+    // correctly. Inference itself is gated on the micro_speech frontend
+    // landing — see wake_word.cc's process() TODO.
+    if (wake_word_init() != ESP_OK) {
+        ESP_LOGW(TAG, "wake_word_init failed; continuing without wake gating");
+    }
     ESP_ERROR_CHECK(wifi_provision_start());
 
     if (wifi_provision_state() == WIFI_PROV_STATE_CONNECTED) {
