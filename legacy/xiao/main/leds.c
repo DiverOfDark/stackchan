@@ -24,6 +24,7 @@ static const char *TAG = "leds";
 #define RGB_RED         0xFF, 0x20, 0x10
 #define RGB_AMBER       0xFF, 0x88, 0x00
 #define RGB_WHITE       0xFF, 0xFF, 0xFF
+#define RGB_PINK        0xFF, 0x30, 0x80     // distinct from RED (mute) at a glance
 
 // How long a WAKE_ACK flash holds before the regular state machine takes
 // over. Long enough to be visible against the LISTENING state right after.
@@ -111,7 +112,11 @@ void leds_set(led_state_t s)
         s_hold_until_us = now + WAKE_ACK_HOLD_MS * 1000;
         break;
     case LED_STATE_SPEAKING:
-        xvf3800_set_led_color(RGB_GREEN);
+        // Pink (not green) so the user can tell at a glance whether the
+        // bot is talking or just listening — same-color ring with only
+        // an effect difference was hard to read, especially since the
+        // chosen EFFECT_SPIN ID renders as a breath on our XMOS build.
+        xvf3800_set_led_color(RGB_PINK);
         xvf3800_set_led_speed(0xA0);            // fast spin while TTS plays
         xvf3800_set_led_effect(EFFECT_SPIN);
         break;
