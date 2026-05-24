@@ -3,11 +3,15 @@
 #include <stdio.h>
 #include <string.h>
 
+#include <time.h>
+
 #include "esp_event.h"
 #include "esp_http_server.h"
 #include "esp_log.h"
 #include "esp_mac.h"
 #include "esp_netif.h"
+#include "esp_netif_sntp.h"
+#include "esp_sntp.h"
 #include "esp_system.h"
 #include "esp_wifi.h"
 #include "freertos/FreeRTOS.h"
@@ -135,9 +139,42 @@ static esp_err_t wifi_sta_connect(const char *ssid, const char *psk)
         s_wifi_events, WIFI_EVENT_BIT_CONNECTED | WIFI_EVENT_BIT_FAILED,
         pdFALSE, pdFALSE, pdMS_TO_TICKS(30000));
 
-    if (bits & WIFI_EVENT_BIT_CONNECTED) return ESP_OK;
-    s_state = WIFI_PROV_STATE_FAILED;
-    return ESP_FAIL;
+    if (!(bits & WIFI_EVENT_BIT_CONNECTED)) {
+        s_state = WIFI_PROV_STATE_FAILED;
+        return ESP_FAIL;
+    }
+
+    // Wall-clock sync via SNTP. Without this the RTC starts at 1970, which
+    // makes every modern TLS cert look "not yet valid" — handshake aborts
+    // with MBEDTLS_ERR_X509_CERT_VERIFY_FAILED. Wait up to 5 s; if the
+    // network blocks NTP (some home routers / captive portals do), fall
+    // back to a hardcoded plausible "current year" so HTTPS still accepts
+    // the backend cert. SNTP will keep refining in the background once
+    // it does eventually respond.
+    esp_sntp_config_t sntp_cfg = ESP_NETIF_SNTP_DEFAULT_CONFIG("pool.ntp.org");
+    sntp_cfg.start = true;
+    esp_netif_sntp_init(&sntp_cfg);
+    if (esp_netif_sntp_sync_wait(pdMS_TO_TICKS(10000)) == ESP_OK) {
+        time_t now = time(NULL);
+        ESP_LOGI(TAG, "sntp synced: %s", ctime(&now));
+    } else {
+        // Use the firmware build time as the fallback. Advances automatically
+        // with every rebuild so we don't drift behind the backend cert's
+        // notBefore. The format of __DATE__ is "Mmm dd yyyy".
+        struct tm bt = {0};
+        char mon[4] = {0};
+        if (sscanf(__DATE__, "%3s %d %d", mon, &bt.tm_mday, &bt.tm_year) == 3) {
+            const char *mons = "JanFebMarAprMayJunJulAugSepOctNovDec";
+            const char *p = strstr(mons, mon);
+            bt.tm_mon  = p ? (p - mons) / 3 : 0;
+            bt.tm_year -= 1900;
+            time_t now = mktime(&bt);
+            struct timeval tv = { .tv_sec = now, .tv_usec = 0 };
+            settimeofday(&tv, NULL);
+            ESP_LOGW(TAG, "sntp sync timed out; using build-date fallback %s", __DATE__);
+        }
+    }
+    return ESP_OK;
 }
 
 // ---------- SoftAP captive portal path -----------------------------------

@@ -19,7 +19,10 @@
 
 static const char *TAG = "webrtc";
 
-#define MAIN_LOOP_TASK_STACK   4096
+// DTLS handshake + ICE state machine recurses deep — 4 KB is not enough,
+// hits the stack guard during the SRTP handshake. peer_demo example uses
+// 10 KB; matching that here.
+#define MAIN_LOOP_TASK_STACK   10240
 #define CAPTURE_TASK_STACK     8192
 #define PLAYBACK_TASK_STACK    8192
 #define FRAMES_PER_PKT         320     // 20 ms @ 16 kHz — matches Opus VoIP framing
@@ -67,7 +70,16 @@ static session_t s_session = {0};
 static int on_state(esp_peer_state_t state, void *ctx)
 {
     ESP_LOGI(TAG, "peer state = %d", (int)state);
-    if (state == ESP_PEER_STATE_CONNECTED) {
+    // Treat PAIRED (= ICE pair selected, DTLS in progress) and the later
+    // CONNECTED / DATA_CHANNEL_CONNECTED as equally "OK to send media".
+    // pipecat's peer_default stack sometimes skips state 6 (CONNECTED)
+    // when the data channel comes up first.
+    if (state == ESP_PEER_STATE_PAIRED ||
+        state == ESP_PEER_STATE_CONNECTED ||
+        state == ESP_PEER_STATE_DATA_CHANNEL_CONNECTED) {
+        if (!s_session.connected) {
+            ESP_LOGI(TAG, "session ready for media");
+        }
         s_session.connected = true;
         leds_set(LED_STATE_LISTENING);
     } else if (state == ESP_PEER_STATE_DISCONNECTED ||
@@ -175,10 +187,6 @@ static void capture_task(void *arg)
     static uint8_t opus_buf[OPUS_MAX_PACKET_BYTES];
 
     while (s_session.running) {
-        if (!s_session.connected) {
-            vTaskDelay(pdMS_TO_TICKS(50));
-            continue;
-        }
         esp_err_t rd = audio_io_read(stereo, FRAMES_PER_PKT);
         if (rd != ESP_OK) {
             // Don't tight-loop on partial reads / I2S stalls (XVF3800 clock
@@ -194,9 +202,11 @@ static void capture_task(void *arg)
             mono[i] = (int16_t)(stereo[i * AUDIO_IO_CHANNELS] >> 16);
         }
 
-        // Always feed the wake-word detector (cheap when no wake is present;
-        // mute switch doesn't suppress detection so an "Эй, Фемто!" still
-        // lands even with the mic-uplink muted).
+        // Always feed the wake-word detector — needs to run even before
+        // WebRTC is ready (so "Эй, Фемто!" said during the connect window
+        // queues the session to open as soon as media is up) and even with
+        // the mic muted (user can still wake the device with a hardware
+        // mute switch engaged).
         wake_word_process(mono, FRAMES_PER_PKT);
         if (wake_word_detected()) {
             if (!s_session.conv_active) {
@@ -214,9 +224,12 @@ static void capture_task(void *arg)
             s_session.conv_active = false;
         }
 
-        if (!s_session.conv_active || button_is_muted()) {
-            // Pre-wake or muted: do not transmit, but keep the wake detector
-            // hot so the next utterance can re-open the conversation.
+        if (!s_session.connected ||
+            !s_session.conv_active ||
+            button_is_muted()) {
+            // Not paired yet, pre-wake, or muted: do not transmit but keep
+            // the wake detector hot so the next utterance can open / re-open
+            // the conversation.
             continue;
         }
 

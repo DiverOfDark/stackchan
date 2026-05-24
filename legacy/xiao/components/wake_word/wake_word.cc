@@ -11,9 +11,11 @@
 #include "esp_timer.h"
 
 #include "audio_preprocessor_int8_model_data.h"
+#include "tensorflow/lite/micro/micro_allocator.h"
 #include "tensorflow/lite/micro/micro_interpreter.h"
 #include "tensorflow/lite/micro/micro_log.h"
 #include "tensorflow/lite/micro/micro_mutable_op_resolver.h"
+#include "tensorflow/lite/micro/micro_resource_variable.h"
 #include "tensorflow/lite/schema/schema_generated.h"
 
 // Embedded INT8 streaming MixedNet (baked from main/models/wake_word_ru.tflite
@@ -53,8 +55,15 @@ static const char *TAG = "wake_word";
 
 // 18 ops for the audio preprocessor model (must match micro_speech reference).
 using PreprocOpResolver = tflite::MicroMutableOpResolver<18>;
-// 14 ops for MixedNet streaming inference.
-using WakeWordOpResolver = tflite::MicroMutableOpResolver<14>;
+// Ops for MixedNet streaming inference. Confirmed against our trained
+// model with `tf.lite.Interpreter._get_ops_details()`: Conv2D /
+// DepthwiseConv2D / FullyConnected / Reshape / Logistic / Concatenation /
+// StridedSlice / SplitV / Quantize + the four stateful-variable ops
+// (CallOnce / VarHandle / AssignVariable / ReadVariable). The extras
+// (Add/Mul/Mean/Pad/Relu/Softmax) are unused by the current model but
+// stay registered as cheap insurance against a retraining run picking
+// them up.
+using WakeWordOpResolver = tflite::MicroMutableOpResolver<19>;
 
 static const tflite::Model        *s_preproc_model    = nullptr;
 static tflite::MicroInterpreter   *s_preproc          = nullptr;
@@ -65,6 +74,7 @@ static tflite::MicroInterpreter   *s_ww               = nullptr;
 static uint8_t                    *s_ww_arena         = nullptr;
 static TfLiteTensor               *s_ww_input         = nullptr;
 static TfLiteTensor               *s_ww_output        = nullptr;
+static size_t                      s_ww_input_slices  = 1;   // = input.bytes / 40, set at init
 
 // Rolling PCM window: at any time holds up to FRONTEND_WINDOW_SAMPLES of
 // recent audio. When it fills, we run one preprocessor pass and shift by
@@ -120,6 +130,13 @@ static TfLiteStatus register_ww_ops(WakeWordOpResolver &r)
     if (r.AddStridedSlice()   != kTfLiteOk) return kTfLiteError;
     if (r.AddConcatenation()  != kTfLiteOk) return kTfLiteError;
     if (r.AddQuantize()       != kTfLiteOk) return kTfLiteError;
+    if (r.AddSplitV()         != kTfLiteOk) return kTfLiteError;
+    // Streaming-state ops — microWakeWord uses TF resource variables for
+    // the per-layer ring buffers that carry temporal context across Invokes.
+    if (r.AddCallOnce()       != kTfLiteOk) return kTfLiteError;
+    if (r.AddVarHandle()      != kTfLiteOk) return kTfLiteError;
+    if (r.AddAssignVariable() != kTfLiteOk) return kTfLiteError;
+    if (r.AddReadVariable()   != kTfLiteOk) return kTfLiteError;
     return kTfLiteOk;
 }
 
@@ -154,8 +171,8 @@ extern "C" esp_err_t wake_word_init(void)
     }
 
     // Wake-word model.
-    s_ww_arena = (uint8_t *)heap_caps_malloc(
-        WW_ARENA_BYTES, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    s_ww_arena = (uint8_t *)heap_caps_aligned_alloc(
+        16, WW_ARENA_BYTES, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     if (!s_ww_arena) {
         ESP_LOGE(TAG, "ww arena alloc failed");
         return ESP_ERR_NO_MEM;
@@ -171,8 +188,25 @@ extern "C" esp_err_t wake_word_init(void)
         ESP_LOGE(TAG, "ww op registration failed");
         return ESP_FAIL;
     }
+    // microWakeWord's streaming graph uses TF resource variables for its
+    // per-layer ring buffers, so the interpreter needs a MicroResourceVariables
+    // pool — without it VAR_HANDLE op prepares fail at AllocateTensors. We
+    // build one via the explicit-allocator constructor.
+    constexpr int kNumResourceVariables = 24;   // microWakeWord MixedNet has ~16; pad
+    tflite::MicroAllocator *allocator =
+        tflite::MicroAllocator::Create(s_ww_arena, WW_ARENA_BYTES);
+    if (!allocator) {
+        ESP_LOGE(TAG, "ww MicroAllocator::Create failed");
+        return ESP_FAIL;
+    }
+    tflite::MicroResourceVariables *resource_vars =
+        tflite::MicroResourceVariables::Create(allocator, kNumResourceVariables);
+    if (!resource_vars) {
+        ESP_LOGE(TAG, "ww MicroResourceVariables::Create failed");
+        return ESP_FAIL;
+    }
     static tflite::MicroInterpreter ww_interp(
-        s_ww_model, ww_resolver, s_ww_arena, WW_ARENA_BYTES);
+        s_ww_model, ww_resolver, allocator, resource_vars);
     s_ww = &ww_interp;
     if (s_ww->AllocateTensors() != kTfLiteOk) {
         ESP_LOGE(TAG, "ww AllocateTensors failed");
@@ -180,6 +214,16 @@ extern "C" esp_err_t wake_word_init(void)
     }
     s_ww_input  = s_ww->input(0);
     s_ww_output = s_ww->output(0);
+    // microWakeWord's streaming MixedNet declares an input tensor sized for
+    // N consecutive 40-bin feature slices (typically 3 — i.e. a 30 ms
+    // context window per Invoke). Derive N at runtime so a retrain with a
+    // different stride / receptive field Just Works.
+    if (s_ww_input->bytes % FRONTEND_FEATURE_SIZE != 0) {
+        ESP_LOGE(TAG, "ww input %u bytes not multiple of feature size %d",
+                 (unsigned)s_ww_input->bytes, FRONTEND_FEATURE_SIZE);
+        return ESP_FAIL;
+    }
+    s_ww_input_slices = s_ww_input->bytes / FRONTEND_FEATURE_SIZE;
 
     ESP_LOGI(TAG, "preproc ready (arena=%u used)", (unsigned)s_preproc->arena_used_bytes());
     ESP_LOGI(TAG, "wake-word model: %zu bytes, in=%d×%d×%d×%d (%s) → out=%d (%s), arena=%u used",
@@ -237,14 +281,18 @@ static void update_window(float prob_float)
 
 static void run_wake_word(const int8_t *features_40)
 {
-    // The streaming MixedNet expects one feature slice per invocation; the
-    // input tensor size is whatever the trained .tflite declares. Copy as
-    // many bytes as fit, zero-pad the rest.
+    // Shift in the newest 40-feature slice from the right of the input
+    // tensor, dropping the oldest from the left. This keeps a sliding
+    // window of the last s_ww_input_slices feature frames inside the
+    // model's input — required because the streaming graph reads multiple
+    // adjacent slices per Invoke.
     int8_t *dst = tflite::GetTensorData<int8_t>(s_ww_input);
-    const size_t in_bytes = s_ww_input->bytes;
-    const size_t to_copy = std::min<size_t>(in_bytes, FRONTEND_FEATURE_SIZE);
-    memcpy(dst, features_40, to_copy);
-    if (in_bytes > to_copy) memset(dst + to_copy, 0, in_bytes - to_copy);
+    if (s_ww_input_slices > 1) {
+        memmove(dst, dst + FRONTEND_FEATURE_SIZE,
+                (s_ww_input_slices - 1) * FRONTEND_FEATURE_SIZE);
+    }
+    memcpy(dst + (s_ww_input_slices - 1) * FRONTEND_FEATURE_SIZE,
+           features_40, FRONTEND_FEATURE_SIZE);
 
     if (s_ww->Invoke() != kTfLiteOk) {
         ESP_LOGW(TAG, "ww Invoke failed");

@@ -21,6 +21,7 @@ idf_component_register(
         esp-tls
         esp_netif
         esp_wifi
+        lwip
         nvs_flash
         wake_word
     PRIV_REQUIRES
