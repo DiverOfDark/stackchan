@@ -11,7 +11,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 SRC  = ROOT / "main" / "models" / "wake_word_ru.tflite"
-DST  = ROOT / "main" / "wake_word_model_data.c"
+DST  = ROOT / "components" / "wake_word" / "wake_word_model_data.c"
 
 if not SRC.exists():
     raise SystemExit(f"missing: {SRC} — train the model first "
