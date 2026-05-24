@@ -24,8 +24,13 @@ static const char *TAG = "webrtc";
 // likely had its own stack); libpeer hits a guard overflow at 10 KB. 20
 // KB gives comfortable headroom for the deepest cert chain + SCTP init.
 #define MAIN_LOOP_TASK_STACK   20480
-#define CAPTURE_TASK_STACK     8192
-#define PLAYBACK_TASK_STACK    8192
+// Bumped from 8 K → 16 K. capture_task calls peer_connection_send_audio
+// → SRTP encrypt → mbedTLS AES-GCM → which combined with Opus encode
+// goes deeper than 8 K of stack. Overflow fires exactly when wake-word
+// detection flips conv_active=true and the first encoded packet runs
+// through SRTP — guard trip + reboot mid-conversation.
+#define CAPTURE_TASK_STACK     16384
+#define PLAYBACK_TASK_STACK    16384  // symmetric: same SRTP decrypt depth
 #define FRAMES_PER_PKT         320     // 20 ms @ 16 kHz — matches Opus VoIP framing
 #define PCM_BYTES_PER_PKT      (FRAMES_PER_PKT * sizeof(int16_t))
 #define OPUS_MAX_PACKET_BYTES  600     // worst-case 20 ms @ 32 kbps + headroom
