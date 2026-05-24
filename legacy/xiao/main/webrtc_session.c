@@ -47,11 +47,15 @@ static const char *TAG = "webrtc";
 // absorb network bursts, short enough that barge-in feels responsive.
 #define PLAYBACK_BUFFER_BYTES  (16000 * 2 / 5)
 // Mark as "speaking" if a non-silent TTS frame arrived within this window.
-#define SPEAKING_HOLD_MS       400
+// 1500 ms covers natural inter-word silences in TTS (commas, sentence
+// breaks) so we don't strobe the LED ring between SPEAKING and LISTENING
+// mid-sentence.
+#define SPEAKING_HOLD_MS       1500
 // PCM abs-max above which we treat a decoded frame as actual TTS audio
-// rather than aiortc/Opus comfort-noise (a few-byte payload that decodes
-// to near-silence). int16 amplitude — about -52 dBFS.
-#define SPEAKING_PCM_THRESHOLD 200
+// rather than aiortc/Opus comfort-noise. int16 amplitude — ≈ -30 dBFS.
+// Set well above any comfort-noise or codec artefact so a quiet room
+// stays in LISTENING reliably.
+#define SPEAKING_PCM_THRESHOLD 1000
 // End the conversation if no wake event AND no inbound TTS for this long.
 #define SESSION_IDLE_TIMEOUT_MS  10000
 
@@ -429,14 +433,27 @@ static void playback_task(void *arg)
         }
         audio_io_write(stereo, frames);
 
-        // LED state follows recent receive activity.
+        // LED state follows recent receive activity. Only push an update
+         // when it actually changes — the playback loop runs at the I2S
+         // packet rate (~20 ms) and naive per-iteration leds_set calls
+         // saturate the XVF3800 I2C bus with effect-change commands, each
+         // of which momentarily blanks the ring. The visible result was a
+         // "fast pulsing barely-powered" green/pink flicker. leds_set's
+         // own s_prev dedup catches identical calls, but the extra I2C
+         // round-trip-on-no-op (the speed/brightness writes inside the
+         // case bodies) was enough to be visible.
         TickType_t now = xTaskGetTickCount();
         bool speaking = (now - s_session.last_rx_frame_tick) <
                         pdMS_TO_TICKS(SPEAKING_HOLD_MS);
         if (s_session.connected) {
-            leds_set(button_is_muted() ? LED_STATE_MUTED
-                     : speaking         ? LED_STATE_SPEAKING
-                                        : LED_STATE_LISTENING);
+            led_state_t want = button_is_muted() ? LED_STATE_MUTED
+                             : speaking          ? LED_STATE_SPEAKING
+                                                 : LED_STATE_LISTENING;
+            static led_state_t last_pushed = LED_STATE_OFF;
+            if (want != last_pushed) {
+                leds_set(want);
+                last_pushed = want;
+            }
         }
     }
     vTaskDelete(NULL);
