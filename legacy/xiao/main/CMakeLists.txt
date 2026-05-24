@@ -8,7 +8,6 @@ idf_component_register(
         "webrtc_session.c"
         "button.c"
         "leds.c"
-        "ota.c"
         "xvf3800.c"
     INCLUDE_DIRS
         "."
@@ -19,7 +18,6 @@ idf_component_register(
         esp_event
         esp_http_client
         esp_http_server
-        esp_https_ota
         esp-tls
         esp_netif
         esp_wifi
