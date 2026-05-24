@@ -1,5 +1,6 @@
 #include "webrtc_session.h"
 
+#include <stdatomic.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -123,7 +124,13 @@ typedef struct {
     // peer_connection_set_remote_description from that callback context
     // (it deadlocks the libpeer loop), so the callback parks the answer
     // here and main_loop_task feeds it in on the next tick.
-    char                  *pending_answer;
+    //
+    // Treated as an atomic char* — atomic_exchange on publish (so the
+    // previous pending value can be freed safely if main_loop_task
+    // hasn't consumed it yet) and atomic_exchange-with-NULL on consume.
+    // Without this, a renegotiate-during-teardown can double-free or
+    // lose the SDP between on_local_sdp and main_loop_task.
+    _Atomic(char *)        pending_answer;
 } session_t;
 
 #define RETRY_INTERVAL_MS   5000
@@ -205,8 +212,11 @@ static void on_local_sdp(char *sdp_text, void *userdata)
     }
     // Hand off to main_loop_task. The previous pending_answer should
     // have been consumed; if not, drop the old one (most recent wins).
-    char *old = s_session.pending_answer;
-    s_session.pending_answer = answer_sdp;
+    // atomic_exchange is the critical barrier — without it the read of
+    // `old` and the publish of `answer_sdp` are two separate accesses
+    // and main_loop_task can race in between, double-freeing or losing
+    // the SDP.
+    char *old = atomic_exchange(&s_session.pending_answer, answer_sdp);
     free(old);
 }
 
@@ -311,10 +321,11 @@ static void destroy_peer_connection(void)
         peer_connection_destroy(s_session.peer);
         s_session.peer = NULL;
     }
-    if (s_session.pending_answer) {
-        free(s_session.pending_answer);
-        s_session.pending_answer = NULL;
-    }
+    // Drain whatever is parked. atomic_exchange-with-NULL: we get
+    // exclusive ownership of any in-flight answer and the producer
+    // path is left holding nothing.
+    char *parked = atomic_exchange(&s_session.pending_answer, NULL);
+    free(parked);
 }
 
 // ---------- Worker tasks --------------------------------------------------
@@ -326,9 +337,17 @@ static void main_loop_task(void *arg)
 
         // Feed the SDP answer to libpeer on the loop task (not in the
         // onicecandidate callback context which holds libpeer's lock).
-        if (s_session.peer && s_session.pending_answer) {
-            char *answer = s_session.pending_answer;
-            s_session.pending_answer = NULL;
+        // atomic_exchange-with-NULL takes exclusive ownership so we own
+        // the lifetime of `answer` regardless of what on_local_sdp does
+        // next.
+        char *answer = atomic_exchange(&s_session.pending_answer, NULL);
+        if (answer && !s_session.peer) {
+            // Peer was torn down between the publish and this consume;
+            // drop the answer rather than leak it.
+            free(answer);
+            answer = NULL;
+        }
+        if (s_session.peer && answer) {
             peer_connection_set_remote_description(
                 s_session.peer, answer, SDP_TYPE_ANSWER);
             free(answer);
