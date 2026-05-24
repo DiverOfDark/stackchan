@@ -261,6 +261,17 @@ int dtls_srtp_init(DtlsSrtp* dtls_srtp, DtlsSrtpRole role, void* user_data) {
 
   mbedtls_ssl_conf_cert_req_ca_list(&dtls_srtp->conf, MBEDTLS_SSL_CERT_REQ_CA_LIST_DISABLED);
 
+  /* PATCH(libpeer): pin to (D)TLS 1.2. mbedTLS 3.6's default lets the
+   * server negotiate TLS 1.3, and its TLS 1.3 server step handler does
+   * not know about state SERVER_HELLO_VERIFY_REQUEST_SENT (a DTLS-1.2-
+   * only state introduced by the cookie exchange). The result is the
+   * TLS 1.3 step returns SSL_INTERNAL_ERROR (-0x6C00) the moment the
+   * state machine lands on state 17 after we send the HelloVerifyRequest
+   * to aiortc. aiortc speaks DTLS 1.2 anyway. Pinning both min and max
+   * forces the TLS 1.2 server step throughout the handshake. */
+  mbedtls_ssl_conf_min_tls_version(&dtls_srtp->conf, MBEDTLS_SSL_VERSION_TLS1_2);
+  mbedtls_ssl_conf_max_tls_version(&dtls_srtp->conf, MBEDTLS_SSL_VERSION_TLS1_2);
+
   int setup_ret = mbedtls_ssl_setup(&dtls_srtp->ssl, &dtls_srtp->conf);
   LOGI("mbedtls_ssl_setup = %d, conf endpoint = %d (0=client 1=server)",
        setup_ret, (int)dtls_srtp->conf.MBEDTLS_PRIVATE(endpoint));
@@ -459,32 +470,48 @@ static int dtls_srtp_do_handshake(DtlsSrtp* dtls_srtp) {
 }
 
 static int dtls_srtp_handshake_server(DtlsSrtp* dtls_srtp) {
+  /* PATCH(libpeer): mbedTLS 3.6 on ESP-IDF returns
+   * MBEDTLS_ERR_SSL_INTERNAL_ERROR (-0x6C00), NOT
+   * MBEDTLS_ERR_SSL_HELLO_VERIFY_REQUIRED (-0x6A80), at state
+   * SERVER_HELLO_VERIFY_REQUEST_SENT (17) — even though the canonical
+   * mbedtls source for that state explicitly returns
+   * HELLO_VERIFY_REQUIRED. The conversion happens in
+   * mbedtls_ssl_handshake_step's tail: when the server step returns
+   * HELLO_VERIFY_REQUIRED, ssl->send_alert is set somewhere along the
+   * stack, so handshake_step calls mbedtls_ssl_handle_pending_alert
+   * which sends a fatal alert and returns ssl->alert_reason (which is
+   * INTERNAL_ERROR in this code path).
+   *
+   * Upstream libpeer's cookie-retry loop checks only for
+   * HELLO_VERIFY_REQUIRED — accept INTERNAL_ERROR too when we're in
+   * the HVR-sent state. session_reset is required so mbedtls reads the
+   * cookie'd ClientHello as a fresh handshake. */
   int ret;
-
-  while (1) {
-    unsigned char client_ip[] = "test";
-
+  static const unsigned char client_ip[] = "esp32";
+  for (int attempt = 0; attempt < 4; ++attempt) {
     mbedtls_ssl_session_reset(&dtls_srtp->ssl);
-
-    mbedtls_ssl_set_client_transport_id(&dtls_srtp->ssl, client_ip, sizeof(client_ip));
-
+    mbedtls_ssl_set_client_transport_id(&dtls_srtp->ssl,
+                                        client_ip, sizeof(client_ip));
     ret = dtls_srtp_do_handshake(dtls_srtp);
 
-    if (ret == MBEDTLS_ERR_SSL_HELLO_VERIFY_REQUIRED) {
-      LOGD("DTLS hello verification requested");
-
-    } else if (ret != 0) {
-      LOGE("failed! mbedtls_ssl_handshake returned -0x%.4x", (unsigned int)-ret);
-
-      break;
-
-    } else {
-      break;
+    if (ret == MBEDTLS_ERR_SSL_HELLO_VERIFY_REQUIRED ||
+        (ret == MBEDTLS_ERR_SSL_INTERNAL_ERROR &&
+         dtls_srtp->ssl.MBEDTLS_PRIVATE(state) ==
+             MBEDTLS_SSL_SERVER_HELLO_VERIFY_REQUEST_SENT)) {
+      LOGD("DTLS HVR sent (attempt %d, ret=-0x%04x); resetting for cookie'd ClientHello",
+           attempt, (unsigned int)-ret);
+      continue;
     }
+    if (ret == 0) {
+      LOGD("DTLS server handshake done");
+    } else if (ret != MBEDTLS_ERR_SSL_WANT_READ &&
+               ret != MBEDTLS_ERR_SSL_WANT_WRITE) {
+      LOGE("DTLS server handshake failed: -0x%04x (state=%d)",
+           (unsigned int)-ret, (int)dtls_srtp->ssl.MBEDTLS_PRIVATE(state));
+    }
+    return ret;
   }
-
-  LOGD("DTLS server handshake done");
-
+  LOGE("DTLS server handshake exhausted HVR retries");
   return ret;
 }
 
