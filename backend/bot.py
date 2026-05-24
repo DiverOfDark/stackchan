@@ -7,6 +7,7 @@
 #
 # Everything (STT, LLM, TTS, VAD) runs locally — no cloud calls in the hot path.
 #
+import logging
 import os
 import re
 from contextlib import asynccontextmanager
@@ -17,6 +18,20 @@ from fastapi import BackgroundTasks, FastAPI
 from fastapi.responses import FileResponse, JSONResponse
 from loguru import logger
 from pydantic import BaseModel
+
+# aiortc logs DTLS failures via stdlib logging (e.g. "x DTLS handshake failed
+# (fingerprint mismatch)" / "x DTLS handshake failed (error <SSL.Error>)" —
+# the only place that tells you *why* a peer connection went straight to
+# failed without an obvious ICE error). pipecat uses loguru, which doesn't
+# forward stdlib logging by default, so those lines stay invisible. Wire up
+# a basic stdlib handler and crank aiortc's logger to DEBUG so the failure
+# reason ends up in pod logs alongside the loguru output.
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(name)s %(levelname)s %(message)s",
+)
+logging.getLogger("aiortc").setLevel(logging.DEBUG)
+logging.getLogger("aioice").setLevel(logging.DEBUG)
 
 from pipecat.audio.vad.silero import SileroVADAnalyzer
 from pipecat.frames.frames import LLMRunFrame
