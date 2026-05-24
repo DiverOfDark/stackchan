@@ -281,8 +281,14 @@ def write_config() -> Path:
             },
         ],
         "training_steps":         [10000],
-        "positive_class_weight":  [1],
-        "negative_class_weight":  [20],
+        # The microWakeWord notebook defaults (positive=1 / negative=20) and
+        # target_minimization=0.2 FAPh assume ~10k samples per class. With a
+        # custom small-corpus run (5-20 real recordings + a few hundred
+        # augmentations), the negative-class penalty is so dominant that
+        # best_weights selection picks the "always predict 0" checkpoint —
+        # zero FAPh by definition, but useless. Loosened for small corpora.
+        "positive_class_weight":  [2],
+        "negative_class_weight":  [3],
         "learning_rates":         [0.001],
         "batch_size":             128,
         "time_mask_max_size":     [5],
@@ -291,7 +297,7 @@ def write_config() -> Path:
         "freq_mask_count":        [2],
         "eval_step_interval":     500,
         "clip_duration_ms":       1500,
-        "target_minimization":    0.2,         # max 0.2 faph on validation_ambient
+        "target_minimization":    2.0,         # allow up to 2 false positives/hr for the sake of recall
         "minimization_metric":    "ambient_false_positives_per_hour",
         "maximization_metric":    "average_viable_recall",
     }
