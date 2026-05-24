@@ -60,8 +60,15 @@ typedef struct {
     volatile bool          conv_active;     // currently in a wake-triggered conversation
     volatile TickType_t    last_rx_frame_tick;
     volatile TickType_t    last_activity_tick;  // wake event or inbound TTS
+    // 0 = no retry pending; nonzero = tick at which main_loop_task should
+    // call esp_peer_new_connection again. Set when on_state reports
+    // CONNECT_FAILED / DISCONNECTED so a backend hiccup or ESP32_COMPAT
+    // flip recovers without rebooting the device.
+    volatile TickType_t    retry_at_tick;
     uint32_t               pts;        // monotonic frame timestamp
 } session_t;
+
+#define RETRY_INTERVAL_MS   5000
 
 static session_t s_session = {0};
 
@@ -99,6 +106,8 @@ static int on_state(esp_peer_state_t state, void *ctx)
     case ESP_PEER_STATE_CLOSED:
     case ESP_PEER_STATE_CONNECT_FAILED:
         s_session.connected = false;
+        s_session.retry_at_tick =
+            xTaskGetTickCount() + pdMS_TO_TICKS(RETRY_INTERVAL_MS);
         leds_set(LED_STATE_CONNECTING);
         break;
     default:
@@ -188,6 +197,16 @@ static void main_loop_task(void *arg)
 {
     while (s_session.running) {
         if (s_session.peer) esp_peer_main_loop(s_session.peer);
+        // Recover from a failed/dropped peer connection (most common cause:
+        // backend just redeployed, ESP32_COMPAT toggled, transient TLS
+        // hiccup). on_state armed retry_at_tick when the failure fired;
+        // we re-arm new_connection here once the cooldown elapsed.
+        if (s_session.peer && s_session.retry_at_tick &&
+            xTaskGetTickCount() >= s_session.retry_at_tick) {
+            ESP_LOGI(TAG, "retrying peer connection");
+            s_session.retry_at_tick = 0;
+            esp_peer_new_connection(s_session.peer);
+        }
         vTaskDelay(pdMS_TO_TICKS(10));
     }
     vTaskDelete(NULL);

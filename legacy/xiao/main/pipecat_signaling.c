@@ -166,6 +166,20 @@ esp_err_t pipecat_signaling_send_offer(pipecat_signaling_t *sig,
     }
     ESP_LOGI(TAG, "offer accepted, pc_id=%s sdp_len=%u",
              sig->pc_id, (unsigned)strlen(*out_remote_sdp));
+    // Dump the SDP answer in chunks so we can see whether esp32_munge ran
+    // (the answer should have host candidates only, not 10.244.x.x).
+    // ESP_LOG_BUFFER would split lines weirdly — chunked plain log is easier
+    // to read, even though it's a bit chatty for one transaction.
+    const char *s = *out_remote_sdp;
+    int line_no = 0;
+    while (*s && line_no < 60) {
+        const char *eol = strchr(s, '\n');
+        size_t len = eol ? (size_t)(eol - s) : strlen(s);
+        ESP_LOGI(TAG, "sdp: %.*s", (int)len, s);
+        if (!eol) break;
+        s = eol + 1;
+        ++line_no;
+    }
     return ESP_OK;
 }
 
