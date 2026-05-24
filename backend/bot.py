@@ -27,14 +27,22 @@ from pydantic import BaseModel
 # the only place that tells you *why* a peer connection went straight to
 # failed without an obvious ICE error). pipecat uses loguru, which doesn't
 # forward stdlib logging by default, so those lines stay invisible. Wire up
-# a basic stdlib handler and crank aiortc's logger to DEBUG so the failure
-# reason ends up in pod logs alongside the loguru output.
+# a basic stdlib handler so aiortc's WARNING / ERROR lines reach the pod
+# logs alongside loguru output.
+#
+# Default level is INFO across the board — keeps connection lifecycle and
+# DTLS failure messages, drops the per-packet RTP / ICE consent-check
+# spam that DEBUG produced (multiple lines per RTP packet, thousands per
+# minute, drowns out anything useful). RTCRtpReceiver/RTCRtpSender are
+# additionally pinned to WARNING because even their INFO level is noisy.
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s %(name)s %(levelname)s %(message)s",
 )
-logging.getLogger("aiortc").setLevel(logging.DEBUG)
-logging.getLogger("aioice").setLevel(logging.DEBUG)
+logging.getLogger("aiortc").setLevel(logging.INFO)
+logging.getLogger("aiortc.rtcrtpreceiver").setLevel(logging.WARNING)
+logging.getLogger("aiortc.rtcrtpsender").setLevel(logging.WARNING)
+logging.getLogger("aioice").setLevel(logging.INFO)
 
 from pipecat.audio.vad.silero import SileroVADAnalyzer
 from pipecat.frames.frames import (
