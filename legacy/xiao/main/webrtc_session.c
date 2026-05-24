@@ -57,14 +57,20 @@ static const char *TAG = "webrtc";
 // stays in LISTENING reliably.
 #define SPEAKING_PCM_THRESHOLD 1000
 
-// Mic-side energy gate that drives the TALKING LED. The capture path
-// applies an 18 dB software boost (>>13), so:
-//   true idle (quiet room)             peaks ~  500
-//   bot-TTS echo through AEC residual  peaks ~ 5000-9000
-//   user speech directly into device   peaks ~15000-25000
-// Pick 10000 so the AEC residual from the bot's own TTS playback can't
-// trip TALKING during the SPEAKING_HOLD_MS tail after a TTS chunk ends.
-#define MIC_ACTIVE_THRESHOLD    10000
+// Mic-side energy gate that drives the TALKING LED. Uses RMS, not peak,
+// because peak saturates on transient sounds the user isn't actually
+// making with their voice — typing on a nearby keyboard hits int16
+// peak=32767 even though the typing isn't anywhere near as loud as
+// speech to the device. RMS averages across the 20 ms frame so a few
+// sample-wide clicks don't dominate. Measured levels at the 18 dB
+// software boost (>>13 in capture_task):
+//   silent room                   rms ~  200-  500
+//   keyboard typing               rms ~ 1200- 2000
+//   bot-TTS echo (AEC residual)   rms ~ 2500- 4500
+//   user speaking into device     rms ~ 4000- 9000+
+// 4000 keeps typing and echo out while staying clearly under normal
+// speech.
+#define MIC_ACTIVE_THRESHOLD     4000
 // How long after the last loud mic frame we keep showing TALKING.
 // Bridges natural sub-syllable silences without flickering.
 #define TALKING_HOLD_MS          600
@@ -370,16 +376,26 @@ static void capture_task(void *arg)
         // (peaks ~5% of dynamic range during speech). Shift fewer bits +
         // saturate to bring voice up into the 30-50% range microWakeWord
         // expects. >>13 is a 3-bit (18 dB) software boost.
-        int32_t mic_peak = 0;
+        uint64_t mic_sumsq = 0;
         for (size_t i = 0; i < FRAMES_PER_PKT; ++i) {
             int32_t s = stereo[i * AUDIO_IO_CHANNELS] >> 13;
             if (s >  INT16_MAX) s = INT16_MAX;
             if (s <  INT16_MIN) s = INT16_MIN;
             mono[i] = (int16_t)s;
-            int32_t a = s < 0 ? -s : s;
-            if (a > mic_peak) mic_peak = a;
+            mic_sumsq += (uint64_t)(s * s);
         }
-        if (mic_peak >= MIC_ACTIVE_THRESHOLD) {
+        // sqrt(sum_of_squares / N). Integer sqrt via the same approach
+        // as the wake_word diag (Newton's method one iteration is enough
+        // for our LED gate; we don't need precision).
+        uint32_t mic_meansq = (uint32_t)(mic_sumsq / FRAMES_PER_PKT);
+        uint32_t mic_rms = 0;
+        uint32_t x = mic_meansq;
+        if (x > 0) {
+            uint32_t guess = x > 65536 ? 256 : 16;
+            for (int i = 0; i < 8; ++i) guess = (guess + x / guess) / 2;
+            mic_rms = guess;
+        }
+        if (mic_rms >= MIC_ACTIVE_THRESHOLD) {
             s_session.last_mic_active_tick = xTaskGetTickCount();
         }
 
