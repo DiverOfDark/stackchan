@@ -60,6 +60,11 @@ CONFIG_MBEDTLS_EXTERNAL_MEM_ALLOC=y
 # the SDP a=fingerprint: line, so we need the cert.
 CONFIG_MBEDTLS_SSL_KEEP_PEER_CERTIFICATE=y
 
+# Bump esphome/micro-opus pseudostack from 120 KB → 240 KB. The encoder
+# path (capture_task → opus_encode → SRTP-encrypt) overflows at 120 KB
+# inside celt/bands.c. PSRAM-backed allocation so no internal-RAM cost.
+CONFIG_OPUS_PSEUDOSTACK_SIZE=240000
+
 # mbedTLS debug callback — temporary, for diagnosing the -0x6c00 /
 # -0x7700 DTLS handshake failure with libpeer + STUNner. Verbose;
 # remove once DTLS is working.
