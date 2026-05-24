@@ -139,32 +139,30 @@ def esp32_munge(sdp: str) -> str:
     Two transforms:
 
       * drop sha-384/sha-512 fingerprints (ESP32 mbedTLS only does sha-256);
-      * for every ``a=candidate ... typ host`` line, emit it AGAIN with
-        ``typ host`` rewritten to ``typ relay``.
+      * relabel every ``a=candidate ... typ host`` line as ``typ relay``,
+        leaving the address unchanged.
 
-    The relay-duplicate trick exists because esp_peer's pair-selection logic
-    refuses to use its own local relay (STUNner-allocated TURN) candidate
-    unless the remote SDP advertises at least one ``typ relay`` candidate
-    — even under ICE transport policy ALL. When the backend offers only
-    its K8s pod IP as a host candidate, esp_peer only pairs
-    device_host × backend_host (the device's LAN IP can't route to a 10.244.x.x
-    pod IP, so ICE fails after ~10 s).
+    Why relabel (instead of keeping both): esp_peer's pair-selection logic
+    won't include its own local relay (STUNner TURN) candidate when the
+    remote SDP advertises only ``typ host`` candidates — empirically true
+    under ICE transport policy ALL too, not just RELAY. Worse, when both
+    types are present, esp_peer prefers the host pair, sticks with it
+    indefinitely retrying binding requests to an unreachable pod IP, and
+    times out without ever giving the relay pair a serious try.
 
-    The duplicated candidate has the same address (the backend pod IP) but
-    is labeled ``typ relay``. esp_peer then includes its local relay
-    candidate in pairing, picks device_relay × backend_"relay", and sends
-    media wrapped in TURN data indications to the backend's pod IP via
-    STUNner. STUNner's StaticService already permits traffic to the
-    backend pod, so the forward works in-cluster; the backend's reply
-    sources from STUNner's pod IP and STUNner wraps it back to the device.
+    Relabeling host → relay (and dropping anything else) leaves esp_peer
+    with exactly one remote candidate, forcing it down the TURN path:
 
-    We keep the original ``typ host`` line in addition to the duplicate so
-    that, on a flat LAN where the device CAN reach the backend pod (e.g.
-    hostNetwork, dev cluster), the original host pair still works as a
-    fallback.
+      device_relay  →  STUNner  →  backend pod (10.244.x.x:port)
+      backend pod   →  STUNner  →  device_relay  (reply via TURN unwrap)
 
-    Browser clients do not need this (aiortc handles relay×host pairs
-    natively); it stays OFF until ESP32_COMPAT=true is set.
+    STUNner's UDPRoute/StaticService already permits traffic to the
+    backend pod (that's how the browser test client reaches it), so this
+    works in any topology where STUNner is reachable from the device —
+    flat LAN, NAT, public internet, all the same path.
+
+    Browser clients do NOT need this (aiortc handles relay×host pairs
+    natively); the whole function is gated by ESP32_COMPAT=true.
     """
     out: list[str] = []
     for line in sdp.splitlines():
@@ -172,7 +170,6 @@ def esp32_munge(sdp: str) -> str:
             continue
         if line.startswith("a=candidate"):
             if " typ host" in line:
-                out.append(line)
                 out.append(line.replace(" typ host", " typ relay"))
             elif " typ relay" in line:
                 # Genuine relay candidate (only present if aiortc has ICE
