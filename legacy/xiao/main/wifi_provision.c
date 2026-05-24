@@ -232,12 +232,29 @@ static esp_err_t save_post_handler(httpd_req_t *req)
 {
     char body[512];
     int total = 0;
-    while (total < (int)sizeof(body) - 1) {
-        int got = httpd_req_recv(req, body + total, sizeof(body) - 1 - total);
-        if (got <= 0) break;
+    int remaining = req->content_len;
+    if (remaining < 0 || remaining > (int)sizeof(body) - 1) {
+        httpd_resp_set_status(req, "413 Payload Too Large");
+        httpd_resp_sendstr(req, "request body too large");
+        return ESP_OK;
+    }
+    while (total < remaining) {
+        int got = httpd_req_recv(req, body + total, remaining - total);
+        if (got == HTTPD_SOCK_ERR_TIMEOUT) {
+            // Transient — retry, the user is on a flaky AP.
+            continue;
+        }
+        if (got <= 0) {
+            // Real disconnect / parse error — refuse rather than save a
+            // truncated body. Saving garbage to NVS bricks the device
+            // until a manual factory reset.
+            httpd_resp_set_status(req, "400 Bad Request");
+            httpd_resp_sendstr(req, "incomplete form submission");
+            return ESP_OK;
+        }
         total += got;
     }
-    body[total > 0 ? total : 0] = '\0';
+    body[total] = '\0';
 
     char ssid[MAX_SSID_LEN]       = {0};
     char psk[MAX_PSK_LEN]         = {0};

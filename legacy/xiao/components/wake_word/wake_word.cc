@@ -101,8 +101,12 @@ static float                       s_quant_mult       = 0.0f;
 static float                       s_quant_offset     = 0.0f;
 // Slice-filling buffer between FrontendProcessSamples emits and an Invoke.
 // Streaming MixedNet wants s_ww_input_slices NEW feature slices per Invoke;
-// we accumulate them here.
-static int8_t                      s_pending_features[40 * 8]; // generous upper bound
+// we accumulate them here. WW_MAX_INPUT_SLICES is the upper bound supported
+// by this buffer — wake_word_init() refuses to load a model whose tensor
+// shape would exceed it, so the writes in run_wake_word() / wake_word_process
+// can't overflow.
+#define WW_MAX_INPUT_SLICES         8
+static int8_t                      s_pending_features[40 * WW_MAX_INPUT_SLICES];
 static size_t                      s_pending_count    = 0;
 
 // (No PCM window state — FrontendProcessSamples buffers internally.)
@@ -232,6 +236,12 @@ extern "C" esp_err_t wake_word_init(void)
         return ESP_FAIL;
     }
     s_ww_input_slices = s_ww_input->bytes / FRONTEND_FEATURE_SIZE;
+    if (s_ww_input_slices > WW_MAX_INPUT_SLICES) {
+        ESP_LOGE(TAG, "ww model needs %u input slices, s_pending_features holds %d — "
+                      "bump WW_MAX_INPUT_SLICES",
+                 (unsigned)s_ww_input_slices, WW_MAX_INPUT_SLICES);
+        return ESP_FAIL;
+    }
 
     // The C microfrontend lib emits uint16 spectrogram values in roughly
     // 0..670 range. pymicro-features (which microWakeWord training uses)
