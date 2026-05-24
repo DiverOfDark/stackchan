@@ -52,6 +52,14 @@ CONFIG_MBEDTLS_HAVE_TIME_DATE=y
 # Recommended by pipecat-esp32's reference sdkconfig for the same reason.
 CONFIG_MBEDTLS_EXTERNAL_MEM_ALLOC=y
 
+# Keep the peer's certificate in ssl->session->peer_cert after handshake.
+# Without this, mbedtls_ssl_get_peer_cert() returns NULL after a
+# successful DTLS handshake, and libpeer's post-handshake fingerprint
+# check ("no remote fingerprint" error) bounces the connection forever.
+# WebRTC DTLS-SRTP REQUIRES post-handshake fingerprint matching against
+# the SDP a=fingerprint: line, so we need the cert.
+CONFIG_MBEDTLS_SSL_KEEP_PEER_CERTIFICATE=y
+
 # mbedTLS debug callback — temporary, for diagnosing the -0x6c00 /
 # -0x7700 DTLS handshake failure with libpeer + STUNner. Verbose;
 # remove once DTLS is working.

@@ -204,7 +204,9 @@ static int dtls_srtp_selfsign_cert(DtlsSrtp* dtls_srtp) {
 
 #if CONFIG_MBEDTLS_DEBUG
 static void dtls_srtp_debug(void* ctx, int level, const char* file, int line, const char* str) {
-  LOGD("%s:%04d: %s", file, line, str);
+  (void)ctx; (void)level;
+  /* INFO so it actually shows under our default log level. */
+  LOGI("[dtls/%s:%d] %s", file, line, str);
 }
 #endif
 
@@ -231,10 +233,6 @@ int dtls_srtp_init(DtlsSrtp* dtls_srtp, DtlsSrtpRole role, void* user_data) {
   mbedtls_pk_init(&dtls_srtp->pkey);
   mbedtls_entropy_init(&dtls_srtp->entropy);
   mbedtls_ctr_drbg_init(&dtls_srtp->ctr_drbg);
-#if CONFIG_MBEDTLS_DEBUG
-  mbedtls_debug_set_threshold(3);
-  mbedtls_ssl_conf_dbg(&dtls_srtp->conf, dtls_srtp_debug, NULL);
-#endif
   dtls_srtp_selfsign_cert(dtls_srtp);
 
   mbedtls_ssl_conf_verify(&dtls_srtp->conf, dtls_srtp_cert_verify, NULL);
@@ -256,7 +254,11 @@ int dtls_srtp_init(DtlsSrtp* dtls_srtp, DtlsSrtpRole role, void* user_data) {
 
   mbedtls_ssl_conf_rng(&dtls_srtp->conf, mbedtls_ctr_drbg_random, &dtls_srtp->ctr_drbg);
 
-  mbedtls_ssl_conf_read_timeout(&dtls_srtp->conf, 1000);
+  /* PATCH(libpeer): no read timeout. mbedtls 3.6 converts read-timeout
+   * to MBEDTLS_ERR_SSL_INTERNAL_ERROR via the alert path in some states
+   * (we saw it at state 7 CLIENT_CERTIFICATE waiting). Our udp_recv
+   * already blocks until data arrives — 0 means rely on that. */
+  mbedtls_ssl_conf_read_timeout(&dtls_srtp->conf, 0);
 
   if (dtls_srtp->role == DTLS_SRTP_ROLE_SERVER) {
     mbedtls_ssl_config_defaults(&dtls_srtp->conf,
@@ -297,6 +299,14 @@ int dtls_srtp_init(DtlsSrtp* dtls_srtp, DtlsSrtpRole role, void* user_data) {
    * forces the TLS 1.2 server step throughout the handshake. */
   mbedtls_ssl_conf_min_tls_version(&dtls_srtp->conf, MBEDTLS_SSL_VERSION_TLS1_2);
   mbedtls_ssl_conf_max_tls_version(&dtls_srtp->conf, MBEDTLS_SSL_VERSION_TLS1_2);
+
+#if CONFIG_MBEDTLS_DEBUG
+  /* mbedtls_ssl_config_defaults overrides f_dbg/p_dbg; must register
+   * the debug callback AFTER it to actually get TLS internals on our
+   * SSL context. */
+  mbedtls_debug_set_threshold(4);
+  mbedtls_ssl_conf_dbg(&dtls_srtp->conf, dtls_srtp_debug, NULL);
+#endif
 
   int setup_ret = mbedtls_ssl_setup(&dtls_srtp->ssl, &dtls_srtp->conf);
   LOGI("mbedtls_ssl_setup = %d, conf endpoint = %d (0=client 1=server)",

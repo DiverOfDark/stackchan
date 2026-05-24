@@ -448,7 +448,16 @@ static int agent_send_to_peer(Agent* agent, Address* peer_addr,
     int wrapped_len = agent_turn_wrap_send_indication(agent, peer_addr, buf, len,
                                                       wrapped, sizeof(wrapped));
     if (wrapped_len < 0) return -1;
-    return agent_socket_send(agent, &agent->turn_server_addr, wrapped, wrapped_len);
+    int sent = agent_socket_send(agent, &agent->turn_server_addr, wrapped, wrapped_len);
+    if (sent < 0) return sent;
+    /* Critical: mbedTLS (and other callers) check the return for
+     * "bytes consumed from MY buffer" semantics. We just sent
+     * `wrapped_len` on the wire but only `len` bytes of CALLER payload —
+     * mbedTLS's mbedtls_ssl_flush_output bails with
+     * MBEDTLS_ERR_SSL_INTERNAL_ERROR (-0x6C00) the moment f_send
+     * returns more than requested ("f_send returned X but only Y were
+     * sent"). Report caller-visible byte count on success. */
+    return (sent >= wrapped_len) ? len : -1;
   }
   return agent_socket_send(agent, peer_addr, buf, len);
 }
