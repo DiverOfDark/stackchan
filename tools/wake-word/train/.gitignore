@@ -1,0 +1,11 @@
+# Local training scratch — large, reproducible from generate_corpus.py +
+# train_minimal.py.
+.venv/
+corpus/
+generated_features/
+generated_augmented_features/
+negative_datasets/
+trained_models/
+workdir/
+training_parameters.yaml
+__pycache__/

@@ -48,17 +48,22 @@ def synthesize(voice, text: str, length_scale: float, noise_scale: float,
     """Run Piper for one phrase and return mono float32 in [-1, 1]."""
     import numpy as np
     import soundfile as sf
+    from piper import SynthesisConfig
     # piper.synthesize() yields AudioChunk objects; the simplest portable
     # path is to write through wave and re-read. Avoids depending on Piper's
     # internal types (which have changed across releases).
+    syn_cfg = SynthesisConfig(length_scale=length_scale,
+                              noise_scale=noise_scale,
+                              noise_w_scale=noise_w)
     buf = io.BytesIO()
+    sample_rate = None
     with wave.open(buf, "wb") as wav:
-        wav.setnchannels(1)
-        wav.setsampwidth(2)
-        wav.setframerate(SAMPLE_RATE)
-        for chunk in voice.synthesize(text, length_scale=length_scale,
-                                      noise_scale=noise_scale,
-                                      noise_w=noise_w):
+        for chunk in voice.synthesize(text, syn_config=syn_cfg):
+            if sample_rate is None:
+                wav.setnchannels(chunk.sample_channels)
+                wav.setsampwidth(chunk.sample_width)
+                wav.setframerate(chunk.sample_rate)
+                sample_rate = chunk.sample_rate
             wav.writeframes(chunk.audio_int16_bytes)
     buf.seek(0)
     audio, sr = sf.read(buf, dtype="float32")

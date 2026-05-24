@@ -94,6 +94,32 @@ python verify_model.py \
 Reports FRR / FAR. Targets for a first usable model: FRR < 15 %, FAR < 1/hr
 (see plan M6b verification section).
 
+## Current trained artifact
+
+`firmware/main/models/wake_word_ru.tflite` (62 KB, INT8 streaming MixedNet)
+was produced by `train_minimal.py` against 1500 positive + 1500 negative
+synthetic clips, 4000 training steps.
+
+**Quality: poor.** The model collapsed during training (recall ≈ 0,
+loss diverged from 1.0 → 5.8). Expected for this corpus size + the lack of
+real ambient background data — microWakeWord's own README warns "Training a
+model that works well is still very difficult." The file ships so that the
+M6b integration code (esp-tflite-micro loading, inference loop) has a real
+artifact to load and crash-test against. It will **not** reliably detect
+"Эй, Фемто!" in the wild.
+
+Path to a usable model (in rough priority order):
+ 1. Add real ambient negatives: download
+    `huggingface.co/datasets/kahrendt/microwakeword/{speech.zip, dinner_party.zip, no_speech.zip}`
+    and wire them in as a second `feature_dir` (see notebook cell 9).
+    Several GB total but the single biggest model-quality lever.
+ 2. Add RIR + AudioSet/FMA augmentations so positives sound like they were
+    spoken in real rooms with background noise (notebook cell 4).
+ 3. Train for 10–20 k steps instead of 4 k.
+ 4. Sweep `positive_class_weight` ∈ {2,5,10} × `negative_class_weight` ∈ {1,3,20}.
+ 5. Try `--first_conv_filters 16` + smaller `pointwise_filters` if you want
+    to shave RAM at the cost of detection quality.
+
 ## Notes / known issues
 
 - **Russian-specific Piper voice quality varies by phrase.** Words with stress
