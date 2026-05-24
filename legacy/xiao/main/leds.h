@@ -16,10 +16,15 @@ typedef enum {
     LED_STATE_PROVISIONING,    // SoftAP up, waiting for credentials
     LED_STATE_CONNECTING,      // STA-connecting or signaling handshake
     LED_STATE_LISTENING,       // session live, waiting for wake-word / speech
+    LED_STATE_WAKE_ACK,        // brief flash on wake-word detected
     LED_STATE_SPEAKING,        // TTS playback in progress
     LED_STATE_MUTED,           // mic muted by button
     LED_STATE_ERROR,
 } led_state_t;
 
 esp_err_t leds_init(void);
+
+// Set the LED ring to `state`. State changes are skipped while a hold is in
+// effect — e.g. a WAKE_ACK flash holds the ring for ~1 s so a subsequent
+// LISTENING set from the playback task doesn't overwrite it.
 void      leds_set(led_state_t state);

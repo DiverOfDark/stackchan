@@ -1,6 +1,7 @@
 #include "leds.h"
 
 #include "esp_log.h"
+#include "esp_timer.h"
 
 #include "xvf3800.h"
 
@@ -22,8 +23,14 @@ static const char *TAG = "leds";
 #define RGB_GREEN       0x00, 0xC8, 0x40
 #define RGB_RED         0xFF, 0x20, 0x10
 #define RGB_AMBER       0xFF, 0x88, 0x00
+#define RGB_WHITE       0xFF, 0xFF, 0xFF
 
-static led_state_t s_prev = LED_STATE_OFF;
+// How long a WAKE_ACK flash holds before the regular state machine takes
+// over. Long enough to be visible against the LISTENING state right after.
+#define WAKE_ACK_HOLD_MS  1200
+
+static led_state_t s_prev          = LED_STATE_OFF;
+static int64_t     s_hold_until_us = 0;
 
 static const char *state_name(led_state_t s)
 {
@@ -32,6 +39,7 @@ static const char *state_name(led_state_t s)
     case LED_STATE_PROVISIONING:  return "provisioning";
     case LED_STATE_CONNECTING:    return "connecting";
     case LED_STATE_LISTENING:     return "listening";
+    case LED_STATE_WAKE_ACK:      return "wake!";
     case LED_STATE_SPEAKING:      return "speaking";
     case LED_STATE_MUTED:         return "muted";
     case LED_STATE_ERROR:         return "error";
@@ -59,6 +67,10 @@ esp_err_t leds_init(void)
 
 void leds_set(led_state_t s)
 {
+    int64_t now = esp_timer_get_time();
+    // Honour the wake-ack hold: subsequent state changes (LISTENING from
+    // the playback task, etc.) are deferred until the flash window elapses.
+    if (s != LED_STATE_WAKE_ACK && now < s_hold_until_us) return;
     if (s == s_prev) return;
     s_prev = s;
     ESP_LOGI(TAG, "→ %s", state_name(s));
@@ -80,6 +92,14 @@ void leds_set(led_state_t s)
     case LED_STATE_LISTENING:
         xvf3800_set_led_color(RGB_GREEN);
         xvf3800_set_led_effect(EFFECT_SOLID);
+        break;
+    case LED_STATE_WAKE_ACK:
+        // Bright white flash, held for WAKE_ACK_HOLD_MS so the playback
+        // task's per-iteration LISTENING set doesn't immediately mask it.
+        xvf3800_set_led_color(RGB_WHITE);
+        xvf3800_set_led_brightness(0xFF);
+        xvf3800_set_led_effect(EFFECT_SOLID);
+        s_hold_until_us = now + WAKE_ACK_HOLD_MS * 1000;
         break;
     case LED_STATE_SPEAKING:
         xvf3800_set_led_color(RGB_GREEN);

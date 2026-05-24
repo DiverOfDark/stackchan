@@ -221,6 +221,9 @@ static void capture_task(void *arg)
             }
             s_session.conv_active       = true;
             s_session.last_activity_tick = xTaskGetTickCount();
+            // Immediate visual feedback so the user knows the device heard
+            // them before the backend round-trip starts producing TTS audio.
+            leds_set(LED_STATE_WAKE_ACK);
         }
 
         // Conversation ends after idle timeout (no wake + no inbound TTS).
