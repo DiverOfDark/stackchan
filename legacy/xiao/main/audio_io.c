@@ -27,7 +27,10 @@ esp_err_t audio_io_init(void)
         return ESP_OK;
     }
 
-    i2s_chan_config_t chan_cfg = I2S_CHANNEL_DEFAULT_CONFIG(I2S_NUM_0, I2S_ROLE_SLAVE);
+    // The XVF3800 v1.0.7 I2S firmware is the *slave* variant (the master
+    // firmware is 48 kHz-only and forces a resample everywhere). With the
+    // slave fw loaded, the ESP32-S3 has to generate BCK + WS itself.
+    i2s_chan_config_t chan_cfg = I2S_CHANNEL_DEFAULT_CONFIG(I2S_NUM_0, I2S_ROLE_MASTER);
     // dma_desc_num x dma_frame_num governs latency vs DMA underrun headroom.
     // 6 descriptors x 240 frames @ 16 kHz = ~90 ms of buffering before drop.
     chan_cfg.dma_desc_num  = 6;

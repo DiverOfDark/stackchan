@@ -196,10 +196,17 @@ static void capture_task(void *arg)
             vTaskDelay(pdMS_TO_TICKS(20));
             continue;
         }
-        // Channel 0 of XVF3800 = processed mono audio. 32-bit MSB-aligned →
-        // shift to int16. (XMOS conventionally outputs Q1.31; right-shift 16.)
+        // Channel 0 of XVF3800 = processed mono audio. 32-bit MSB-aligned;
+        // XMOS effectively outputs only the upper ~16-19 bits at typical
+        // mic levels, so a straight >>16 shift gives very quiet int16
+        // (peaks ~5% of dynamic range during speech). Shift fewer bits +
+        // saturate to bring voice up into the 30-50% range microWakeWord
+        // expects. >>13 is a 3-bit (18 dB) software boost.
         for (size_t i = 0; i < FRAMES_PER_PKT; ++i) {
-            mono[i] = (int16_t)(stereo[i * AUDIO_IO_CHANNELS] >> 16);
+            int32_t s = stereo[i * AUDIO_IO_CHANNELS] >> 13;
+            if (s >  INT16_MAX) s = INT16_MAX;
+            if (s <  INT16_MIN) s = INT16_MIN;
+            mono[i] = (int16_t)s;
         }
 
         // Always feed the wake-word detector — needs to run even before
