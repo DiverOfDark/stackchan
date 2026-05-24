@@ -54,7 +54,13 @@ static const char *TAG = "wake_word";
 // Lowered from 0.95 during hardware bring-up debugging. 0.95 is the target
 // for a clean false-accept rate; 0.50 lets us see ANY detection so we can
 // tune. Adjust upward once the path is confirmed end-to-end.
-#define WAKE_THRESHOLD      0.50f
+//
+// Temporarily lowered to 0.10. Our model (trained from ~15 real samples
+// + augmentation) tops out at p_max ≈ 0.12 on actual wake-word speech —
+// 0.50 was unreachable in practice. 0.10 lets us validate the rest of
+// the voice loop end-to-end at the cost of occasional false wakes from
+// loud non-wake speech. Bump back up once we retrain with more data.
+#define WAKE_THRESHOLD      0.10f
 #define WAKE_COOLDOWN_MS    2000
 
 // Periodic diagnostic log — useful to confirm the mic is alive and the model
