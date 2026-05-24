@@ -52,6 +52,11 @@ CONFIG_MBEDTLS_HAVE_TIME_DATE=y
 # Recommended by pipecat-esp32's reference sdkconfig for the same reason.
 CONFIG_MBEDTLS_EXTERNAL_MEM_ALLOC=y
 
+# mbedTLS debug callback — temporary, for diagnosing the -0x6c00 /
+# -0x7700 DTLS handshake failure with libpeer + STUNner. Verbose;
+# remove once DTLS is working.
+CONFIG_MBEDTLS_DEBUG=y
+
 # X.509 cert generation — libpeer mints a self-signed ECDSA P-256 cert
 # per session for the DTLS handshake fingerprint that goes into the SDP.
 # (CONFIG_DTLS_USE_ECDSA=1 in the libpeer shim CMakeLists forces ECDSA;

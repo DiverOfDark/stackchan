@@ -44,4 +44,7 @@ add_compile_definitions(
     # reject RSA in WebRTC. Matches pipecat-esp32's setting.
     CONFIG_DTLS_USE_ECDSA=1
     CONFIG_KEEPALIVE_TIMEOUT=0
+    # Enable libpeer's mbedtls debug callback (sdkconfig also needs
+    # CONFIG_MBEDTLS_DEBUG=y). Verbose. Temporary — remove once DTLS works.
+    CONFIG_MBEDTLS_DEBUG=1
 )
