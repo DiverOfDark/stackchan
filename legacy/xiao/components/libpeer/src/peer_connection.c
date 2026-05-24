@@ -482,8 +482,33 @@ static const char* peer_connection_create_sdp(PeerConnection* pc, SdpType sdp_ty
 
   pc->b_local_description_created = 1;
 
-  agent_gather_candidate(&pc->agent, NULL, NULL, NULL);  // host address
-  for (int i = 0; i < sizeof(pc->config.ice_servers) / sizeof(pc->config.ice_servers[0]); ++i) {
+  /* PATCH(libpeer): only gather a host candidate if no TURN/STUN server is
+   * configured. With TURN configured, libpeer's ICE pair-selection
+   * iterates pairs by index and burns ~10 s per pair waiting for the
+   * connectivity check to fail. With a host candidate + (optionally) ipv6
+   * host candidate AHEAD of the relay candidate, that's 10-30 s before
+   * the relay pair gets nominated — by which point aiortc on the backend
+   * has already given up (default 9 s timeout) and torn down the
+   * connection. Skipping host gathering when ICE servers are present
+   * leaves exactly one local candidate (relay) so ICE has exactly one
+   * pair to try, nominating it immediately.
+   *
+   * Note: the trade-off is we lose the direct-LAN fallback. For our
+   * topology (ESP32 on home LAN, backend in K8s reachable only via
+   * STUNner TURN), there's no usable direct path anyway. If a future
+   * caller does want both, the right fix is a proper RFC 8445 pair
+   * sorter that prioritises by priority/type rather than insertion order. */
+  bool has_ice_server = false;
+  for (int i = 0; i < (int)(sizeof(pc->config.ice_servers) / sizeof(pc->config.ice_servers[0])); ++i) {
+    if (pc->config.ice_servers[i].urls) {
+      has_ice_server = true;
+      break;
+    }
+  }
+  if (!has_ice_server) {
+    agent_gather_candidate(&pc->agent, NULL, NULL, NULL);  // host address
+  }
+  for (int i = 0; i < (int)(sizeof(pc->config.ice_servers) / sizeof(pc->config.ice_servers[0])); ++i) {
     if (pc->config.ice_servers[i].urls) {
       LOGI("ice server: %s", pc->config.ice_servers[i].urls);
       agent_gather_candidate(&pc->agent, pc->config.ice_servers[i].urls, pc->config.ice_servers[i].username, pc->config.ice_servers[i].credential);

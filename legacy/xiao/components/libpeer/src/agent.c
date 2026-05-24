@@ -712,6 +712,22 @@ void agent_update_candidate_pairs(Agent* agent) {
       }
     }
   }
+  /* Pre-register TURN permissions for every remote candidate that could
+   * conceivably pair with our local relay. ICE pair selection runs
+   * iteratively; with a default host pair + ipv6 pair ahead of the relay
+   * pair, the relay pair only gets nominated ~30 s into CHECKING — by
+   * which point aiortc on the backend has already given up sending probes
+   * because every probe sent to our relay address was dropped at STUNner
+   * with "No Permission". Setting the permission as soon as we know the
+   * peer addresses lets backend probes flow through immediately.
+   *
+   * Idempotency: agent_turn_set_permission re-issues CreatePermission
+   * each time and STUNner happily renews. Cheap. */
+  if (agent->turn_allocated) {
+    for (j = 0; j < agent->remote_candidates_count; j++) {
+      agent_turn_set_permission(agent, &agent->remote_candidates[j].addr);
+    }
+  }
   LOGD("candidate pairs num: %d", agent->candidate_pairs_num);
 }
 

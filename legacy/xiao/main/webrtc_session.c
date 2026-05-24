@@ -18,10 +18,12 @@
 
 static const char *TAG = "webrtc";
 
-// DTLS handshake + ICE state machine recurses deep — 4 KB is not enough,
-// hits the stack guard during the SRTP handshake. 10 KB matched esp_peer's
-// peer_demo; libpeer is similar shape, keep the same headroom.
-#define MAIN_LOOP_TASK_STACK   10240
+// DTLS handshake + ICE state machine recurses deep. libpeer's DTLS path
+// in particular pulls in mbedtls cert parsing + ECDHE keygen which can
+// burn 8-12 KB of stack. 10 KB was enough for esp_peer (precompiled +
+// likely had its own stack); libpeer hits a guard overflow at 10 KB. 20
+// KB gives comfortable headroom for the deepest cert chain + SCTP init.
+#define MAIN_LOOP_TASK_STACK   20480
 #define CAPTURE_TASK_STACK     8192
 #define PLAYBACK_TASK_STACK    8192
 #define FRAMES_PER_PKT         320     // 20 ms @ 16 kHz — matches Opus VoIP framing
