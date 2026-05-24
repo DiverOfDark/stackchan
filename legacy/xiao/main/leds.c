@@ -25,6 +25,7 @@ static const char *TAG = "leds";
 #define RGB_AMBER       0xFF, 0x88, 0x00
 #define RGB_WHITE       0xFF, 0xFF, 0xFF
 #define RGB_PINK        0xFF, 0x30, 0x80     // distinct from RED (mute) at a glance
+#define RGB_PURPLE      0x80, 0x20, 0xFF     // negotiating — no green channel so the diffuser can't read "greenish" on this hw
 
 // How long a WAKE_ACK flash holds before the regular state machine takes
 // over. Long enough to be visible against the LISTENING state right after.
@@ -95,7 +96,11 @@ void leds_set(led_state_t s)
         // Distinct from CONNECTING (Wi-Fi/signaling) so the user can tell
         // they're stuck in ICE/DTLS specifically — most often a backend
         // SDP problem (ESP32_COMPAT off → unreachable K8s candidate).
-        xvf3800_set_led_color(RGB_AMBER);
+        // Was amber, but on this XMOS LED driver amber-at-low-brightness
+        // diffused down to a "dull green" that was easy to mistake for
+        // LISTENING. Purple has no green channel at all, so there's no
+        // chance of that misread.
+        xvf3800_set_led_color(RGB_PURPLE);
         xvf3800_set_led_speed(0x60);
         xvf3800_set_led_effect(EFFECT_SPIN);
         break;
