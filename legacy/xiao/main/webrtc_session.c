@@ -435,6 +435,19 @@ static void capture_task(void *arg)
             continue;
         }
 
+        // Device-side energy gate: only stream when the mic has had
+        // recent above-threshold energy. Replaces Opus DTX (which on
+        // micro-opus / ESP32-S3 was the trigger for the silk Burg LPC
+        // watchdog timeouts) with a much cheaper pre-encode check.
+        // Hysteresis is 2 s — generous, so we don't clip the start /
+        // end of utterances. Backend's Silero VAD sees real gaps in
+        // the RTP stream during silence and finalises turns normally.
+        #define UPLINK_HOLD_MS  2000
+        if ((xTaskGetTickCount() - s_session.last_mic_active_tick) >
+                pdMS_TO_TICKS(UPLINK_HOLD_MS)) {
+            continue;
+        }
+
         int n = opus_encode(s_session.opus_enc, mono, FRAMES_PER_PKT,
                             opus_buf, sizeof(opus_buf));
         if (n < 0) {
@@ -555,14 +568,13 @@ esp_err_t webrtc_session_start(const char *backend_url)
     opus_encoder_ctl(s_session.opus_enc, OPUS_SET_SIGNAL(OPUS_SIGNAL_VOICE));
     opus_encoder_ctl(s_session.opus_enc, OPUS_SET_INBAND_FEC(1));
     opus_encoder_ctl(s_session.opus_enc, OPUS_SET_PACKET_LOSS_PERC(10));
-    // Discontinuous transmission: during silence segments Opus emits
-    // 1-3 byte filler frames that decode as silence on the backend.
-    // Without DTX the encoder keeps producing 30-50 byte "low-energy
-    // noise" frames the whole time the mic is open — those frames are
-    // quiet enough that *we* don't think the user is talking, but loud
-    // enough that pipecat's Silero VAD never sees stop_secs of silence
-    // and never finalises the turn. STT/LLM/TTS never get triggered.
-    opus_encoder_ctl(s_session.opus_enc, OPUS_SET_DTX(1));
+    // DTX (OPUS_SET_DTX) is tempting — would let the backend's Silero
+    // VAD see real silence gaps — but it forces SILK to run float-point
+    // LPC analysis (silk_burg_modified_FLP) every frame for the VAD
+    // decision, which on micro-opus on ESP32-S3 burns 5+ seconds CPU
+    // per silence transition and trips the FreeRTOS task watchdog on
+    // rtc_cap. Backend VAD detection has to be solved a different way
+    // (device-side energy gate that drops the frame before encode).
 
     s_session.opus_dec = opus_decoder_create(AUDIO_IO_SAMPLE_RATE, 1, &opus_err);
     if (!s_session.opus_dec || opus_err != OPUS_OK) {
