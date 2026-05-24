@@ -281,6 +281,13 @@ static int agent_turn_encode_peer_address(StunMessage* msg, Address* peer_addr,
                                           char* out_buf) {
   uint8_t mask[16];
   StunHeader* header = (StunHeader*)msg->buf;
+  /* RFC 5389 §15.2: the first byte of XOR-MAPPED-ADDRESS / XOR-PEER-ADDRESS
+   * is reserved and MUST be zero. Upstream stun_set_mapped_address writes
+   * bytes 1..7 only (family + port + addr), leaving byte 0 whatever the
+   * caller's buffer contained. STUNner is strict about this and rejects
+   * the whole CreatePermission with a malformed response (just an MI attr,
+   * no ERROR-CODE) when it sees garbage there. Zero the buffer up-front. */
+  memset(out_buf, 0, 20);  /* covers IPv6's 20-byte form too */
   *((uint32_t*)mask) = htonl(MAGIC_COOKIE);
   memcpy(mask + 4, header->transaction_id, sizeof(header->transaction_id));
   return stun_set_mapped_address(out_buf, mask, peer_addr);
@@ -322,6 +329,16 @@ int agent_turn_set_permission(Agent* agent, Address* peer_addr) {
     stun_msg_finish(&send_msg, STUN_CREDENTIAL_LONG_TERM,
                     agent->turn_credential, strlen(agent->turn_credential));
 
+    /* Debug: dump request before sending so we can compare against the
+     * response by hand. */
+    {
+      int dump_len = (int)send_msg.size < 96 ? (int)send_msg.size : 96;
+      char hex[3 * 96 + 1];
+      for (int i = 0; i < dump_len; i++) {
+        snprintf(hex + 3 * i, 4, "%02x ", send_msg.buf[i]);
+      }
+      LOGI("CreatePermission req (%d bytes): %s", (int)send_msg.size, hex);
+    }
     int ret = agent_socket_send(agent, &agent->turn_server_addr,
                                 send_msg.buf, send_msg.size);
     if (ret < 0) {
@@ -335,6 +352,16 @@ int agent_turn_set_permission(Agent* agent, Address* peer_addr) {
     if (ret <= 0) {
       LOGE("CreatePermission recv timed out");
       return -1;
+    }
+    /* Debug: dump the first 96 bytes of the response so we can decode
+     * STUNner's error reply by hand when ERROR-CODE parsing comes up 0. */
+    {
+      int dump_len = ret < 96 ? ret : 96;
+      char hex[3 * 96 + 1];
+      for (int i = 0; i < dump_len; i++) {
+        snprintf(hex + 3 * i, 4, "%02x ", recv_msg.buf[i]);
+      }
+      LOGI("CreatePermission resp (%d bytes): %s", ret, hex);
     }
     stun_parse_msg_buf(&recv_msg);
 
