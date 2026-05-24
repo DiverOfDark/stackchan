@@ -7,9 +7,10 @@
 # Keep this REQUIRES list empty. If a domain header ever needs an ESP-IDF
 # type, it does not belong in domain/ — move it to hal/ or transport/.
 
-# Source list grows as Phase B lands each module.
 set(DOMAIN_SRCS
-    # Phase B adds: src/led_fsm.cpp, src/session_fsm.cpp, etc.
+    "src/led_fsm.cpp"
+    # session_fsm, form_urlencoded, wake_window, energy_gate added in
+    # subsequent Phase B commits.
 )
 
 # idf_component_register requires either SRCS or INCLUDE_DIRS to be non-

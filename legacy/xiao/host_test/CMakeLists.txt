@@ -59,7 +59,6 @@ function(add_domain_test name)
     add_test(NAME ${name} COMMAND ${name})
 endfunction()
 
-# Phase B will append calls like:
-#   add_domain_test(test_led_fsm
-#       ${DOMAIN_DIR}/src/led_fsm.cpp
-#       test/test_led_fsm.cpp)
+add_domain_test(test_led_fsm
+    ${DOMAIN_DIR}/src/led_fsm.cpp
+    ${DOMAIN_DIR}/test/test_led_fsm.cpp)
