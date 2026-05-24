@@ -1,3 +1,0 @@
-[submodule "firmware/deps/libpeer"]
-	path = firmware/deps/libpeer
-	url = https://github.com/aconchillo/libpeer.git

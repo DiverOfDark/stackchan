@@ -1,7 +1,10 @@
-# Thin IDF component shim wrapping aconchillo/libpeer (the open-source
-# upstream of Espressif's esp_peer). The library itself lives in
-# firmware/deps/libpeer as a git submodule; this shim just registers it
-# as an IDF component and pins compile flags.
+# IDF component wrapping aconchillo/libpeer (the open-source upstream of
+# Espressif's esp_peer). Vendored under src/ rather than git-submoduled
+# because the IDF/PIO build pipeline doesn't reliably surface per-component
+# compile flags into the build target — so when GCC 14 flagged libpeer
+# const-discard / unused-but-set warnings as errors, the cleanest fix was
+# to keep the source local and patch in place. See README.md for the
+# exact patches applied vs upstream commit.
 #
 # Modeled on pipecat-esp32/esp32-s3-box-3/components/peer/CMakeLists.txt
 # with two deliberate changes:
@@ -11,7 +14,7 @@
 #   * peer_signaling.c and ssl_transport.c are excluded from the glob so
 #     we don't ship empty translation units.
 
-set(LIBPEER_DIR "${CMAKE_CURRENT_LIST_DIR}/../../deps/libpeer")
+set(LIBPEER_DIR "${CMAKE_CURRENT_LIST_DIR}")
 
 file(GLOB LIBPEER_SRCS "${LIBPEER_DIR}/src/*.c")
 # Drop signaling sources — DISABLE_PEER_SIGNALING=1 already empties them
