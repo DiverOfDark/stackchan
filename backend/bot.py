@@ -7,12 +7,9 @@
 #
 # Everything (STT, LLM, TTS, VAD) runs locally — no cloud calls in the hot path.
 #
-<<<<<<< Updated upstream
-import logging
-=======
 import asyncio
 import json
->>>>>>> Stashed changes
+import logging
 import os
 import re
 import time
