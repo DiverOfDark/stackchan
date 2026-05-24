@@ -11,8 +11,10 @@
 static const char *TAG = "signaling";
 
 #define OFFER_PATH       "/api/offer"
+#define ICE_PATH         "/ice-servers"
 #define HTTP_TIMEOUT_MS  15000
 #define MAX_RESPONSE     16384   // SDP answers run a few KB
+#define MAX_ICE_RESPONSE 4096    // /ice-servers payload is small
 
 struct pipecat_signaling {
     const char *base_url;   // not owned; borrowed from caller (NVS-backed)
@@ -228,4 +230,117 @@ esp_err_t pipecat_signaling_send_ice(pipecat_signaling_t *sig,
 const char *pipecat_signaling_pc_id(const pipecat_signaling_t *sig)
 {
     return sig ? sig->pc_id : NULL;
+}
+
+// ---------- ICE server discovery -----------------------------------------
+
+void pipecat_signaling_free_ice_servers(pipecat_ice_server_t *servers,
+                                        size_t count)
+{
+    if (!servers) return;
+    for (size_t i = 0; i < count; ++i) {
+        free(servers[i].url);
+        free(servers[i].username);
+        free(servers[i].credential);
+    }
+    free(servers);
+}
+
+// Extract the first URL from a cJSON node that may be either a string
+// ("turn:..." ) or an array of strings (["turn:...", "turns:..."]). esp_peer
+// can only use one URL per server entry; first wins.
+static char *extract_first_url(const cJSON *urls)
+{
+    if (cJSON_IsString(urls)) return strdup(urls->valuestring);
+    if (cJSON_IsArray(urls) && cJSON_GetArraySize(urls) > 0) {
+        const cJSON *first = cJSON_GetArrayItem(urls, 0);
+        if (cJSON_IsString(first)) return strdup(first->valuestring);
+    }
+    return NULL;
+}
+
+esp_err_t pipecat_signaling_fetch_ice_servers(pipecat_signaling_t *sig,
+                                              pipecat_ice_server_t **out_servers,
+                                              size_t *out_count)
+{
+    if (!sig || !out_servers || !out_count) return ESP_ERR_INVALID_ARG;
+    *out_servers = NULL;
+    *out_count   = 0;
+
+    // Build base_url + "/ice-servers".
+    size_t base_len = strlen(sig->base_url);
+    while (base_len > 0 && sig->base_url[base_len - 1] == '/') base_len--;
+    char *url = malloc(base_len + sizeof(ICE_PATH));
+    if (!url) return ESP_ERR_NO_MEM;
+    memcpy(url, sig->base_url, base_len);
+    memcpy(url + base_len, ICE_PATH, sizeof(ICE_PATH));
+
+    char *resp = malloc(MAX_ICE_RESPONSE);
+    if (!resp) { free(url); return ESP_ERR_NO_MEM; }
+
+    int status = 0;
+    esp_err_t err = do_request(url, HTTP_METHOD_GET, NULL, resp,
+                               MAX_ICE_RESPONSE, &status);
+    free(url);
+
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "ice-servers GET failed: %s", esp_err_to_name(err));
+        free(resp);
+        return err;
+    }
+    if (status / 100 != 2) {
+        ESP_LOGE(TAG, "ice-servers status=%d body=%s", status, resp);
+        free(resp);
+        return ESP_FAIL;
+    }
+
+    cJSON *root = cJSON_Parse(resp);
+    free(resp);
+    if (!root) {
+        ESP_LOGE(TAG, "ice-servers response is not JSON");
+        return ESP_FAIL;
+    }
+    const cJSON *arr = cJSON_GetObjectItem(root, "iceServers");
+    if (!cJSON_IsArray(arr)) {
+        ESP_LOGW(TAG, "ice-servers: 'iceServers' missing or not an array");
+        cJSON_Delete(root);
+        return ESP_OK;  // backend has no TURN configured — host-only ICE
+    }
+
+    int n = cJSON_GetArraySize(arr);
+    if (n <= 0) {
+        cJSON_Delete(root);
+        ESP_LOGI(TAG, "ice-servers: empty list (no TURN configured)");
+        return ESP_OK;
+    }
+
+    pipecat_ice_server_t *out = calloc(n, sizeof(*out));
+    if (!out) { cJSON_Delete(root); return ESP_ERR_NO_MEM; }
+    size_t kept = 0;
+    for (int i = 0; i < n; ++i) {
+        const cJSON *item = cJSON_GetArrayItem(arr, i);
+        if (!cJSON_IsObject(item)) continue;
+        char *u = extract_first_url(cJSON_GetObjectItem(item, "urls"));
+        if (!u) continue;
+        out[kept].url        = u;
+        const cJSON *user = cJSON_GetObjectItem(item, "username");
+        const cJSON *cred = cJSON_GetObjectItem(item, "credential");
+        out[kept].username   = (cJSON_IsString(user) && user->valuestring[0])
+                                ? strdup(user->valuestring) : NULL;
+        out[kept].credential = (cJSON_IsString(cred) && cred->valuestring[0])
+                                ? strdup(cred->valuestring) : NULL;
+        ESP_LOGI(TAG, "ice-server[%u]: %s (user=%s)",
+                 (unsigned)kept, out[kept].url,
+                 out[kept].username ? out[kept].username : "<none>");
+        ++kept;
+    }
+    cJSON_Delete(root);
+
+    if (kept == 0) {
+        free(out);
+        return ESP_OK;
+    }
+    *out_servers = out;
+    *out_count   = kept;
+    return ESP_OK;
 }

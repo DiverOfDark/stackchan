@@ -47,8 +47,14 @@ static const char *TAG = "webrtc";
 #endif
 
 typedef struct {
-    esp_peer_handle_t      peer;
-    pipecat_signaling_t   *sig;
+    esp_peer_handle_t           peer;
+    pipecat_signaling_t        *sig;
+    // Ownership of the ICE-server backing strings — esp_peer keeps pointers
+    // into this list and uses them throughout the session, so it must
+    // outlive the peer handle. Freed in webrtc_session_stop.
+    pipecat_ice_server_t       *ice_servers;
+    size_t                      ice_server_count;
+    esp_peer_ice_server_cfg_t  *ice_server_cfgs;
     OpusEncoder           *opus_enc;
     OpusDecoder           *opus_dec;
     StreamBufferHandle_t   playback_buf;
@@ -354,6 +360,34 @@ esp_err_t webrtc_session_start(const char *backend_url)
     s_session.sig = pipecat_signaling_create(backend_url);
     if (!s_session.sig) return ESP_ERR_NO_MEM;
 
+    // Pull TURN/STUN config from the backend's /ice-servers endpoint. With
+    // pipecat-in-K8s + STUNner, the backend's SDP advertises a host
+    // candidate on the pod IP (unreachable from the ESP32's LAN). The only
+    // way through is the relay-relay candidate pair via STUNner — esp_peer
+    // gathers its own TURN relay candidate when server_lists is populated.
+    // Failure here is non-fatal: degrade to host-only ICE (works on a flat
+    // LAN with no NAT between client and server).
+    if (pipecat_signaling_fetch_ice_servers(s_session.sig,
+                                            &s_session.ice_servers,
+                                            &s_session.ice_server_count) != ESP_OK) {
+        ESP_LOGW(TAG, "ice-servers fetch failed; continuing host-only");
+    }
+    if (s_session.ice_server_count) {
+        s_session.ice_server_cfgs = calloc(s_session.ice_server_count,
+                                            sizeof(esp_peer_ice_server_cfg_t));
+        if (s_session.ice_server_cfgs) {
+            for (size_t i = 0; i < s_session.ice_server_count; ++i) {
+                s_session.ice_server_cfgs[i].stun_url = s_session.ice_servers[i].url;
+                s_session.ice_server_cfgs[i].user     = s_session.ice_servers[i].username;
+                s_session.ice_server_cfgs[i].psw      = s_session.ice_servers[i].credential;
+            }
+            ESP_LOGI(TAG, "ICE: %u server(s) configured",
+                     (unsigned)s_session.ice_server_count);
+        } else {
+            s_session.ice_server_count = 0;
+        }
+    }
+
     int opus_err = 0;
     s_session.opus_enc = opus_encoder_create(
         AUDIO_IO_SAMPLE_RATE, 1, OPUS_APPLICATION_VOIP, &opus_err);
@@ -417,6 +451,8 @@ esp_err_t webrtc_session_start(const char *backend_url)
     };
 
     esp_peer_cfg_t cfg = {
+        .server_lists     = s_session.ice_server_cfgs,
+        .server_num       = (uint8_t)s_session.ice_server_count,
         .role             = ESP_PEER_ROLE_CONTROLLING,
         .audio_dir        = ESP_PEER_MEDIA_DIR_SEND_RECV,
         .video_dir        = ESP_PEER_MEDIA_DIR_NONE,
@@ -426,6 +462,12 @@ esp_err_t webrtc_session_start(const char *backend_url)
             .channel      = 1,
         },
         .video_info       = { .codec = ESP_PEER_VIDEO_CODEC_NONE },
+        // Stay on ALL — RELAY-only causes esp_peer to abort with no binding
+        // attempts (state 4 → 8 in 20 ms) when the remote SDP has only host
+        // candidates: it apparently won't pair a local relay candidate with
+        // a remote host candidate. The proper fix is for the backend's
+        // aiortc to also gather a relay candidate via STUNner; then both
+        // sides have relay candidates and ICE picks the relay×relay pair.
         .ice_trans_policy = ESP_PEER_ICE_TRANS_POLICY_ALL,
         .on_state         = on_state,
         .on_msg           = on_msg,
@@ -487,6 +529,16 @@ void webrtc_session_stop(void)
     if (s_session.sig) {
         pipecat_signaling_destroy(s_session.sig);
         s_session.sig = NULL;
+    }
+    if (s_session.ice_server_cfgs) {
+        free(s_session.ice_server_cfgs);
+        s_session.ice_server_cfgs = NULL;
+    }
+    if (s_session.ice_servers) {
+        pipecat_signaling_free_ice_servers(s_session.ice_servers,
+                                           s_session.ice_server_count);
+        s_session.ice_servers      = NULL;
+        s_session.ice_server_count = 0;
     }
     ESP_LOGI(TAG, "session stopped");
 }
