@@ -70,23 +70,39 @@ static session_t s_session = {0};
 static int on_state(esp_peer_state_t state, void *ctx)
 {
     ESP_LOGI(TAG, "peer state = %d", (int)state);
-    // Treat PAIRED (= ICE pair selected, DTLS in progress) and the later
-    // CONNECTED / DATA_CHANNEL_CONNECTED as equally "OK to send media".
-    // pipecat's peer_default stack sometimes skips state 6 (CONNECTED)
-    // when the data channel comes up first.
-    if (state == ESP_PEER_STATE_PAIRED ||
-        state == ESP_PEER_STATE_CONNECTED ||
-        state == ESP_PEER_STATE_DATA_CHANNEL_CONNECTED) {
+    // esp_peer 1.4 enum (from include/esp_peer.h):
+    //   0 CLOSED   1 DISCONNECTED   2 NEW_CONNECTION   3 CANDIDATE_GATHERING
+    //   4 PAIRING  5 PAIRED         6 CONNECTING       7 CONNECTED
+    //   8 CONNECT_FAILED            9 DATA_CHANNEL_CONNECTED  ...
+    // Media (audio frames) can flow once CONNECTED (7) — that's when DTLS-
+    // SRTP is up. PAIRED (5) means ICE pair selected but DTLS still
+    // handshaking; CONNECTED is the right "OK to send audio" trigger.
+    switch (state) {
+    case ESP_PEER_STATE_NEW_CONNECTION:
+    case ESP_PEER_STATE_CANDIDATE_GATHERING:
+    case ESP_PEER_STATE_PAIRING:
+    case ESP_PEER_STATE_PAIRED:
+    case ESP_PEER_STATE_CONNECTING:
+        // Negotiation in progress — amber spin so the user can tell at a
+        // glance that signaling worked but ICE/DTLS hasn't completed yet.
+        leds_set(LED_STATE_NEGOTIATING);
+        break;
+    case ESP_PEER_STATE_CONNECTED:
+    case ESP_PEER_STATE_DATA_CHANNEL_CONNECTED:
         if (!s_session.connected) {
             ESP_LOGI(TAG, "session ready for media");
         }
         s_session.connected = true;
         leds_set(LED_STATE_LISTENING);
-    } else if (state == ESP_PEER_STATE_DISCONNECTED ||
-               state == ESP_PEER_STATE_CLOSED ||
-               state == ESP_PEER_STATE_CONNECT_FAILED) {
+        break;
+    case ESP_PEER_STATE_DISCONNECTED:
+    case ESP_PEER_STATE_CLOSED:
+    case ESP_PEER_STATE_CONNECT_FAILED:
         s_session.connected = false;
         leds_set(LED_STATE_CONNECTING);
+        break;
+    default:
+        break;
     }
     return 0;
 }

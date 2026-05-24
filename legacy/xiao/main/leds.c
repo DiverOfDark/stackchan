@@ -38,6 +38,7 @@ static const char *state_name(led_state_t s)
     case LED_STATE_OFF:           return "off";
     case LED_STATE_PROVISIONING:  return "provisioning";
     case LED_STATE_CONNECTING:    return "connecting";
+    case LED_STATE_NEGOTIATING:   return "negotiating";
     case LED_STATE_LISTENING:     return "listening";
     case LED_STATE_WAKE_ACK:      return "wake!";
     case LED_STATE_SPEAKING:      return "speaking";
@@ -87,6 +88,14 @@ void leds_set(led_state_t s)
     case LED_STATE_CONNECTING:
         xvf3800_set_led_color(RGB_BLUE);
         xvf3800_set_led_speed(0x80);            // brisk spin
+        xvf3800_set_led_effect(EFFECT_SPIN);
+        break;
+    case LED_STATE_NEGOTIATING:
+        // Distinct from CONNECTING (Wi-Fi/signaling) so the user can tell
+        // they're stuck in ICE/DTLS specifically — most often a backend
+        // SDP problem (ESP32_COMPAT off → unreachable K8s candidate).
+        xvf3800_set_led_color(RGB_AMBER);
+        xvf3800_set_led_speed(0x60);
         xvf3800_set_led_effect(EFFECT_SPIN);
         break;
     case LED_STATE_LISTENING:
