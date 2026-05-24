@@ -310,7 +310,6 @@ int agent_turn_set_permission(Agent* agent, Address* peer_addr) {
   char addr_string[ADDRSTRLEN];
 
   addr_to_string(peer_addr, addr_string, sizeof(addr_string));
-  LOGI("TURN CreatePermission for peer %s:%d", addr_string, peer_addr->port);
 
   for (int attempt = 0; attempt < 2; attempt++) {
     memset(&send_msg, 0, sizeof(send_msg));
@@ -329,16 +328,6 @@ int agent_turn_set_permission(Agent* agent, Address* peer_addr) {
     stun_msg_finish(&send_msg, STUN_CREDENTIAL_LONG_TERM,
                     agent->turn_credential, strlen(agent->turn_credential));
 
-    /* Debug: dump request before sending so we can compare against the
-     * response by hand. */
-    {
-      int dump_len = (int)send_msg.size < 96 ? (int)send_msg.size : 96;
-      char hex[3 * 96 + 1];
-      for (int i = 0; i < dump_len; i++) {
-        snprintf(hex + 3 * i, 4, "%02x ", send_msg.buf[i]);
-      }
-      LOGI("CreatePermission req (%d bytes): %s", (int)send_msg.size, hex);
-    }
     int ret = agent_socket_send(agent, &agent->turn_server_addr,
                                 send_msg.buf, send_msg.size);
     if (ret < 0) {
@@ -353,23 +342,13 @@ int agent_turn_set_permission(Agent* agent, Address* peer_addr) {
       LOGE("CreatePermission recv timed out");
       return -1;
     }
-    /* Debug: dump the first 96 bytes of the response so we can decode
-     * STUNner's error reply by hand when ERROR-CODE parsing comes up 0. */
-    {
-      int dump_len = ret < 96 ? ret : 96;
-      char hex[3 * 96 + 1];
-      for (int i = 0; i < dump_len; i++) {
-        snprintf(hex + 3 * i, 4, "%02x ", recv_msg.buf[i]);
-      }
-      LOGI("CreatePermission resp (%d bytes): %s", ret, hex);
-    }
     stun_parse_msg_buf(&recv_msg);
 
     if (recv_msg.stunclass == STUN_CLASS_RESPONSE &&
         recv_msg.stunmethod == STUN_METHOD_CREATE_PERMISSION) {
       memcpy(&agent->turn_permission_addr, peer_addr, sizeof(Address));
       agent->turn_permission_set = true;
-      LOGI("CreatePermission acked");
+      LOGD("CreatePermission acked for peer %s:%d", addr_string, peer_addr->port);
       return 0;
     }
 
@@ -378,7 +357,7 @@ int agent_turn_set_permission(Agent* agent, Address* peer_addr) {
         strlen(recv_msg.nonce) > 0) {
       /* Nonce rotation — server included a fresh nonce + realm in the
        * error response. Cache and retry once. */
-      LOGI("CreatePermission %u, retrying with new nonce", recv_msg.error_code);
+      LOGD("CreatePermission %u, retrying with new nonce", recv_msg.error_code);
       strncpy(agent->turn_nonce, recv_msg.nonce, sizeof(agent->turn_nonce) - 1);
       agent->turn_nonce[sizeof(agent->turn_nonce) - 1] = '\0';
       if (strlen(recv_msg.realm) > 0) {

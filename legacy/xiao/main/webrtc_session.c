@@ -226,13 +226,10 @@ static void on_audio_track(uint8_t *data, size_t size, void *userdata)
         return;
     }
 
-    static int16_t pcm[FRAMES_PER_PKT * 6];   // headroom for any well-formed Opus packet
-    static int s_decode_count = 0;
-    if (s_decode_count < 5) {
-        ESP_LOGI(TAG, "opus_decode #%d size=%u first=%02x %02x",
-                 s_decode_count, (unsigned)size, data[0], size > 1 ? data[1] : 0);
-    }
-    s_decode_count++;
+    // Opus@48kHz/120ms FEC frames can return up to 5760 samples per channel.
+    // We're decoding mono into a fixed buffer; size for that worst case so a
+    // misbehaving sender (or a backend that ever picks 48 kHz) can't overflow.
+    static int16_t pcm[5760];
     int decoded = opus_decode(s_session.opus_dec,
                               data, size,
                               pcm, sizeof(pcm) / sizeof(pcm[0]),

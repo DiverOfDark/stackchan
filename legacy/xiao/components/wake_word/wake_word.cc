@@ -63,11 +63,11 @@ static const char *TAG = "wake_word";
 #define WAKE_THRESHOLD      0.10f
 #define WAKE_COOLDOWN_MS    2000
 
-// Periodic diagnostic log — useful to confirm the mic is alive and the model
-// is producing reasonable probabilities while saying / not saying the wake
-// phrase. Every N captured frames (≈ N*10 ms of audio): emit current
-// probability, max-since-last-log, and audio RMS so you can correlate spikes
-// in level with spikes in p(wake).
+// Periodic diagnostic logs — confirm mic is alive and model is producing
+// reasonable probabilities while saying / not saying the wake phrase.
+// Off by default in shipped firmware (three streams of LOGI/sec at idle
+// drowns out everything else). Flip to 1 locally when debugging.
+#define WAKE_DIAG_ENABLE         0
 #define WAKE_DIAG_PERIOD_FRAMES  100   // ~1 s @ 10 ms feature stride
 
 // Wake-word arena lives in PSRAM. MixedNet at our config uses ~30 KB peak.
@@ -269,6 +269,7 @@ static void update_window(float prob_float)
     if (s_prob_window_count < WAKE_WINDOW_LEN) s_prob_window_count++;
 
     atomic_store(&s_last_prob_x1000, (int)(prob_float * 1000.0f));
+#if WAKE_DIAG_ENABLE
     if (prob_float > s_diag_max_prob) s_diag_max_prob = prob_float;
     if (++s_diag_frame_counter >= WAKE_DIAG_PERIOD_FRAMES) {
         float avg = 0;
@@ -286,6 +287,7 @@ static void update_window(float prob_float)
         s_diag_rms_count     = 0;
         s_diag_frame_counter = 0;
     }
+#endif
 
     if (s_prob_window_count < WAKE_WINDOW_LEN) return;
     float sum = 0;
@@ -317,6 +319,7 @@ static void run_wake_word(void)
     int8_t *dst = tflite::GetTensorData<int8_t>(s_ww_input);
     memcpy(dst, s_pending_features, s_ww_input_slices * FRONTEND_FEATURE_SIZE);
 
+#if WAKE_DIAG_ENABLE
     // Diagnostic: log feature stats + raw output once per second.
     static int s_invoke_counter = 0;
     bool emit_diag = (++s_invoke_counter >= 33);   // ~1 s @ 30 ms/inference
@@ -328,6 +331,7 @@ static void run_wake_word(void)
             if (last[i] > feat_max) feat_max = last[i];
         }
     }
+#endif
 
     if (s_ww->Invoke() != kTfLiteOk) {
         ESP_LOGW(TAG, "ww Invoke failed");
@@ -343,6 +347,7 @@ static void run_wake_word(void)
     if (prob < 0) prob = 0;
     if (prob > 1) prob = 1;
 
+#if WAKE_DIAG_ENABLE
     if (emit_diag) {
         static uint8_t s_raw_max = 0;
         if (raw > s_raw_max) s_raw_max = raw;
@@ -350,6 +355,7 @@ static void run_wake_word(void)
                  feat_min, feat_max, (unsigned)raw, (unsigned)s_raw_max, (double)prob);
         s_invoke_counter = 0;
     }
+#endif
     update_window(prob);
 }
 
@@ -359,6 +365,7 @@ extern "C" esp_err_t wake_word_process(const int16_t *pcm, size_t n_samples)
 {
     if (!s_ww) return ESP_ERR_INVALID_STATE;
 
+#if WAKE_DIAG_ENABLE
     // Diagnostic: RMS + peak of incoming PCM so we can confirm the mic
     // is alive separately from whether the model fires.
     int32_t peak = 0;
@@ -381,6 +388,7 @@ extern "C" esp_err_t wake_word_process(const int16_t *pcm, size_t n_samples)
         s_diag_rms_sumsq   = 0;
         s_diag_rms_count   = 0;
     }
+#endif
 
     // The frontend consumes audio in arbitrary chunks and emits one feature
     // slice per FRONTEND_STRIDE_MS of audio internally — we just keep

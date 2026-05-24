@@ -218,8 +218,6 @@ int dtls_srtp_init(DtlsSrtp* dtls_srtp, DtlsSrtpRole role, void* user_data) {
       MBEDTLS_TLS_SRTP_NULL_HMAC_SHA1_32,
       MBEDTLS_TLS_SRTP_UNSET};
 
-  LOGI("dtls_srtp_init: role=%d (%s)", (int)role,
-       role == DTLS_SRTP_ROLE_SERVER ? "SERVER (mbedtls IS_SERVER)" : "CLIENT (mbedtls IS_CLIENT)");
   dtls_srtp->role = role;
   dtls_srtp->state = DTLS_SRTP_STATE_INIT;
   dtls_srtp->user_data = user_data;
@@ -309,8 +307,9 @@ int dtls_srtp_init(DtlsSrtp* dtls_srtp, DtlsSrtpRole role, void* user_data) {
 #endif
 
   int setup_ret = mbedtls_ssl_setup(&dtls_srtp->ssl, &dtls_srtp->conf);
-  LOGI("mbedtls_ssl_setup = %d, conf endpoint = %d (0=client 1=server)",
-       setup_ret, (int)dtls_srtp->conf.MBEDTLS_PRIVATE(endpoint));
+  if (setup_ret != 0) {
+    LOGE("mbedtls_ssl_setup failed: %d", setup_ret);
+  }
 
   return 0;
 }
@@ -471,18 +470,10 @@ static void dtls_srtp_key_derivation_cb(void* context,
 static int dtls_srtp_do_handshake(DtlsSrtp* dtls_srtp) {
   int ret;
 
+  // NOTE: shared across calls — fine while there's at most one DtlsSrtp
+  // session in flight (today's reality). If we ever run two concurrent
+  // sessions this needs to move into DtlsSrtp.
   static mbedtls_timing_delay_context timer;
-
-  LOGI("dtls_srtp_do_handshake: ssl=%p ssl->conf=%p &dtls_srtp->conf=%p role=%d conf->endpoint=%d ssl->conf->endpoint=%d state=%d",
-       (void*)&dtls_srtp->ssl,
-       (void*)dtls_srtp->ssl.MBEDTLS_PRIVATE(conf),
-       (void*)&dtls_srtp->conf,
-       (int)dtls_srtp->role,
-       (int)dtls_srtp->conf.MBEDTLS_PRIVATE(endpoint),
-       dtls_srtp->ssl.MBEDTLS_PRIVATE(conf)
-           ? (int)dtls_srtp->ssl.MBEDTLS_PRIVATE(conf)->MBEDTLS_PRIVATE(endpoint)
-           : -1,
-       (int)dtls_srtp->ssl.MBEDTLS_PRIVATE(state));
 
   mbedtls_ssl_set_timer_cb(&dtls_srtp->ssl, &timer, mbedtls_timing_set_delay, mbedtls_timing_get_delay);
 
@@ -494,12 +485,8 @@ static int dtls_srtp_do_handshake(DtlsSrtp* dtls_srtp) {
 
   mbedtls_ssl_set_bio(&dtls_srtp->ssl, dtls_srtp, dtls_srtp->udp_send, dtls_srtp->udp_recv, NULL);
 
-  int iter = 0;
   do {
     ret = mbedtls_ssl_handshake(&dtls_srtp->ssl);
-    LOGI("mbedtls_ssl_handshake iter=%d ret=-0x%04x state=%d",
-         iter++, (unsigned int)-ret,
-         (int)dtls_srtp->ssl.MBEDTLS_PRIVATE(state));
   } while (ret == MBEDTLS_ERR_SSL_WANT_READ || ret == MBEDTLS_ERR_SSL_WANT_WRITE);
 
   return ret;
