@@ -23,19 +23,25 @@ static const char *TAG = "webrtc";
 // burn 8-12 KB of stack. 10 KB was enough for esp_peer (precompiled +
 // likely had its own stack); libpeer hits a guard overflow at 10 KB. 20
 // KB gives comfortable headroom for the deepest cert chain + SCTP init.
-#define MAIN_LOOP_TASK_STACK   20480
-// Bumped from 8 K → 16 K. capture_task calls peer_connection_send_audio
+#define MAIN_LOOP_TASK_STACK   32768
+// Bumped from 8 K → 32 K. capture_task calls peer_connection_send_audio
 // → SRTP encrypt → mbedTLS AES-GCM → which combined with Opus encode
-// goes deeper than 8 K of stack. Overflow fires exactly when wake-word
-// detection flips conv_active=true and the first encoded packet runs
-// through SRTP — guard trip + reboot mid-conversation.
-#define CAPTURE_TASK_STACK     16384
-#define PLAYBACK_TASK_STACK    16384  // symmetric: same SRTP decrypt depth
+// goes much deeper than 16 K. 16 K caused _xt_context_save crash on
+// IRQ delivery during the SRTP path right after wake_word fires
+// (corrupted stack → IRQ context save lands on bad memory → reboot).
+// 32 K gives breathing room for the deepest combined path.
+#define CAPTURE_TASK_STACK     32768
+#define PLAYBACK_TASK_STACK    16384  // playback decrypt is lighter
 #define FRAMES_PER_PKT         320     // 20 ms @ 16 kHz — matches Opus VoIP framing
 #define PCM_BYTES_PER_PKT      (FRAMES_PER_PKT * sizeof(int16_t))
 #define OPUS_MAX_PACKET_BYTES  600     // worst-case 20 ms @ 32 kbps + headroom
 #define OPUS_BITRATE_BPS       24000   // 24 kbps mono voice — comfortable margin
-#define OPUS_COMPLEXITY        5       // 0..10; 5 is the practical S3 sweet spot
+// pipecat-esp32 uses 0 (fastest) for a reason: silk_burg_modified_FLP at
+// any complexity > 0 triggers far more allocations from Opus's pseudo-
+// stack, which lives in PSRAM here, and the PSRAM allocation cost per
+// frame snowballs into a watchdog-triggering >5 s opus_encode call on
+// the first sustained audio. Keep at 0 for runtime safety.
+#define OPUS_COMPLEXITY        0       // 0..10; 0 = fastest, matches pipecat-esp32
 
 // Playback jitter buffer: 200 ms of mono int16 @ 16 kHz. Long enough to
 // absorb network bursts, short enough that barge-in feels responsive.
@@ -168,7 +174,22 @@ static void on_audio_track(uint8_t *data, size_t size, void *userdata)
 {
     if (!data || !s_session.opus_dec) return;
 
+    /* Defensive bounds: Opus payload should be < 1500 (UDP MTU). A
+     * huge `size` here almost certainly means SRTP decrypt returned
+     * garbage or RTP demux fed us a bogus length — feeding that into
+     * opus_decode dereferences invalid memory in CELT and crashes. */
+    if (size == 0 || size > 1500) {
+        ESP_LOGW(TAG, "on_audio_track: rejecting size=%u", (unsigned)size);
+        return;
+    }
+
     static int16_t pcm[FRAMES_PER_PKT * 6];   // headroom for any well-formed Opus packet
+    static int s_decode_count = 0;
+    if (s_decode_count < 5) {
+        ESP_LOGI(TAG, "opus_decode #%d size=%u first=%02x %02x",
+                 s_decode_count, (unsigned)size, data[0], size > 1 ? data[1] : 0);
+    }
+    s_decode_count++;
     int decoded = opus_decode(s_session.opus_dec,
                               data, size,
                               pcm, sizeof(pcm) / sizeof(pcm[0]),
