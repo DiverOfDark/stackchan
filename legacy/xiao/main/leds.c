@@ -7,15 +7,18 @@
 
 static const char *TAG = "leds";
 
-// XVF3800 LED "effects" are firmware-defined integers — the Seeed example
-// only uses 1 ("solid") and doesn't enumerate the rest. We pick values
-// conservatively (1=solid for steady states, a higher-numbered animation
-// for the moving states) and adjust empirically on hardware if the chosen
-// effect ID renders something different than expected.
+// XVF3800 LED effect IDs (per the reSpeaker_XVF3800_USB_4MIC_ARRAY host_control
+// README — github.com/respeaker/reSpeaker_XVF3800_USB_4MIC_ARRAY). The Seeed
+// XIAO RGB wiki only ever uses 1, leaving the rest of the enum undocumented;
+// we burned a session believing "1 = solid" when it actually means BREATH.
+//   0 = off          1 = breath
+//   2 = rainbow      3 = single color (this is the real "solid fill")
+//   4 = DoA          (rotates to point at the loudest mic direction)
 #define EFFECT_OFF      0
-#define EFFECT_SOLID    1
-#define EFFECT_PULSE    2     // soft breathing
-#define EFFECT_SPIN     3     // rotating dot/segment
+#define EFFECT_BREATH   1     // breathing pulse
+#define EFFECT_RAINBOW  2     // cycle through hues
+#define EFFECT_SOLID    3     // steady single-colour fill
+#define EFFECT_DOA      4     // direction-of-arrival rotating segment
 
 // Colour palette in 24-bit RGB. Tuned for daylight visibility on the
 // Seeed carrier's diffused ring.
@@ -85,24 +88,19 @@ void leds_set(led_state_t s)
     case LED_STATE_PROVISIONING:
         xvf3800_set_led_color(RGB_BLUE);
         xvf3800_set_led_speed(0x20);            // slow breath
-        xvf3800_set_led_effect(EFFECT_PULSE);
+        xvf3800_set_led_effect(EFFECT_BREATH);
         break;
     case LED_STATE_CONNECTING:
         xvf3800_set_led_color(RGB_BLUE);
-        xvf3800_set_led_speed(0x80);            // brisk spin
-        xvf3800_set_led_effect(EFFECT_SPIN);
+        xvf3800_set_led_speed(0x80);            // brisk breath
+        xvf3800_set_led_effect(EFFECT_BREATH);
         break;
     case LED_STATE_NEGOTIATING:
-        // Distinct from CONNECTING (Wi-Fi/signaling) so the user can tell
-        // they're stuck in ICE/DTLS specifically — most often a backend
-        // SDP problem (ESP32_COMPAT off → unreachable K8s candidate).
-        // Was amber, but on this XMOS LED driver amber-at-low-brightness
-        // diffused down to a "dull green" that was easy to mistake for
-        // LISTENING. Purple has no green channel at all, so there's no
-        // chance of that misread.
+        // Distinct from CONNECTING so the user can tell they're stuck in
+        // ICE/DTLS specifically. Purple at a moderate breath rate.
         xvf3800_set_led_color(RGB_PURPLE);
         xvf3800_set_led_speed(0x60);
-        xvf3800_set_led_effect(EFFECT_SPIN);
+        xvf3800_set_led_effect(EFFECT_BREATH);
         break;
     case LED_STATE_LISTENING:
         xvf3800_set_led_color(RGB_GREEN);
@@ -110,20 +108,20 @@ void leds_set(led_state_t s)
         break;
     case LED_STATE_WAKE_ACK:
         // Bright white flash, held for WAKE_ACK_HOLD_MS so the playback
-        // task's per-iteration LISTENING set doesn't immediately mask it.
+        // task's post-TTS LISTENING set doesn't immediately mask it.
         xvf3800_set_led_color(RGB_WHITE);
         xvf3800_set_led_brightness(0xFF);
         xvf3800_set_led_effect(EFFECT_SOLID);
         s_hold_until_us = now + WAKE_ACK_HOLD_MS * 1000;
         break;
     case LED_STATE_SPEAKING:
-        // Pink (not green) so the user can tell at a glance whether the
-        // bot is talking or just listening — same-color ring with only
-        // an effect difference was hard to read, especially since the
-        // chosen EFFECT_SPIN ID renders as a breath on our XMOS build.
+        // Pink solid while TTS plays. Tried EFFECT_DOA (rotating segment
+        // following the loudest mic direction) but it ends up tracking
+        // the device's own speaker output and drifts unpredictably —
+        // solid is cleaner and the colour change alone (vs LISTENING
+        // green) is enough of an at-a-glance signal.
         xvf3800_set_led_color(RGB_PINK);
-        xvf3800_set_led_speed(0xA0);            // fast spin while TTS plays
-        xvf3800_set_led_effect(EFFECT_SPIN);
+        xvf3800_set_led_effect(EFFECT_SOLID);
         break;
     case LED_STATE_MUTED:
         xvf3800_set_led_color(RGB_RED);
@@ -132,7 +130,8 @@ void leds_set(led_state_t s)
     case LED_STATE_ERROR:
         xvf3800_set_led_color(RGB_RED);
         xvf3800_set_led_speed(0xC0);            // urgent
-        xvf3800_set_led_effect(EFFECT_PULSE);
+        xvf3800_set_led_effect(EFFECT_BREATH);
         break;
     }
 }
+
