@@ -13,7 +13,11 @@ typedef struct StunAttribute StunAttribute;
 
 typedef struct StunMessage StunMessage;
 
-#define STUN_ATTR_BUF_SIZE 256
+// TURN Send/Data indications wrap a DTLS / RTP / SRTP payload (up to ~1300
+// bytes for our 1500-byte path MTU minus TURN/IP headers). The buffer must
+// fit a Send indication header + XOR-PEER-ADDRESS + DATA attr + payload.
+// Bumped from 256 → 1600 to accommodate the relayed payload.
+#define STUN_ATTR_BUF_SIZE 1600
 #define MAGIC_COOKIE 0x2112A442
 #define STUN_FINGERPRINT_XOR 0x5354554e
 
@@ -30,6 +34,12 @@ typedef enum StunMethod {
 
   STUN_METHOD_BINDING = 0x0001,
   STUN_METHOD_ALLOCATE = 0x0003,
+  // TURN methods (RFC 5766 §13)
+  STUN_METHOD_REFRESH = 0x0004,
+  STUN_METHOD_SEND = 0x0006,
+  STUN_METHOD_DATA = 0x0007,
+  STUN_METHOD_CREATE_PERMISSION = 0x0008,
+  STUN_METHOD_CHANNEL_BIND = 0x0009,
 
 } StunMethod;
 
@@ -38,7 +48,18 @@ typedef enum StunAttrType {
   STUN_ATTR_TYPE_MAPPED_ADDRESS = 0x0001,
   STUN_ATTR_TYPE_USERNAME = 0x0006,
   STUN_ATTR_TYPE_MESSAGE_INTEGRITY = 0x0008,
+  // TURN/STUN error response carries ERROR-CODE (RFC 5389 §15.6 / RFC 5766
+  // §10.1). Required to recognise auth challenges and nonce rotation.
+  STUN_ATTR_TYPE_ERROR_CODE = 0x0009,
+  // TURN ChannelData framing (RFC 5766 §11). Currently not used (we wrap
+  // via Send indications), but reserved here for future ChannelBind work.
+  STUN_ATTR_TYPE_CHANNEL_NUMBER = 0x000c,
   STUN_ATTR_TYPE_LIFETIME = 0x000d,
+  // TURN data path attributes (RFC 5766 §14.3 / §14.4). XOR-PEER-ADDRESS
+  // names the peer for Send/Data/CreatePermission/ChannelBind; DATA carries
+  // the relayed payload inside Send/Data indications.
+  STUN_ATTR_TYPE_XOR_PEER_ADDRESS = 0x0012,
+  STUN_ATTR_TYPE_DATA = 0x0013,
   STUN_ATTR_TYPE_REALM = 0x0014,
   STUN_ATTR_TYPE_NONCE = 0x0015,
   STUN_ATTR_TYPE_XOR_RELAYED_ADDRESS = 0x0016,
@@ -92,6 +113,16 @@ struct StunMessage {
   char nonce[64];
   Address mapped_addr;
   Address relayed_addr;
+  // TURN-specific fields populated by stun_parse_msg_buf:
+  //   peer_addr  — XOR-PEER-ADDRESS (Send/Data indications, CreatePermission resp)
+  //   data_ptr/data_len — DATA attribute payload (inside Data indications);
+  //                       points into `buf`, so the StunMessage must outlive
+  //                       any use of these pointers.
+  //   error_code — ERROR-CODE numeric value (401, 438, etc.), 0 if absent.
+  Address peer_addr;
+  uint8_t* data_ptr;
+  uint16_t data_len;
+  uint16_t error_code;
   uint8_t buf[STUN_ATTR_BUF_SIZE];
   size_t size;
 };

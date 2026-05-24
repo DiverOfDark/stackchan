@@ -143,12 +143,33 @@ void stun_parse_msg_buf(StunMessage* msg) {
     msg->stunclass = STUN_CLASS_REQUEST;
   }
 
+  /* The STUN method is the low 12 bits of `type` (with the class bits
+   * interleaved). Compare against exact values rather than the bitwise-AND
+   * trick used originally — that gave false positives (e.g. CREATE_PERMISSION
+   * 0x0008 has 0x0001 set, so it'd be misread as BINDING). */
   msg->stunmethod = ntohs(header->type) & 0x0FFF;
-  if ((msg->stunmethod & STUN_METHOD_ALLOCATE) == STUN_METHOD_ALLOCATE) {
-    msg->stunmethod = STUN_METHOD_ALLOCATE;
-  } else if ((msg->stunmethod & STUN_METHOD_BINDING) == STUN_METHOD_BINDING) {
-    msg->stunmethod = STUN_METHOD_BINDING;
+  switch (msg->stunmethod) {
+    case STUN_METHOD_BINDING:
+    case STUN_METHOD_ALLOCATE:
+    case STUN_METHOD_REFRESH:
+    case STUN_METHOD_SEND:
+    case STUN_METHOD_DATA:
+    case STUN_METHOD_CREATE_PERMISSION:
+    case STUN_METHOD_CHANNEL_BIND:
+      /* known — leave value as-is */
+      break;
+    default:
+      LOGD("Unknown STUN method 0x%04x", msg->stunmethod);
+      break;
   }
+
+  /* Reset the per-message TURN-specific fields each parse — recv_msg structs
+   * are routinely reused across responses and stale peer/data pointers would
+   * leak into the wrong message. */
+  msg->data_ptr = NULL;
+  msg->data_len = 0;
+  msg->error_code = 0;
+  memset(&msg->peer_addr, 0, sizeof(msg->peer_addr));
 
   while (pos < length) {
     StunAttribute* attr = (StunAttribute*)(msg->buf + pos);
@@ -197,6 +218,39 @@ void stun_parse_msg_buf(StunMessage* msg) {
         *((uint32_t*)mask) = htonl(MAGIC_COOKIE);
         memcpy(mask + 4, header->transaction_id, sizeof(header->transaction_id));
         stun_get_mapped_address(attr->value, mask, &msg->mapped_addr);
+        break;
+      case STUN_ATTR_TYPE_XOR_PEER_ADDRESS:
+        /* XOR-PEER-ADDRESS uses the same XOR scheme as XOR-MAPPED-ADDRESS:
+         * port XORed with the high 16 bits of the magic cookie, IPv4 XORed
+         * with the magic cookie itself. Used in CreatePermission / Send /
+         * Data / ChannelBind messages to name the remote peer. */
+        *((uint32_t*)mask) = htonl(MAGIC_COOKIE);
+        memcpy(mask + 4, header->transaction_id, sizeof(header->transaction_id));
+        stun_get_mapped_address(attr->value, mask, &msg->peer_addr);
+        break;
+      case STUN_ATTR_TYPE_DATA:
+        /* Pointer into the recv buffer — caller must not free `msg->buf`
+         * before consuming msg->data_ptr. */
+        msg->data_ptr = (uint8_t*)attr->value;
+        msg->data_len = ntohs(attr->length);
+        break;
+      case STUN_ATTR_TYPE_ERROR_CODE:
+        /* RFC 5389 §15.6 layout:
+         *   bytes 0-1: reserved (must be 0)
+         *   byte 2: error class (1-6)
+         *   byte 3: error code modulo 100 (0-99)
+         *   bytes 4+: UTF-8 reason phrase (not parsed here)
+         * Composite numeric code = class*100 + number. */
+        if (ntohs(attr->length) >= 4) {
+          uint8_t class = (uint8_t)attr->value[2] & 0x07;
+          uint8_t number = (uint8_t)attr->value[3];
+          msg->error_code = (uint16_t)class * 100 + number;
+          LOGD("STUN ERROR-CODE %u", msg->error_code);
+        }
+        break;
+      case STUN_ATTR_TYPE_CHANNEL_NUMBER:
+        /* Reserved for future ChannelBind support; parser accepts but
+         * doesn't act on it. We currently use Send/Data indications. */
         break;
       case STUN_ATTR_TYPE_PRIORITY:
         break;

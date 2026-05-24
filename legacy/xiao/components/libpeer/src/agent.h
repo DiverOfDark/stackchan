@@ -70,6 +70,40 @@ struct Agent {
   int candidate_pairs_num;
   int use_candidate;
   uint32_t transaction_id[3];
+
+  /* --- TURN client state (set by agent_create_turn_addr after a
+   * successful Allocate response; consumed when sending CreatePermission,
+   * Send indications, and Refresh) ---
+   *
+   * turn_server_addr — where to send TURN messages (NOT the relayed
+   *                    address; that lives in local_candidates as a
+   *                    RELAY-type candidate).
+   * turn_username / turn_credential — long-term cred used for MESSAGE-
+   *                    INTEGRITY on every TURN request after Allocate.
+   *                    Allocate itself does an unauthenticated probe first
+   *                    and the server returns realm+nonce in the 401
+   *                    response, which is then folded into the retry. We
+   *                    cache them on the Agent so subsequent
+   *                    CreatePermission / Refresh / etc. don't have to
+   *                    re-do the challenge dance every time.
+   * turn_realm / turn_nonce — server-provided long-term-cred parameters.
+   *                    Nonce can rotate (server returns 438 with a fresh
+   *                    nonce); CreatePermission code handles that.
+   * turn_allocated — true after Allocate succeeded and a RELAY candidate
+   *                  was added to local_candidates.
+   * turn_permission_addr / turn_permission_set — the peer address we last
+   *                    asked for CreatePermission on, and whether the
+   *                    server acked it. We only support one active
+   *                    permission at a time (matches our single
+   *                    nominated_pair model). */
+  Address turn_server_addr;
+  char turn_username[128];
+  char turn_credential[64];
+  char turn_realm[64];
+  char turn_nonce[64];
+  bool turn_allocated;
+  Address turn_permission_addr;
+  bool turn_permission_set;
 };
 
 void agent_gather_candidate(Agent* agent, const char* urls, const char* username, const char* credential);
@@ -95,5 +129,12 @@ int agent_create(Agent* agent);
 void agent_destroy(Agent* agent);
 
 void agent_update_candidate_pairs(Agent* agent);
+
+/* Ask the TURN server to permit the given peer address to send to us
+ * through our allocation. Must be called before any Send indication to
+ * that peer (RFC 5766 §9). Returns 0 on success, -1 on failure.
+ * Safe to call repeatedly with the same address — re-issues the permission
+ * (each one is valid for 5 min; this also acts as a refresh). */
+int agent_turn_set_permission(Agent* agent, Address* peer_addr);
 
 #endif  // AGENT_H_

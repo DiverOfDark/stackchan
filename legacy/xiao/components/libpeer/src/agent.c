@@ -233,7 +233,197 @@ static int agent_create_turn_addr(Agent* agent, Address* serv_addr, const char* 
   memcpy(&turn_addr, &recv_msg.relayed_addr, sizeof(Address));
   IceCandidate* ice_candidate = agent->local_candidates + agent->local_candidates_count++;
   ice_candidate_create(ice_candidate, agent->local_candidates_count, ICE_CANDIDATE_TYPE_RELAY, &turn_addr);
+
+  /* Stash the auth context so subsequent CreatePermission / Send / Refresh
+   * can re-sign without re-doing the 401-challenge dance. realm + nonce
+   * come from the *first* (401) response that was parsed into recv_msg
+   * before the second send overwrote it — they're already on recv_msg
+   * because stun_msg_write_attr mirrors REALM/NONCE into the message
+   * struct as we set them in the retry. */
+  memcpy(&agent->turn_server_addr, serv_addr, sizeof(Address));
+  strncpy(agent->turn_username, username, sizeof(agent->turn_username) - 1);
+  agent->turn_username[sizeof(agent->turn_username) - 1] = '\0';
+  strncpy(agent->turn_credential, credential, sizeof(agent->turn_credential) - 1);
+  agent->turn_credential[sizeof(agent->turn_credential) - 1] = '\0';
+  strncpy(agent->turn_realm, recv_msg.realm, sizeof(agent->turn_realm) - 1);
+  agent->turn_realm[sizeof(agent->turn_realm) - 1] = '\0';
+  strncpy(agent->turn_nonce, recv_msg.nonce, sizeof(agent->turn_nonce) - 1);
+  agent->turn_nonce[sizeof(agent->turn_nonce) - 1] = '\0';
+  agent->turn_allocated = true;
+  agent->turn_permission_set = false;
+  LOGI("TURN allocated; realm='%s' nonce='%s' (auth context cached)",
+       agent->turn_realm, agent->turn_nonce);
   return ret;
+}
+
+/* ============================================================
+ * TURN client extensions (RFC 5766)
+ *
+ * Upstream libpeer only implements Allocate — it gathers a relay address
+ * but can't actually USE it. Sending data through the relay requires
+ * CreatePermission (or ChannelBind) to authorise the peer, then either
+ * Send indications or ChannelData framing for the data itself.
+ *
+ * We implement the Send indication path (slightly more overhead per
+ * packet vs ChannelData, but simpler — no channel-number bookkeeping
+ * and the auth dance has fewer states to refresh).
+ *
+ * Functions in this block do not appear in upstream libpeer; if/when
+ * the library grows real TURN support, this whole block can be deleted
+ * and the call sites pointed at the new APIs.
+ * ============================================================ */
+
+/* Build an XOR-PEER-ADDRESS attribute value from a peer Address. Identical
+ * XOR scheme to XOR-MAPPED-ADDRESS: port XORed against the high 16 bits of
+ * the magic cookie, IPv4 XORed against the full magic cookie. Returns the
+ * encoded byte length (8 for IPv4, 20 for IPv6). */
+static int agent_turn_encode_peer_address(StunMessage* msg, Address* peer_addr,
+                                          char* out_buf) {
+  uint8_t mask[16];
+  StunHeader* header = (StunHeader*)msg->buf;
+  *((uint32_t*)mask) = htonl(MAGIC_COOKIE);
+  memcpy(mask + 4, header->transaction_id, sizeof(header->transaction_id));
+  return stun_set_mapped_address(out_buf, mask, peer_addr);
+}
+
+/* Synchronously send a CreatePermission request to the cached TURN server
+ * and wait for the success response. Handles the 438 / 401 nonce-rotation
+ * retry once (server occasionally rotates the nonce as a freshness measure).
+ *
+ * Returns 0 on success, -1 on transport/auth failure. */
+int agent_turn_set_permission(Agent* agent, Address* peer_addr) {
+  if (!agent->turn_allocated) {
+    LOGE("agent_turn_set_permission called before Allocate");
+    return -1;
+  }
+  StunMessage send_msg;
+  StunMessage recv_msg;
+  char peer_attr[20];
+  int peer_attr_len;
+  char addr_string[ADDRSTRLEN];
+
+  addr_to_string(peer_addr, addr_string, sizeof(addr_string));
+  LOGI("TURN CreatePermission for peer %s:%d", addr_string, peer_addr->port);
+
+  for (int attempt = 0; attempt < 2; attempt++) {
+    memset(&send_msg, 0, sizeof(send_msg));
+    memset(&recv_msg, 0, sizeof(recv_msg));
+    stun_msg_create(&send_msg, STUN_METHOD_CREATE_PERMISSION);
+
+    peer_attr_len = agent_turn_encode_peer_address(&send_msg, peer_addr, peer_attr);
+    stun_msg_write_attr(&send_msg, STUN_ATTR_TYPE_XOR_PEER_ADDRESS,
+                        peer_attr_len, peer_attr);
+    stun_msg_write_attr(&send_msg, STUN_ATTR_TYPE_USERNAME,
+                        strlen(agent->turn_username), agent->turn_username);
+    stun_msg_write_attr(&send_msg, STUN_ATTR_TYPE_NONCE,
+                        strlen(agent->turn_nonce), agent->turn_nonce);
+    stun_msg_write_attr(&send_msg, STUN_ATTR_TYPE_REALM,
+                        strlen(agent->turn_realm), agent->turn_realm);
+    stun_msg_finish(&send_msg, STUN_CREDENTIAL_LONG_TERM,
+                    agent->turn_credential, strlen(agent->turn_credential));
+
+    int ret = agent_socket_send(agent, &agent->turn_server_addr,
+                                send_msg.buf, send_msg.size);
+    if (ret < 0) {
+      LOGE("CreatePermission send failed");
+      return -1;
+    }
+
+    ret = agent_socket_recv_attempts(agent, NULL, recv_msg.buf,
+                                     sizeof(recv_msg.buf),
+                                     AGENT_STUN_RECV_MAXTIMES);
+    if (ret <= 0) {
+      LOGE("CreatePermission recv timed out");
+      return -1;
+    }
+    stun_parse_msg_buf(&recv_msg);
+
+    if (recv_msg.stunclass == STUN_CLASS_RESPONSE &&
+        recv_msg.stunmethod == STUN_METHOD_CREATE_PERMISSION) {
+      memcpy(&agent->turn_permission_addr, peer_addr, sizeof(Address));
+      agent->turn_permission_set = true;
+      LOGI("CreatePermission acked");
+      return 0;
+    }
+
+    if (recv_msg.stunclass == STUN_CLASS_ERROR &&
+        (recv_msg.error_code == 438 || recv_msg.error_code == 401) &&
+        strlen(recv_msg.nonce) > 0) {
+      /* Nonce rotation — server included a fresh nonce + realm in the
+       * error response. Cache and retry once. */
+      LOGI("CreatePermission %u, retrying with new nonce", recv_msg.error_code);
+      strncpy(agent->turn_nonce, recv_msg.nonce, sizeof(agent->turn_nonce) - 1);
+      agent->turn_nonce[sizeof(agent->turn_nonce) - 1] = '\0';
+      if (strlen(recv_msg.realm) > 0) {
+        strncpy(agent->turn_realm, recv_msg.realm, sizeof(agent->turn_realm) - 1);
+        agent->turn_realm[sizeof(agent->turn_realm) - 1] = '\0';
+      }
+      continue;
+    }
+
+    LOGE("CreatePermission failed: class=%d method=%d error=%u",
+         recv_msg.stunclass, recv_msg.stunmethod, recv_msg.error_code);
+    return -1;
+  }
+  LOGE("CreatePermission gave up after nonce-retry");
+  return -1;
+}
+
+/* Build a TURN Send indication wrapping `data` for delivery to `peer_addr`.
+ * Output is written into `out_buf` (caller provides enough space — DATA
+ * payload + ~36 bytes header). Returns total wrapped length, or -1 on
+ * buffer too small. Indications are NOT authenticated (per RFC 5766
+ * §10.2) so no MESSAGE-INTEGRITY / FINGERPRINT — keeps the per-packet
+ * overhead small. */
+static int agent_turn_wrap_send_indication(Agent* agent, Address* peer_addr,
+                                           const uint8_t* data, int len,
+                                           uint8_t* out_buf, int out_cap) {
+  StunMessage send_msg;
+  char peer_attr[20];
+  int peer_attr_len;
+
+  memset(&send_msg, 0, sizeof(send_msg));
+  stun_msg_create(&send_msg, STUN_CLASS_INDICATION | STUN_METHOD_SEND);
+
+  peer_attr_len = agent_turn_encode_peer_address(&send_msg, peer_addr, peer_attr);
+  stun_msg_write_attr(&send_msg, STUN_ATTR_TYPE_XOR_PEER_ADDRESS,
+                      peer_attr_len, peer_attr);
+  /* DATA attribute is padded to a 4-byte boundary at the STUN level —
+   * stun_msg_write_attr already does that. Just hand it the raw payload. */
+  stun_msg_write_attr(&send_msg, STUN_ATTR_TYPE_DATA, (uint16_t)len,
+                      (char*)data);
+
+  if ((int)send_msg.size > out_cap) {
+    LOGE("Send indication too large for buffer: %d > %d",
+         (int)send_msg.size, out_cap);
+    return -1;
+  }
+  memcpy(out_buf, send_msg.buf, send_msg.size);
+  return (int)send_msg.size;
+}
+
+/* Route an outgoing packet to `peer_addr` via whichever local transport the
+ * nominated pair selects. If local is RELAY, wrap in a TURN Send indication
+ * and ship to the TURN server (which un-wraps and forwards to peer_addr on
+ * our behalf). Otherwise send directly. Used for media (Opus / DTLS / SRTP)
+ * AND for STUN connectivity-check binding requests / responses — both must
+ * travel the same path for the peer to see consistent source addresses. */
+static int agent_send_to_peer(Agent* agent, Address* peer_addr,
+                              const uint8_t* buf, int len) {
+  if (agent->nominated_pair &&
+      agent->nominated_pair->local &&
+      agent->nominated_pair->local->type == ICE_CANDIDATE_TYPE_RELAY &&
+      agent->turn_allocated) {
+    /* Wrap then send to the TURN server. 1700-byte buffer accommodates
+     * the ~36 bytes of TURN header + DATA-attribute padding above the
+     * payload, with margin for IPv6. */
+    uint8_t wrapped[1700];
+    int wrapped_len = agent_turn_wrap_send_indication(agent, peer_addr, buf, len,
+                                                      wrapped, sizeof(wrapped));
+    if (wrapped_len < 0) return -1;
+    return agent_socket_send(agent, &agent->turn_server_addr, wrapped, wrapped_len);
+  }
+  return agent_socket_send(agent, peer_addr, buf, len);
 }
 
 void agent_gather_candidate(Agent* agent, const char* urls, const char* username, const char* credential) {
@@ -300,7 +490,9 @@ void agent_get_local_description(Agent* agent, char* description, int length) {
 }
 
 int agent_send(Agent* agent, const uint8_t* buf, int len) {
-  return agent_socket_send(agent, &agent->nominated_pair->remote->addr, buf, len);
+  /* Goes through agent_send_to_peer so relay-typed local candidates
+   * automatically TURN-wrap the payload. */
+  return agent_send_to_peer(agent, &agent->nominated_pair->remote->addr, buf, len);
 }
 
 static void agent_create_binding_response(Agent* agent, StunMessage* msg, Address* addr) {
@@ -348,7 +540,11 @@ void agent_process_stun_request(Agent* agent, StunMessage* stun_msg, Address* ad
         header = (StunHeader*)stun_msg->buf;
         memcpy(agent->transaction_id, header->transaction_id, sizeof(header->transaction_id));
         agent_create_binding_response(agent, &msg, addr);
-        agent_socket_send(agent, addr, msg.buf, msg.size);
+        /* If the binding request came in via TURN, agent_recv unwrapped
+         * the Data indication and passes us the peer's address (not the
+         * TURN server's). Routing the response through agent_send_to_peer
+         * mirrors the path so the peer sees a symmetric exchange. */
+        agent_send_to_peer(agent, addr, msg.buf, msg.size);
         agent->binding_request_time = ports_get_epoch_time();
       }
       break;
@@ -373,7 +569,42 @@ int agent_recv(Agent* agent, uint8_t* buf, int len) {
   int ret = -1;
   StunMessage stun_msg;
   Address addr;
-  if ((ret = agent_socket_recv(agent, &addr, buf, len)) > 0 && stun_probe(buf, len) == 0) {
+
+  ret = agent_socket_recv(agent, &addr, buf, len);
+  if (ret <= 0) return ret;
+
+  /* If this is a TURN Data indication, unwrap it first so downstream
+   * processing sees the original peer's STUN/DTLS/SRTP payload, not the
+   * TURN envelope. After unwrap:
+   *   - `addr` becomes the peer's address (XOR-PEER-ADDRESS), not the
+   *     TURN server's source IP
+   *   - `buf` / `ret` are replaced with the inner payload
+   * Then we fall through to the regular STUN-vs-media demux below. */
+  if (stun_probe(buf, ret) == 0) {
+    memcpy(stun_msg.buf, buf, ret);
+    stun_msg.size = ret;
+    stun_parse_msg_buf(&stun_msg);
+
+    if (stun_msg.stunclass == STUN_CLASS_INDICATION &&
+        stun_msg.stunmethod == STUN_METHOD_DATA) {
+      if (!stun_msg.data_ptr || stun_msg.data_len == 0) {
+        LOGW("TURN Data indication with empty payload");
+        return -1;
+      }
+      if ((int)stun_msg.data_len > len) {
+        LOGE("TURN Data payload %u > buf %d", stun_msg.data_len, len);
+        return -1;
+      }
+      /* Copy first (data_ptr points into stun_msg.buf which we're about
+       * to overwrite when re-parsing). */
+      memcpy(buf, stun_msg.data_ptr, stun_msg.data_len);
+      ret = stun_msg.data_len;
+      addr = stun_msg.peer_addr;
+    }
+  }
+
+  /* Regular STUN-vs-media demux on (possibly unwrapped) payload. */
+  if (stun_probe(buf, ret) == 0) {
     memcpy(stun_msg.buf, buf, ret);
     stun_msg.size = ret;
     stun_parse_msg_buf(&stun_msg);
@@ -385,12 +616,18 @@ int agent_recv(Agent* agent, uint8_t* buf, int len) {
         agent_process_stun_response(agent, &stun_msg);
         break;
       case STUN_CLASS_ERROR:
+      case STUN_CLASS_INDICATION:
+        /* No-op: errors are logged in the parser; non-DATA indications
+         * (e.g., a SEND that bounced back) aren't expected here. */
         break;
       default:
         break;
     }
-    ret = 0;
+    /* Tell the caller "consumed internally, no media payload". */
+    return 0;
   }
+  /* Non-STUN payload (DTLS, RTP, SRTP) — return as-is so the caller can
+   * route it through the right protocol handler. */
   return ret;
 }
 
@@ -467,7 +704,8 @@ int agent_connectivity_check(Agent* agent) {
     addr_to_string(&agent->nominated_pair->remote->addr, addr_string, sizeof(addr_string));
     LOGD("send binding request to remote ip: %s, port: %d", addr_string, agent->nominated_pair->remote->addr.port);
     agent_create_binding_request(agent, &msg);
-    agent_socket_send(agent, &agent->nominated_pair->remote->addr, msg.buf, msg.size);
+    /* TURN-wrap if nominated pair uses a relay local candidate. */
+    agent_send_to_peer(agent, &agent->nominated_pair->remote->addr, msg.buf, msg.size);
   }
 
   agent_recv(agent, buf, sizeof(buf));
@@ -488,6 +726,22 @@ int agent_select_candidate_pair(Agent* agent) {
       agent->nominated_pair = &agent->candidate_pairs[i];
       agent->candidate_pairs[i].conncheck = 0;
       agent->candidate_pairs[i].state = ICE_CANDIDATE_STATE_INPROGRESS;
+      /* TURN-pair nomination: the TURN server drops outgoing data to
+       * unknown peers (RFC 5766 §10). Ask for permission for this remote
+       * address before the connectivity check sends the first Send
+       * indication. CreatePermission is also a 5-minute keepalive — we
+       * could re-issue on each new pair, but for our single-pair
+       * scenarios this single call is enough for the session length. */
+      if (agent->candidate_pairs[i].local &&
+          agent->candidate_pairs[i].local->type == ICE_CANDIDATE_TYPE_RELAY &&
+          agent->turn_allocated) {
+        if (agent_turn_set_permission(agent, &agent->candidate_pairs[i].remote->addr) != 0) {
+          LOGE("CreatePermission failed; relay pair will not be usable");
+          /* Don't mark the pair failed here — let the conncheck timeout
+           * trigger normal failure path so other pairs (if any) get a
+           * chance. */
+        }
+      }
       return 0;
     } else if (agent->candidate_pairs[i].state == ICE_CANDIDATE_STATE_INPROGRESS) {
       agent->candidate_pairs[i].conncheck++;
