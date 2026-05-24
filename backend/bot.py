@@ -252,11 +252,44 @@ async def run_bot(webrtc_connection):
     )
 
     context = LLMContext()
+    # After 5 minutes with no speech, we'll wipe the dialogue history
+    # (keeping system + tool messages so the LLM still knows who it is
+    # and what it can do). Without this the context grows unbounded as
+    # long as the WebRTC peer connection stays up — at 15k+ tokens per
+    # turn after a long session, each Hermes call becomes slow and the
+    # earlier-turns drift seeds confused responses.
+    CONTEXT_IDLE_RESET_SECS = 300.0
     user_aggregator, assistant_aggregator = LLMContextAggregatorPair(
         context,
         # Silero VAD drives turn-taking AND barge-in / interruptions.
-        user_params=LLMUserAggregatorParams(vad_analyzer=SileroVADAnalyzer()),
+        # user_idle_timeout fires on_user_turn_idle after the user has
+        # been silent for that long; we use that as the reset trigger.
+        user_params=LLMUserAggregatorParams(
+            vad_analyzer=SileroVADAnalyzer(),
+            user_idle_timeout=CONTEXT_IDLE_RESET_SECS,
+        ),
     )
+
+    @user_aggregator.event_handler("on_user_turn_idle")
+    async def _on_user_idle(aggregator):
+        """Drop dialogue history after a long silence.
+
+        The system prompt is carried on OpenAILLMService.Settings
+        (``system_instruction`` above) and re-prepended on every call,
+        so the LLM still knows who it is after this reset. The next
+        user utterance sees a fresh slate.
+        """
+        try:
+            n_before = len(context.get_messages())
+            if n_before == 0:
+                return
+            context.set_messages([])
+            logger.info(
+                f"context reset after {CONTEXT_IDLE_RESET_SECS:.0f}s idle: "
+                f"dropped {n_before} message(s)"
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(f"context reset failed: {exc!r}")
 
     pipeline = Pipeline(
         [
