@@ -4,6 +4,10 @@
 #include <string.h>
 #include <unistd.h>
 
+#ifdef ESP32
+#include "esp_random.h"
+#endif
+
 #include "stun.h"
 #include "utils.h"
 
@@ -51,9 +55,23 @@ void stun_msg_create(StunMessage* msg, uint16_t type) {
   header->type = htons(type);
   header->length = 0;
   header->magic_cookie = htonl(MAGIC_COOKIE);
-  header->transaction_id[0] = htonl(0x12345678);
-  header->transaction_id[1] = htonl(0x90abcdef);
-  header->transaction_id[2] = htonl(0x12345678);
+  /* RFC 5389 §6: 96-bit transaction ID MUST be uniformly random and
+   * unique across in-flight transactions. Upstream libpeer hardcoded
+   * 0x12345678/0x90abcdef/0x12345678 which works against permissive STUN
+   * servers (they match by source 5-tuple, ignore the tx-id collisions),
+   * but TURN's CreatePermission via STUNner needs distinct tx-ids per
+   * transaction — otherwise STUNner can short-circuit a fresh request
+   * against an in-flight transaction's cached response from the same
+   * client, ack'ing the message without actually creating the permission. */
+  for (int i = 0; i < 3; ++i) {
+    /* esp_random() returns uniformly random 32-bit ints; rand() works
+     * for native/host builds. Pick what's available. */
+#ifdef ESP32
+    header->transaction_id[i] = esp_random();
+#else
+    header->transaction_id[i] = ((uint32_t)rand() << 16) ^ (uint32_t)rand();
+#endif
+  }
   msg->size = sizeof(StunHeader);
 }
 
