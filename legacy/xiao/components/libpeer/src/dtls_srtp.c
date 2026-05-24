@@ -6,6 +6,7 @@
 #include "address.h"
 #include "config.h"
 #include "dtls_srtp.h"
+#include "stun.h"  /* PATCH(libpeer): TURN-unwrap in dtls_srtp_udp_recv */
 #if CONFIG_MBEDTLS_DEBUG
 #include "mbedtls/debug.h"
 #endif
@@ -32,8 +33,53 @@ int dtls_srtp_udp_recv(void* ctx, uint8_t* buf, size_t len) {
 
   int ret;
 
-  while ((ret = udp_socket_recvfrom(udp_socket, &udp_socket->bind_addr, buf, len)) <= 0) {
-    ports_sleep_ms(1);
+  while (1) {
+    ret = udp_socket_recvfrom(udp_socket, &udp_socket->bind_addr, buf, len);
+    if (ret <= 0) {
+      ports_sleep_ms(1);
+      continue;
+    }
+
+    /* PATCH(libpeer): TURN unwrap on the DTLS read path.
+     *
+     * Once we're past ICE and into DTLS, peer_connection.c's CONNECTED-
+     * state handler stops calling agent_recv and goes straight to
+     * dtls_srtp_handshake — which uses this callback to read directly
+     * from the UDP socket. Without TURN-awareness here, mbedtls sees
+     * the raw TURN Data-indication envelope (STUN-like framing wrapping
+     * the actual DTLS record) and fails with UNEXPECTED_MESSAGE
+     * (-0x7700) or INTERNAL_ERROR (-0x6c00) because the bytes don't
+     * look like a DTLS handshake record.
+     *
+     * Mirror the demux from agent.c::agent_recv:
+     *   - magic cookie at offset 4 → STUN frame
+     *   - STUN class=INDICATION, method=DATA → TURN Data indication;
+     *     extract the DATA attribute payload (the inner DTLS record)
+     *   - any other STUN frame (ICE keepalive binding etc.) → discard
+     *     and read the next packet
+     *   - non-STUN → pass through as-is (direct DTLS, no TURN)
+     */
+    if (ret >= (int)sizeof(StunHeader) && stun_probe(buf, ret) == 0) {
+      StunMessage msg;
+      memcpy(msg.buf, buf, ret);
+      msg.size = ret;
+      stun_parse_msg_buf(&msg);
+
+      if (msg.stunclass == STUN_CLASS_INDICATION &&
+          msg.stunmethod == STUN_METHOD_DATA &&
+          msg.data_ptr && msg.data_len > 0 &&
+          (int)msg.data_len <= (int)len) {
+        memcpy(buf, msg.data_ptr, msg.data_len);
+        ret = msg.data_len;
+        break;
+      }
+      /* STUN but not a TURN Data indication — likely an ICE keepalive
+       * binding request/response that arrived while DTLS was running.
+       * Drop and read the next packet. */
+      continue;
+    }
+    /* Non-STUN: assume it's a direct DTLS record (host-pair path). */
+    break;
   }
 
   LOGD("dtls_srtp_udp_recv (%d)", ret);
