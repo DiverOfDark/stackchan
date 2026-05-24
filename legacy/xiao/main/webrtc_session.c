@@ -47,38 +47,25 @@ static const char *TAG = "webrtc";
 // Playback jitter buffer: 200 ms of mono int16 @ 16 kHz. Long enough to
 // absorb network bursts, short enough that barge-in feels responsive.
 #define PLAYBACK_BUFFER_BYTES  (16000 * 2 / 5)
-// Mark as "speaking" if a non-silent TTS frame arrived within this window.
-// 1500 ms covers natural inter-word silences in TTS (commas, sentence
-// breaks) so we don't strobe the LED ring between SPEAKING and LISTENING
-// mid-sentence.
-#define SPEAKING_HOLD_MS       1500
 // PCM abs-max above which we treat a decoded frame as actual TTS audio
 // rather than aiortc/Opus comfort-noise. int16 amplitude — ≈ -30 dBFS.
 // Set well above any comfort-noise or codec artefact so a quiet room
-// stays in LISTENING reliably.
+// keeps last_rx_frame_tick stale.
 #define SPEAKING_PCM_THRESHOLD 1000
 
-// Mic-side energy gate that drives the TALKING LED. Uses RMS, not peak,
-// because peak saturates on transient sounds the user isn't actually
-// making with their voice — typing on a nearby keyboard hits int16
-// peak=32767 even though the typing isn't anywhere near as loud as
-// speech to the device. RMS averages across the 20 ms frame so a few
-// sample-wide clicks don't dominate. Measured levels at the 18 dB
-// software boost (>>13 in capture_task):
+// Mic-side energy gate that drives the LED state machine's TALKING signal.
+// Uses RMS, not peak, because peak saturates on transient sounds the user
+// isn't actually making with their voice — typing on a nearby keyboard
+// hits int16 peak=32767 even though the typing isn't anywhere near as
+// loud as speech to the device. RMS averages across the 20 ms frame so a
+// few sample-wide clicks don't dominate. Measured at the 18 dB software
+// boost (>>13 in capture_task):
 //   silent room                   rms ~  200-  500
 //   keyboard typing               rms ~ 1200- 2000
 //   bot-TTS echo (AEC residual)   rms ~ 2500- 4500
 //   user speaking into device     rms ~ 4000- 9000+
-// 4000 keeps typing and echo out while staying clearly under normal
-// speech.
+// 4000 keeps typing and echo out while staying clearly under normal speech.
 #define MIC_ACTIVE_THRESHOLD     4000
-// How long after the last loud mic frame we keep showing TALKING.
-// Bridges natural sub-syllable silences without flickering.
-#define TALKING_HOLD_MS          600
-// After TALKING releases, we show THINKING for up to this long while
-// waiting for backend TTS to start arriving. If TTS lands sooner the
-// SPEAKING latch takes priority and pre-empts THINKING.
-#define THINKING_MAX_MS          5000
 // End the conversation if no wake event AND no inbound TTS for this long.
 #define SESSION_IDLE_TIMEOUT_MS  10000
 
@@ -500,45 +487,17 @@ static void playback_task(void *arg)
         }
         audio_io_write(stereo, frames);
 
-        // LED state follows recent receive activity AND local mic energy.
-         // Only push an update when it changes — the playback loop runs at
-         // the I2S packet rate (~20 ms) and naive per-iteration leds_set
-         // calls saturate the XVF3800 I2C bus, momentarily blanking the
-         // ring on each effect-change command.
-         //
-         // Priority (highest first):
-         //   MUTED      — hardware switch trumps everything
-         //   SPEAKING   — inbound TTS energy in last 1.5 s
-         //   TALKING    — local mic energy in last 600 ms
-         //   THINKING   — mic just dropped, no TTS yet, within 5 s window
-         //   LISTENING  — default idle
-        TickType_t now = xTaskGetTickCount();
-        bool speaking = (now - s_session.last_rx_frame_tick) <
-                        pdMS_TO_TICKS(SPEAKING_HOLD_MS);
-        // TALKING is suppressed while bot is speaking — even at 10k mic
-        // threshold the AEC residual from our own speaker output can
-        // sometimes clear it, and a brief "user talking" flash during the
-        // bot's reply would just be noise. Barge-in remains possible via
-        // the backend's Silero VAD, which sees the raw uplink directly.
-        bool talking  = !speaking &&
-                        (now - s_session.last_mic_active_tick) <
-                            pdMS_TO_TICKS(TALKING_HOLD_MS);
-        bool thinking = !talking && !speaking &&
-                        ((now - s_session.last_mic_active_tick) <
-                            pdMS_TO_TICKS(TALKING_HOLD_MS + THINKING_MAX_MS));
-
-        if (s_session.connected) {
-            led_state_t want = button_is_muted() ? LED_STATE_MUTED
-                             : speaking          ? LED_STATE_SPEAKING
-                             : talking           ? LED_STATE_TALKING
-                             : thinking          ? LED_STATE_THINKING
-                                                 : LED_STATE_LISTENING;
-            static led_state_t last_pushed = LED_STATE_OFF;
-            if (want != last_pushed) {
-                leds_set(want);
-                last_pushed = want;
-            }
-        }
+        // Drive the live-conversation LED state machine from the data
+        // this task already has (inbound-audio energy timestamp,
+        // mic-energy timestamp, mute switch). leds_session_tick handles
+        // priority, hold timing, and the I2C-rate-limit dedup.
+        leds_session_tick(&(led_session_inputs_t){
+            .now_tick             = xTaskGetTickCount(),
+            .last_rx_frame_tick   = s_session.last_rx_frame_tick,
+            .last_mic_active_tick = s_session.last_mic_active_tick,
+            .connected            = s_session.connected,
+            .muted                = button_is_muted(),
+        });
     }
     vTaskDelete(NULL);
 }

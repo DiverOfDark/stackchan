@@ -153,3 +153,45 @@ void leds_set(led_state_t s)
     }
 }
 
+// ---------- Live-conversation state machine -------------------------------
+//
+// Hold timings. SPEAKING bridges natural inter-word silences inside a TTS
+// reply (comma in "Привет, Кирилл" is ~300 ms). TALKING bridges sub-syllable
+// silences in user speech. THINKING window starts when TALKING releases and
+// closes when SPEAKING starts or when the window times out without a reply.
+#define SPEAKING_HOLD_MS    1500
+#define TALKING_HOLD_MS      600
+#define THINKING_MAX_MS     5000
+
+led_state_t leds_session_tick(const led_session_inputs_t *inputs)
+{
+    static led_state_t s_last_pushed = LED_STATE_OFF;
+
+    if (!inputs->connected) {
+        // Connecting / negotiating LEDs are driven by webrtc_session's
+        // peer-state callback; don't fight it from here.
+        return s_last_pushed;
+    }
+
+    TickType_t now = inputs->now_tick;
+    bool speaking = (now - inputs->last_rx_frame_tick) <
+                    pdMS_TO_TICKS(SPEAKING_HOLD_MS);
+    bool talking  = !speaking &&
+                    (now - inputs->last_mic_active_tick) <
+                        pdMS_TO_TICKS(TALKING_HOLD_MS);
+    bool thinking = !talking && !speaking &&
+                    ((now - inputs->last_mic_active_tick) <
+                        pdMS_TO_TICKS(TALKING_HOLD_MS + THINKING_MAX_MS));
+
+    led_state_t want = inputs->muted ? LED_STATE_MUTED
+                     : speaking      ? LED_STATE_SPEAKING
+                     : talking       ? LED_STATE_TALKING
+                     : thinking      ? LED_STATE_THINKING
+                                     : LED_STATE_LISTENING;
+    if (want != s_last_pushed) {
+        leds_set(want);
+        s_last_pushed = want;
+    }
+    return want;
+}
+
