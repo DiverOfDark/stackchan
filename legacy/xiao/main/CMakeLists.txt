@@ -26,7 +26,7 @@ idf_component_register(
         wake_word
     PRIV_REQUIRES
         espressif__cjson
-        espressif__esp_peer
+        libpeer
         esphome__micro-opus
         espressif__button
 )

@@ -4,12 +4,11 @@
 #include <string.h>
 
 #include "esp_log.h"
-#include "esp_peer.h"
-#include "esp_peer_default.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/stream_buffer.h"
 #include "freertos/task.h"
 #include "opus.h"
+#include "peer.h"
 
 #include "audio_io.h"
 #include "button.h"
@@ -20,8 +19,8 @@
 static const char *TAG = "webrtc";
 
 // DTLS handshake + ICE state machine recurses deep — 4 KB is not enough,
-// hits the stack guard during the SRTP handshake. peer_demo example uses
-// 10 KB; matching that here.
+// hits the stack guard during the SRTP handshake. 10 KB matched esp_peer's
+// peer_demo; libpeer is similar shape, keep the same headroom.
 #define MAIN_LOOP_TASK_STACK   10240
 #define CAPTURE_TASK_STACK     8192
 #define PLAYBACK_TASK_STACK    8192
@@ -47,14 +46,14 @@ static const char *TAG = "webrtc";
 #endif
 
 typedef struct {
-    esp_peer_handle_t           peer;
-    pipecat_signaling_t        *sig;
-    // Ownership of the ICE-server backing strings — esp_peer keeps pointers
-    // into this list and uses them throughout the session, so it must
-    // outlive the peer handle. Freed in webrtc_session_stop.
-    pipecat_ice_server_t       *ice_servers;
-    size_t                      ice_server_count;
-    esp_peer_ice_server_cfg_t  *ice_server_cfgs;
+    PeerConnection        *peer;
+    pipecat_signaling_t   *sig;
+    // Ownership of the ICE-server backing strings — libpeer's IceServer
+    // struct keeps const char* pointers into this list throughout the
+    // session, so it must outlive the peer handle. Freed in
+    // webrtc_session_stop.
+    pipecat_ice_server_t  *ice_servers;
+    size_t                 ice_server_count;
     OpusEncoder           *opus_enc;
     OpusDecoder           *opus_dec;
     StreamBufferHandle_t   playback_buf;
@@ -67,75 +66,109 @@ typedef struct {
     volatile TickType_t    last_rx_frame_tick;
     volatile TickType_t    last_activity_tick;  // wake event or inbound TTS
     // 0 = no retry pending; nonzero = tick at which main_loop_task should
-    // call esp_peer_new_connection again. Set when on_state reports
-    // CONNECT_FAILED / DISCONNECTED so a backend hiccup or ESP32_COMPAT
-    // flip recovers without rebooting the device.
+    // tear down the failed PC and recreate it. libpeer doesn't have an
+    // esp_peer-style new_connection-on-existing-handle path — every retry
+    // is a fresh peer_connection_create().
     volatile TickType_t    retry_at_tick;
-    uint32_t               pts;        // monotonic frame timestamp
+    // The backend's SDP answer arrives on the same task as the
+    // onicecandidate callback that issued the POST. We can't call
+    // peer_connection_set_remote_description from that callback context
+    // (it deadlocks the libpeer loop), so the callback parks the answer
+    // here and main_loop_task feeds it in on the next tick.
+    char                  *pending_answer;
 } session_t;
 
 #define RETRY_INTERVAL_MS   5000
 
 static session_t s_session = {0};
 
-// ---------- esp_peer callbacks --------------------------------------------
+// Global one-time init guard — peer_init / peer_deinit must be balanced
+// across the entire lifetime of the firmware, not per session.
+static bool s_peer_initialized = false;
 
-static int on_state(esp_peer_state_t state, void *ctx)
+// ---------- libpeer callbacks --------------------------------------------
+
+// libpeer ICE/DTLS state transitions. State chart:
+//   NEW → CHECKING → CONNECTED → COMPLETED  (happy path)
+//   * → FAILED / DISCONNECTED / CLOSED       (error / shutdown)
+// CONNECTED means ICE pair selected; COMPLETED means DTLS-SRTP up and
+// peer_connection_send_audio will actually transmit. We gate on COMPLETED
+// so the first encoded packets aren't silently dropped.
+static void on_ice_state(PeerConnectionState state, void *userdata)
 {
-    ESP_LOGI(TAG, "peer state = %d", (int)state);
-    // esp_peer 1.4 enum (from include/esp_peer.h):
-    //   0 CLOSED   1 DISCONNECTED   2 NEW_CONNECTION   3 CANDIDATE_GATHERING
-    //   4 PAIRING  5 PAIRED         6 CONNECTING       7 CONNECTED
-    //   8 CONNECT_FAILED            9 DATA_CHANNEL_CONNECTED  ...
-    // Media (audio frames) can flow once CONNECTED (7) — that's when DTLS-
-    // SRTP is up. PAIRED (5) means ICE pair selected but DTLS still
-    // handshaking; CONNECTED is the right "OK to send audio" trigger.
+    ESP_LOGI(TAG, "peer state = %d (%s)", (int)state,
+             peer_connection_state_to_string(state));
     switch (state) {
-    case ESP_PEER_STATE_NEW_CONNECTION:
-    case ESP_PEER_STATE_CANDIDATE_GATHERING:
-    case ESP_PEER_STATE_PAIRING:
-    case ESP_PEER_STATE_PAIRED:
-    case ESP_PEER_STATE_CONNECTING:
-        // Negotiation in progress — amber spin so the user can tell at a
-        // glance that signaling worked but ICE/DTLS hasn't completed yet.
+    case PEER_CONNECTION_NEW:
+    case PEER_CONNECTION_CHECKING:
+    case PEER_CONNECTION_CONNECTED:
+        // CONNECTED here means ICE is done but DTLS-SRTP may not yet be up.
+        // Keep the "negotiating" LED until COMPLETED to avoid the user
+        // thinking they can talk while the first audio packets are still
+        // being dropped.
         leds_set(LED_STATE_NEGOTIATING);
         break;
-    case ESP_PEER_STATE_CONNECTED:
-    case ESP_PEER_STATE_DATA_CHANNEL_CONNECTED:
+    case PEER_CONNECTION_COMPLETED:
         if (!s_session.connected) {
             ESP_LOGI(TAG, "session ready for media");
         }
         s_session.connected = true;
         leds_set(LED_STATE_LISTENING);
         break;
-    case ESP_PEER_STATE_DISCONNECTED:
-    case ESP_PEER_STATE_CLOSED:
-    case ESP_PEER_STATE_CONNECT_FAILED:
+    case PEER_CONNECTION_FAILED:
+    case PEER_CONNECTION_DISCONNECTED:
+    case PEER_CONNECTION_CLOSED:
         s_session.connected = false;
         s_session.retry_at_tick =
             xTaskGetTickCount() + pdMS_TO_TICKS(RETRY_INTERVAL_MS);
         leds_set(LED_STATE_CONNECTING);
         break;
-    default:
-        break;
     }
-    return 0;
 }
 
-// Inbound TTS audio from the backend. Decode Opus → mono int16 → push to
-// the jitter buffer. The dedicated playback task drains it to I2S.
-static int on_audio_data(esp_peer_audio_frame_t *frame, void *ctx)
+// libpeer fires this exactly once per peer_connection_create_offer(), after
+// all candidates are gathered. The argument is the COMPLETE local SDP with
+// every candidate inlined as a=candidate lines — no trickle. We POST it to
+// /api/offer and stash the answer for main_loop_task to feed back in.
+// Called from libpeer's internal loop; cannot call
+// peer_connection_set_remote_description from here (re-enters the lock).
+static void on_local_sdp(char *sdp_text, void *userdata)
 {
-    if (!frame || !frame->data || !s_session.opus_dec) return -1;
+    if (!sdp_text) return;
+    ESP_LOGI(TAG, "local SDP gathered (%u bytes)", (unsigned)strlen(sdp_text));
+
+    char *answer_sdp = NULL;
+    esp_err_t err = pipecat_signaling_send_offer(
+        s_session.sig, sdp_text, &answer_sdp);
+    if (err != ESP_OK || !answer_sdp) {
+        ESP_LOGE(TAG, "send_offer failed: %s", esp_err_to_name(err));
+        // Trigger reconnect — main_loop_task will see retry_at_tick.
+        s_session.retry_at_tick =
+            xTaskGetTickCount() + pdMS_TO_TICKS(RETRY_INTERVAL_MS);
+        return;
+    }
+    // Hand off to main_loop_task. The previous pending_answer should
+    // have been consumed; if not, drop the old one (most recent wins).
+    char *old = s_session.pending_answer;
+    s_session.pending_answer = answer_sdp;
+    free(old);
+}
+
+// Inbound TTS audio from the backend. libpeer hands us the bare Opus
+// payload (already DePayloaded from RTP). Decode → mono int16 → push to
+// the jitter buffer. The dedicated playback task drains it to I2S.
+static void on_audio_track(uint8_t *data, size_t size, void *userdata)
+{
+    if (!data || !s_session.opus_dec) return;
 
     static int16_t pcm[FRAMES_PER_PKT * 6];   // headroom for any well-formed Opus packet
     int decoded = opus_decode(s_session.opus_dec,
-                              frame->data, frame->size,
+                              data, size,
                               pcm, sizeof(pcm) / sizeof(pcm[0]),
                               /*decode_fec=*/0);
     if (decoded <= 0) {
         ESP_LOGW(TAG, "opus_decode err %d", decoded);
-        return -1;
+        return;
     }
     size_t bytes = (size_t)decoded * sizeof(int16_t);
     size_t sent  = xStreamBufferSend(s_session.playback_buf, pcm, bytes, 0);
@@ -147,53 +180,56 @@ static int on_audio_data(esp_peer_audio_frame_t *frame, void *ctx)
     }
     s_session.last_rx_frame_tick = xTaskGetTickCount();
     s_session.last_activity_tick = s_session.last_rx_frame_tick;
+}
+
+// ---------- Peer connection lifecycle -------------------------------------
+
+// Build the PeerConfiguration and create a fresh PeerConnection. Called on
+// initial session start AND every retry — libpeer has no "reset existing
+// connection" path; every reconnect destroys and recreates.
+static int create_peer_connection(void)
+{
+    PeerConfiguration cfg = {
+        .audio_codec  = CODEC_OPUS,
+        .video_codec  = CODEC_NONE,
+        .datachannel  = DATA_CHANNEL_NONE,   // no RTVI events for now
+        .onaudiotrack = on_audio_track,
+        .user_data    = NULL,
+    };
+    // Copy at most 5 ICE servers into the fixed-size array. The strings
+    // are owned by s_session.ice_servers and outlive the peer connection.
+    size_t n = s_session.ice_server_count;
+    if (n > 5) n = 5;
+    for (size_t i = 0; i < n; ++i) {
+        cfg.ice_servers[i].urls       = s_session.ice_servers[i].url;
+        cfg.ice_servers[i].username   = s_session.ice_servers[i].username;
+        cfg.ice_servers[i].credential = s_session.ice_servers[i].credential;
+    }
+
+    s_session.peer = peer_connection_create(&cfg);
+    if (!s_session.peer) {
+        ESP_LOGE(TAG, "peer_connection_create failed");
+        return -1;
+    }
+    peer_connection_oniceconnectionstatechange(s_session.peer, on_ice_state);
+    peer_connection_onicecandidate(s_session.peer, on_local_sdp);
+
+    // Kicks off ICE gathering + DTLS cert mint. Returns immediately; the
+    // gathered SDP is delivered via on_local_sdp once gathering completes.
+    peer_connection_create_offer(s_session.peer);
     return 0;
 }
 
-// esp_peer hands us outbound signaling messages here: either the local SDP
-// offer (after esp_peer_new_connection) or trickled ICE candidates.
-static int on_msg(esp_peer_msg_t *msg, void *ctx)
+static void destroy_peer_connection(void)
 {
-    if (!msg || !msg->data) return -1;
-
-    switch (msg->type) {
-    case ESP_PEER_MSG_TYPE_SDP: {
-        // SDP offer to ship to the backend. Backend returns the SDP answer,
-        // which we hand back to esp_peer via esp_peer_send_msg.
-        char *answer_sdp = NULL;
-        esp_err_t err = pipecat_signaling_send_offer(
-            s_session.sig, (const char *)msg->data, &answer_sdp);
-        if (err != ESP_OK || !answer_sdp) {
-            ESP_LOGE(TAG, "send_offer failed: %s", esp_err_to_name(err));
-            return -1;
-        }
-        esp_peer_msg_t answer = {
-            .type = ESP_PEER_MSG_TYPE_SDP,
-            .data = (uint8_t *)answer_sdp,
-            .size = strlen(answer_sdp) + 1,
-        };
-        int r = esp_peer_send_msg(s_session.peer, &answer);
-        free(answer_sdp);
-        return r;
+    if (s_session.peer) {
+        peer_connection_close(s_session.peer);
+        peer_connection_destroy(s_session.peer);
+        s_session.peer = NULL;
     }
-    case ESP_PEER_MSG_TYPE_CANDIDATE: {
-        // Single trickled ICE candidate. esp_peer hands it to us as a single
-        // SDP "candidate:" line — we forward verbatim. sdp_mid + mline index
-        // aren't separately passed by this API revision; the backend's
-        // SmallWebRTC handler accepts the common case (mid="0", mline_index=0).
-        pipecat_ice_candidate_t c = {
-            .candidate       = (const char *)msg->data,
-            .sdp_mid         = "0",
-            .sdp_mline_index = 0,
-        };
-        if (pipecat_signaling_send_ice(s_session.sig, &c, 1) != ESP_OK) {
-            ESP_LOGW(TAG, "ice forward failed (non-fatal)");
-        }
-        return 0;
-    }
-    default:
-        ESP_LOGW(TAG, "unhandled msg type %d", (int)msg->type);
-        return 0;
+    if (s_session.pending_answer) {
+        free(s_session.pending_answer);
+        s_session.pending_answer = NULL;
     }
 }
 
@@ -202,16 +238,26 @@ static int on_msg(esp_peer_msg_t *msg, void *ctx)
 static void main_loop_task(void *arg)
 {
     while (s_session.running) {
-        if (s_session.peer) esp_peer_main_loop(s_session.peer);
-        // Recover from a failed/dropped peer connection (most common cause:
-        // backend just redeployed, ESP32_COMPAT toggled, transient TLS
-        // hiccup). on_state armed retry_at_tick when the failure fired;
-        // we re-arm new_connection here once the cooldown elapsed.
-        if (s_session.peer && s_session.retry_at_tick &&
+        if (s_session.peer) peer_connection_loop(s_session.peer);
+
+        // Feed the SDP answer to libpeer on the loop task (not in the
+        // onicecandidate callback context which holds libpeer's lock).
+        if (s_session.peer && s_session.pending_answer) {
+            char *answer = s_session.pending_answer;
+            s_session.pending_answer = NULL;
+            peer_connection_set_remote_description(
+                s_session.peer, answer, SDP_TYPE_ANSWER);
+            free(answer);
+        }
+
+        // Recover from a failed/dropped peer connection. libpeer doesn't
+        // expose a re-arm on an existing handle — tear down and recreate.
+        if (s_session.retry_at_tick &&
             xTaskGetTickCount() >= s_session.retry_at_tick) {
             ESP_LOGI(TAG, "retrying peer connection");
             s_session.retry_at_tick = 0;
-            esp_peer_new_connection(s_session.peer);
+            destroy_peer_connection();
+            create_peer_connection();
         }
         vTaskDelay(pdMS_TO_TICKS(10));
     }
@@ -290,15 +336,13 @@ static void capture_task(void *arg)
             ESP_LOGW(TAG, "opus_encode err %d", n);
             continue;
         }
-        esp_peer_audio_frame_t f = {
-            .pts  = s_session.pts,
-            .data = opus_buf,
-            .size = n,
-        };
-        if (esp_peer_send_audio(s_session.peer, &f) != 0) {
-            ESP_LOGW(TAG, "send_audio dropped");
+        // libpeer takes the bare Opus payload and handles RTP framing +
+        // SRTP encryption internally. Return -1 means "not yet connected"
+        // or "send queue full"; both transient, not worth logging on miss.
+        if (peer_connection_send_audio(s_session.peer, opus_buf, n) < 0) {
+            // Silent drop — happens for ~1-2 packets right after COMPLETED
+            // while libpeer's send pipeline warms up.
         }
-        s_session.pts += FRAMES_PER_PKT;  // 16 kHz sample-count clock
     }
     vTaskDelete(NULL);
 }
@@ -357,14 +401,23 @@ esp_err_t webrtc_session_start(const char *backend_url)
     if (s_session.running) return ESP_ERR_INVALID_STATE;
     if (!backend_url || !*backend_url) return ESP_ERR_INVALID_ARG;
 
+    // One-time global init for libpeer (mbedtls + srtp init lives in here).
+    if (!s_peer_initialized) {
+        if (peer_init() != 0) {
+            ESP_LOGE(TAG, "peer_init failed");
+            return ESP_FAIL;
+        }
+        s_peer_initialized = true;
+    }
+
     s_session.sig = pipecat_signaling_create(backend_url);
     if (!s_session.sig) return ESP_ERR_NO_MEM;
 
     // Pull TURN/STUN config from the backend's /ice-servers endpoint. With
     // pipecat-in-K8s + STUNner, the backend's SDP advertises a host
     // candidate on the pod IP (unreachable from the ESP32's LAN). The only
-    // way through is the relay-relay candidate pair via STUNner — esp_peer
-    // gathers its own TURN relay candidate when server_lists is populated.
+    // way through is a TURN-relay candidate via STUNner — libpeer gathers
+    // its own TURN relay candidate when the IceServer array is populated.
     // Failure here is non-fatal: degrade to host-only ICE (works on a flat
     // LAN with no NAT between client and server).
     if (pipecat_signaling_fetch_ice_servers(s_session.sig,
@@ -372,20 +425,13 @@ esp_err_t webrtc_session_start(const char *backend_url)
                                             &s_session.ice_server_count) != ESP_OK) {
         ESP_LOGW(TAG, "ice-servers fetch failed; continuing host-only");
     }
+    if (s_session.ice_server_count > 5) {
+        ESP_LOGW(TAG, "ICE: %u servers offered, libpeer caps at 5",
+                 (unsigned)s_session.ice_server_count);
+    }
     if (s_session.ice_server_count) {
-        s_session.ice_server_cfgs = calloc(s_session.ice_server_count,
-                                            sizeof(esp_peer_ice_server_cfg_t));
-        if (s_session.ice_server_cfgs) {
-            for (size_t i = 0; i < s_session.ice_server_count; ++i) {
-                s_session.ice_server_cfgs[i].stun_url = s_session.ice_servers[i].url;
-                s_session.ice_server_cfgs[i].user     = s_session.ice_servers[i].username;
-                s_session.ice_server_cfgs[i].psw      = s_session.ice_servers[i].credential;
-            }
-            ESP_LOGI(TAG, "ICE: %u server(s) configured",
-                     (unsigned)s_session.ice_server_count);
-        } else {
-            s_session.ice_server_count = 0;
-        }
+        ESP_LOGI(TAG, "ICE: %u server(s) configured",
+                 (unsigned)s_session.ice_server_count);
     }
 
     int opus_err = 0;
@@ -426,61 +472,11 @@ esp_err_t webrtc_session_start(const char *backend_url)
         return ESP_ERR_NO_MEM;
     }
 
-    // Self-signed cert generation is expensive; warm it up before opening
-    // the first peer connection so the first call doesn't stall the event
-    // loop for several seconds.
-    esp_peer_pre_generate_cert();
-
-    // Without extra_cfg the default peer implementation falls back to
-    // its baked-in defaults (per esp_peer_default.h: 100 KB jitter buffer,
-    // 400 KB send pool, 256-slot send queue, 16 max ICE candidates) which
-    // blow the heap once Wi-Fi + DTLS are also loaded. Scale down for our
-    // audio-only short-burst use case.
-    static esp_peer_default_cfg_t peer_default_cfg = {
-        .agent_recv_timeout = 100,
-        .data_ch_cfg = {
-            .recv_cache_size = 4096,    // we don't use data channels
-            .send_cache_size = 4096,
-        },
-        .rtp_cfg = {
-            .audio_recv_jitter = { .cache_size = 16 * 1024 },  // ~500 ms @ 24 kbps Opus
-            .send_pool_size    = 16 * 1024,
-            .send_queue_num    = 32,
-        },
-        .max_candidates    = 8,
-    };
-
-    esp_peer_cfg_t cfg = {
-        .server_lists     = s_session.ice_server_cfgs,
-        .server_num       = (uint8_t)s_session.ice_server_count,
-        .role             = ESP_PEER_ROLE_CONTROLLING,
-        .audio_dir        = ESP_PEER_MEDIA_DIR_SEND_RECV,
-        .video_dir        = ESP_PEER_MEDIA_DIR_NONE,
-        .audio_info       = {
-            .codec        = ESP_PEER_AUDIO_CODEC_OPUS,
-            .sample_rate  = 16000,
-            .channel      = 1,
-        },
-        .video_info       = { .codec = ESP_PEER_VIDEO_CODEC_NONE },
-        // Stay on ALL — RELAY-only causes esp_peer to abort with no binding
-        // attempts (state 4 → 8 in 20 ms) when the remote SDP has only host
-        // candidates: it apparently won't pair a local relay candidate with
-        // a remote host candidate. The proper fix is for the backend's
-        // aiortc to also gather a relay candidate via STUNner; then both
-        // sides have relay candidates and ICE picks the relay×relay pair.
-        .ice_trans_policy = ESP_PEER_ICE_TRANS_POLICY_ALL,
-        .on_state         = on_state,
-        .on_msg           = on_msg,
-        .on_audio_data    = on_audio_data,
-        .extra_cfg        = &peer_default_cfg,
-        .extra_size       = sizeof(peer_default_cfg),
-    };
-
-    int r = esp_peer_open(&cfg, esp_peer_get_default_impl(), &s_session.peer);
-    if (r != 0) {
-        ESP_LOGE(TAG, "esp_peer_open failed: %d", r);
-        pipecat_signaling_destroy(s_session.sig);
-        s_session.sig = NULL;
+    if (create_peer_connection() != 0) {
+        vStreamBufferDelete(s_session.playback_buf); s_session.playback_buf = NULL;
+        opus_decoder_destroy(s_session.opus_dec); s_session.opus_dec = NULL;
+        opus_encoder_destroy(s_session.opus_enc); s_session.opus_enc = NULL;
+        pipecat_signaling_destroy(s_session.sig); s_session.sig = NULL;
         return ESP_FAIL;
     }
 
@@ -496,9 +492,6 @@ esp_err_t webrtc_session_start(const char *backend_url)
                             PLAYBACK_TASK_STACK, NULL, 8,
                             &s_session.playback_task, 1);
 
-    // Triggers offer generation; the resulting SDP arrives via on_msg.
-    esp_peer_new_connection(s_session.peer);
-
     ESP_LOGI(TAG, "session started against %s", backend_url);
     return ESP_OK;
 }
@@ -509,11 +502,7 @@ void webrtc_session_stop(void)
     s_session.running   = false;
     s_session.connected = false;
 
-    if (s_session.peer) {
-        esp_peer_disconnect(s_session.peer);
-        esp_peer_close(s_session.peer);
-        s_session.peer = NULL;
-    }
+    destroy_peer_connection();
     if (s_session.playback_buf) {
         vStreamBufferDelete(s_session.playback_buf);
         s_session.playback_buf = NULL;
@@ -529,10 +518,6 @@ void webrtc_session_stop(void)
     if (s_session.sig) {
         pipecat_signaling_destroy(s_session.sig);
         s_session.sig = NULL;
-    }
-    if (s_session.ice_server_cfgs) {
-        free(s_session.ice_server_cfgs);
-        s_session.ice_server_cfgs = NULL;
     }
     if (s_session.ice_servers) {
         pipecat_signaling_free_ice_servers(s_session.ice_servers,
