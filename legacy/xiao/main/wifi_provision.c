@@ -350,8 +350,19 @@ esp_err_t wifi_provision_start(void)
         strlcpy(s_backend_url, backend, sizeof(s_backend_url));
         ESP_LOGI(TAG, "stored credentials found, connecting to \"%s\"", ssid);
         if (wifi_sta_connect(ssid, psk) == ESP_OK) return ESP_OK;
-        ESP_LOGW(TAG, "STA connect failed; falling back to provisioning");
-        // Wipe so a wrong password doesn't trap us.
+
+        // STA connect failed (wrong password, AP out of range, captive
+        // portal etc). Wipe the bad credentials so the next boot lands
+        // in SoftAP provisioning mode with a clean slate, then reboot.
+        //
+        // We could try to tear down the STA stack in-process and bring
+        // up SoftAP on the same boot, but that path is fragile — the
+        // STA wifi handlers stay bound to s_wifi_events and can fire on
+        // SoftAP events; the STA netif sometimes lingers as a phantom
+        // interface; and a deinit→init dance during a flaky AP retry
+        // is exactly when subtle races bite. A clean restart is cheap
+        // (~3 s on this hardware) and bulletproof.
+        ESP_LOGW(TAG, "STA connect failed; clearing creds and restarting into provisioning mode");
         nvs_handle_t h;
         if (nvs_open(NVS_NAMESPACE, NVS_READWRITE, &h) == ESP_OK) {
             nvs_erase_key(h, NVS_KEY_SSID);
@@ -359,23 +370,11 @@ esp_err_t wifi_provision_start(void)
             nvs_commit(h);
             nvs_close(h);
         }
-        // Tear down the STA stack cleanly. Without these, the wifi handlers
-        // stay bound to s_wifi_events and fire on SoftAP events too, and
-        // the STA netif lingers as a phantom interface.
-        esp_event_handler_unregister(WIFI_EVENT, ESP_EVENT_ANY_ID,
-                                     &wifi_event_handler);
-        esp_event_handler_unregister(IP_EVENT, IP_EVENT_STA_GOT_IP,
-                                     &wifi_event_handler);
-        esp_wifi_stop();
-        esp_wifi_deinit();
-        if (s_sta_netif) {
-            esp_netif_destroy_default_wifi(s_sta_netif);
-            s_sta_netif = NULL;
-        }
-    } else {
-        ESP_LOGI(TAG, "no saved credentials; entering provisioning mode");
+        vTaskDelay(pdMS_TO_TICKS(500));     // let the log line flush
+        esp_restart();
     }
 
+    ESP_LOGI(TAG, "no saved credentials; entering provisioning mode");
     return softap_start();
 }
 
