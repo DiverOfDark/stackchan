@@ -28,6 +28,30 @@ class FastWhisperSTTService(WhisperSTTService):
             (model, device, compute_type, settings, etc.).
     """
 
+    # Process-wide preloaded WhisperModel handle. Set once at app startup
+    # (see _prewarm_whisper in bot.py); every FastWhisperSTTService()
+    # constructed after that point reuses this model instead of allocating
+    # a fresh one. Required to avoid OOMKill under reconnect loops: a
+    # large-v3 turbo model is ~1.5 GB resident; loading one per session
+    # exhausts the pod's memory limit in 2-3 reconnects. faster-whisper's
+    # WhisperModel.transcribe() is safe to call concurrently against the
+    # same model (CTranslate2 manages its own batch scheduler).
+    _shared_model = None
+
+    @classmethod
+    def set_shared_model(cls, model) -> None:
+        """Install a process-wide preloaded WhisperModel."""
+        cls._shared_model = model
+
+    def _load(self):
+        # Override the parent's per-instance model load — reuse the
+        # shared one if available, fall back to parent if not (e.g. in
+        # tests or during prewarm itself).
+        if self.__class__._shared_model is not None:
+            self._model = self.__class__._shared_model
+            return
+        super()._load()
+
     def __init__(
         self,
         *,
@@ -42,7 +66,15 @@ class FastWhisperSTTService(WhisperSTTService):
         # Wrap the underlying faster-whisper model's transcribe() so every
         # call from the parent's run_stt() picks up our beam_size/best_of
         # unless the caller explicitly overrides them.
-        if self._model is not None:
+        #
+        # Idempotency matters now: with the shared-model path above, the
+        # same WhisperModel instance is used across many service
+        # instantiations. Wrapping in __init__ each time would build a
+        # chain of wrappers (each layer adding its own setdefault). We
+        # mark the wrapped function with an attribute and skip if seen.
+        if self._model is not None and not getattr(
+            self._model.transcribe, "_fastwhisper_wrapped", False
+        ):
             original_transcribe = self._model.transcribe
 
             def transcribe_with_speedups(audio, **kw):
@@ -50,4 +82,5 @@ class FastWhisperSTTService(WhisperSTTService):
                 kw.setdefault("best_of", self._best_of)
                 return original_transcribe(audio, **kw)
 
+            transcribe_with_speedups._fastwhisper_wrapped = True
             self._model.transcribe = transcribe_with_speedups

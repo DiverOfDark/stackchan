@@ -351,6 +351,11 @@ def _prewarm_whisper(app: FastAPI) -> None:
     for _ in segments:
         pass
     app.state.whisper_model = model
+    # Make this model the process-wide shared instance — every subsequent
+    # FastWhisperSTTService() construction reuses it instead of allocating
+    # a fresh ~1.5 GB CTranslate2 model. Without this the pod is OOMKilled
+    # after 2-3 reconnects under a client-side retry loop.
+    FastWhisperSTTService.set_shared_model(model)
     logger.info("warmup: whisper ready")
 
 
