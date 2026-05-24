@@ -16,9 +16,9 @@ Architecture plan: `/var/home/diverofdark/.claude/plans/now-let-s-work-on-eager-
 | M2 | Wi-Fi SoftAP captive-portal provisioning | done | **pending** |
 | M3 | HTTP signaling adapter for `/api/offer` | done | **pending** |
 | M4 | One-way mic → backend | scaffold (Opus encoder TODO) | **pending** |
-| M5 | Bidirectional + AEC reference | not started | — |
-| M6a | Train Russian wake word offline | tooling done; user runs training | — |
-| M6b | On-device wake word gating | not started | — |
+| M5 | Bidirectional + AEC reference | done | **pending** |
+| M6a | Train Russian wake word offline | trained "Эй, Фемто!" production model (62 KB INT8) | n/a |
+| M6b | On-device wake word gating | done — preprocessor + MixedNet + capture gate | **pending** |
 | M7 | Mute button + LED state machine | done (LED I2C cmds stubbed) | **pending** |
 | M8 | OTA + this README | done | **pending** |
 | Backend prep | `ESP32_COMPAT` documented | done | n/a |
