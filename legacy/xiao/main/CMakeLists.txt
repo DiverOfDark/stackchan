@@ -6,6 +6,8 @@ idf_component_register(
         "captive_portal_index_html.c"
         "pipecat_signaling.c"
         "webrtc_session.c"
+        "button.c"
+        "leds.c"
     INCLUDE_DIRS
         "."
     REQUIRES

@@ -8,6 +8,8 @@
 #include "freertos/task.h"
 
 #include "audio_io.h"
+#include "button.h"
+#include "leds.h"
 #include "webrtc_session.h"
 #include "wifi_provision.h"
 
@@ -32,17 +34,21 @@ void app_main(void)
     ESP_LOGI(TAG, "psram=%u KB", (unsigned)(psram_bytes / 1024));
 
     ESP_ERROR_CHECK(audio_io_init());
+    ESP_ERROR_CHECK(button_init());
+    ESP_ERROR_CHECK(leds_init());
     ESP_ERROR_CHECK(wifi_provision_start());
 
     if (wifi_provision_state() == WIFI_PROV_STATE_CONNECTED) {
         const char *backend = wifi_provision_backend_url();
         ESP_LOGI(TAG, "wifi connected, backend=%s", backend ? backend : "(unset)");
+        leds_set(LED_STATE_CONNECTING);
         if (backend) {
             ESP_ERROR_CHECK(webrtc_session_start(backend));
         }
     } else {
         // No backend reachable — fall back to local audio loopback so the
         // M1 ear-test still works during provisioning.
+        leds_set(LED_STATE_PROVISIONING);
         ESP_ERROR_CHECK(audio_io_start_loopback());
     }
 
