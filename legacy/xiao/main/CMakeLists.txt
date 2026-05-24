@@ -27,4 +27,5 @@ idf_component_register(
         espressif__cjson
         espressif__esp_peer
         esphome__micro-opus
+        espressif__button
 )

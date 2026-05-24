@@ -1,22 +1,28 @@
 #include "button.h"
 
-#include "driver/gpio.h"
 #include "esp_log.h"
 #include "esp_system.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "iot_button.h"
+#include "button_gpio.h"
 #include "nvs.h"
 #include "nvs_flash.h"
 
 static const char *TAG = "button";
 
-#define POLL_INTERVAL_MS    20
-#define DEBOUNCE_MS         40
-#define LONG_PRESS_MS       5000
+#define LONG_PRESS_MS  5000
 
-static volatile bool s_muted = false;
+static volatile bool   s_muted = false;
+static button_handle_t s_btn   = NULL;
 
-static void wipe_wifi_creds_and_reboot(void)
+static void on_short_press(void *arg, void *usr_data)
+{
+    s_muted = !s_muted;
+    ESP_LOGI(TAG, "short press → muted=%d", s_muted);
+}
+
+static void on_long_press(void *arg, void *usr_data)
 {
     nvs_handle_t h;
     if (nvs_open("pipecat-cfg", NVS_READWRITE, &h) == ESP_OK) {
@@ -31,50 +37,27 @@ static void wipe_wifi_creds_and_reboot(void)
     esp_restart();
 }
 
-static void button_task(void *arg)
-{
-    gpio_config_t io = {
-        .pin_bit_mask = (1ULL << BUTTON_MUTE_GPIO),
-        .mode         = GPIO_MODE_INPUT,
-        .pull_up_en   = GPIO_PULLUP_ENABLE,
-        .pull_down_en = GPIO_PULLDOWN_DISABLE,
-        .intr_type    = GPIO_INTR_DISABLE,
-    };
-    gpio_config(&io);
-
-    // Active-low button: 0 == pressed.
-    int  last_level   = 1;
-    int  press_start  = -1;
-    TickType_t now = 0;
-
-    while (1) {
-        vTaskDelay(pdMS_TO_TICKS(POLL_INTERVAL_MS));
-        now = xTaskGetTickCount();
-        int level = gpio_get_level(BUTTON_MUTE_GPIO);
-
-        if (level == 0 && last_level == 1) {
-            press_start = (int)now;
-        } else if (level == 1 && last_level == 0 && press_start >= 0) {
-            int held_ms = (int)((now - press_start) * portTICK_PERIOD_MS);
-            if (held_ms >= DEBOUNCE_MS && held_ms < LONG_PRESS_MS) {
-                s_muted = !s_muted;
-                ESP_LOGI(TAG, "short press → muted=%d", s_muted);
-            }
-            press_start = -1;
-        } else if (level == 0 && press_start >= 0) {
-            int held_ms = (int)((now - press_start) * portTICK_PERIOD_MS);
-            if (held_ms >= LONG_PRESS_MS) {
-                wipe_wifi_creds_and_reboot();  // does not return
-            }
-        }
-        last_level = level;
-    }
-}
-
 esp_err_t button_init(void)
 {
-    BaseType_t ok = xTaskCreate(button_task, "button", 3072, NULL, 5, NULL);
-    return ok == pdPASS ? ESP_OK : ESP_FAIL;
+    button_config_t btn_cfg = {0};
+    button_gpio_config_t gpio_cfg = {
+        .gpio_num     = BUTTON_MUTE_GPIO,
+        .active_level = 0,           // active-low
+    };
+    esp_err_t err = iot_button_new_gpio_device(&btn_cfg, &gpio_cfg, &s_btn);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "iot_button_new_gpio_device failed: %s", esp_err_to_name(err));
+        return err;
+    }
+
+    iot_button_register_cb(s_btn, BUTTON_SINGLE_CLICK, NULL,
+                           on_short_press, NULL);
+
+    // Per-callback long-press threshold — beats the global default.
+    button_event_args_t long_args = { .long_press = { .press_time = LONG_PRESS_MS } };
+    iot_button_register_cb(s_btn, BUTTON_LONG_PRESS_START, &long_args,
+                           on_long_press, NULL);
+    return ESP_OK;
 }
 
 bool button_is_muted(void)
