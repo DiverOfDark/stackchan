@@ -15,6 +15,7 @@
 #include "button.h"
 #include "leds.h"
 #include "pipecat_signaling.h"
+#include "wake_word.h"
 
 static const char *TAG = "webrtc";
 
@@ -32,6 +33,8 @@ static const char *TAG = "webrtc";
 #define PLAYBACK_BUFFER_BYTES  (16000 * 2 / 5)
 // Mark as "speaking" if a TTS frame arrived within this window.
 #define SPEAKING_HOLD_MS       400
+// End the conversation if no wake event AND no inbound TTS for this long.
+#define SESSION_IDLE_TIMEOUT_MS  10000
 
 // Channel mapping of TTS playback inside the stereo I2S TX frame to XVF3800.
 // XMOS docs say AEC reference goes on the **left** channel of XVF3800's I2S
@@ -51,7 +54,9 @@ typedef struct {
     TaskHandle_t           playback_task;
     volatile bool          running;
     volatile bool          connected;
+    volatile bool          conv_active;     // currently in a wake-triggered conversation
     volatile TickType_t    last_rx_frame_tick;
+    volatile TickType_t    last_activity_tick;  // wake event or inbound TTS
     uint32_t               pts;        // monotonic frame timestamp
 } session_t;
 
@@ -98,6 +103,7 @@ static int on_audio_data(esp_peer_audio_frame_t *frame, void *ctx)
         ESP_LOGW(TAG, "playback buffer full, dropped %u bytes", (unsigned)(bytes - sent));
     }
     s_session.last_rx_frame_tick = xTaskGetTickCount();
+    s_session.last_activity_tick = s_session.last_rx_frame_tick;
     return 0;
 }
 
@@ -162,7 +168,8 @@ static void main_loop_task(void *arg)
 static void capture_task(void *arg)
 {
     // Reads stereo 32-bit frames from XVF3800, downmixes to mono int16,
-    // Opus-encodes 20 ms packets, hands them to esp_peer for SRTP transit.
+    // always feeds the wake-word detector, and (only when in an active
+    // wake-triggered conversation) Opus-encodes packets for the backend.
     static int32_t stereo[FRAMES_PER_PKT * AUDIO_IO_CHANNELS];
     static int16_t mono[FRAMES_PER_PKT];
     static uint8_t opus_buf[OPUS_MAX_PACKET_BYTES];
@@ -175,13 +182,36 @@ static void capture_task(void *arg)
         if (audio_io_read(stereo, FRAMES_PER_PKT) != ESP_OK) {
             continue;
         }
-        if (button_is_muted()) {
-            continue;  // drop the frame; XVF3800 keeps the audio path alive
-        }
         // Channel 0 of XVF3800 = processed mono audio. 32-bit MSB-aligned →
         // shift to int16. (XMOS conventionally outputs Q1.31; right-shift 16.)
         for (size_t i = 0; i < FRAMES_PER_PKT; ++i) {
             mono[i] = (int16_t)(stereo[i * AUDIO_IO_CHANNELS] >> 16);
+        }
+
+        // Always feed the wake-word detector (cheap when no wake is present;
+        // mute switch doesn't suppress detection so an "Эй, Фемто!" still
+        // lands even with the mic-uplink muted).
+        wake_word_process(mono, FRAMES_PER_PKT);
+        if (wake_word_detected()) {
+            if (!s_session.conv_active) {
+                ESP_LOGI(TAG, "wake word — opening conversation");
+            }
+            s_session.conv_active       = true;
+            s_session.last_activity_tick = xTaskGetTickCount();
+        }
+
+        // Conversation ends after idle timeout (no wake + no inbound TTS).
+        if (s_session.conv_active &&
+            (xTaskGetTickCount() - s_session.last_activity_tick) >
+                pdMS_TO_TICKS(SESSION_IDLE_TIMEOUT_MS)) {
+            ESP_LOGI(TAG, "conversation idle, closing");
+            s_session.conv_active = false;
+        }
+
+        if (!s_session.conv_active || button_is_muted()) {
+            // Pre-wake or muted: do not transmit, but keep the wake detector
+            // hot so the next utterance can re-open the conversation.
+            continue;
         }
 
         int n = opus_encode(s_session.opus_enc, mono, FRAMES_PER_PKT,

@@ -9,4 +9,5 @@ idf_component_register(
         "."
     REQUIRES
         espressif__esp-tflite-micro
+        esp_timer
 )
