@@ -9,10 +9,12 @@ idf_component_register(
         "button.c"
         "leds.c"
         "ota.c"
+        "xvf3800.c"
     INCLUDE_DIRS
         "."
     REQUIRES
         esp_driver_i2s
+        esp_driver_i2c
         esp_driver_gpio
         esp_event
         esp_http_client
