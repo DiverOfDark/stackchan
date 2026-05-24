@@ -1,0 +1,153 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>"Эй, Фемто!" model tester</title>
+  <style>
+    body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+           max-width: 760px; margin: 2rem auto; padding: 0 1rem; color: #222; }
+    h1 { font-size: 1.25rem; margin-bottom: 0.25rem; }
+    .sub { color: #666; margin-top: 0; font-size: 0.9rem; }
+    button { padding: 0.9rem 1.5rem; font-size: 1.05rem; border: 0; border-radius: 6px;
+             cursor: pointer; }
+    button.rec { background: #dc2626; color: white; }
+    button.stop { background: #1f2937; color: white; }
+    button:disabled { opacity: 0.4; cursor: not-allowed; }
+    #verdict { margin-top: 1rem; padding: 1rem; background: #f3f4f6; border-radius: 6px;
+               min-height: 3rem; font-size: 1.05rem; }
+    .ok   { color: #16a34a; font-weight: bold; }
+    .meh  { color: #d97706; font-weight: bold; }
+    .nope { color: #dc2626; font-weight: bold; }
+    canvas { display: block; width: 100%; height: 160px; margin-top: 0.6rem;
+             background: #fff; border: 1px solid #d1d5db; border-radius: 4px; }
+    .axis { font-size: 0.75rem; color: #6b7280; display: flex; justify-content: space-between;
+            padding: 0 0.25rem; }
+    .meta { font-size: 0.85rem; color: #4b5563; margin-top: 0.5rem; font-family: monospace; }
+    table { border-collapse: collapse; margin-top: 0.5rem; font-size: 0.85rem; }
+    td { padding: 0.15rem 0.5rem; }
+  </style>
+</head>
+<body>
+  <h1>"Эй, Фемто!" model tester</h1>
+  <p class="sub">Records 16 kHz mono from your mic, runs <code>main/models/wake_word_ru.tflite</code>
+     with the exact same feature pipeline as the device firmware. If the curve
+     stays flat at 0 here too, the model is the limitation — not the firmware
+     audio path.</p>
+
+  <button id="rec" class="rec">🎙 Start recording</button>
+  <span id="status" class="meta"></span>
+
+  <div id="verdict">Press the button, say <b>"Эй, Фемто!"</b> a few times, then press stop.</div>
+
+  <canvas id="chart" width="760" height="160"></canvas>
+  <div class="axis"><span>t=0</span><span id="t-mid">—</span><span id="t-end">—</span></div>
+
+  <div class="meta" id="meta"></div>
+
+<script>
+const TARGET_RATE = 16000;
+const btn     = document.getElementById('rec');
+const stat    = document.getElementById('status');
+const verdict = document.getElementById('verdict');
+const canvas  = document.getElementById('chart');
+const tMid    = document.getElementById('t-mid');
+const tEnd    = document.getElementById('t-end');
+const meta    = document.getElementById('meta');
+
+let ctx, src, proc, samples = [], recording = false;
+
+btn.onclick = async () => {
+  if (recording) { stopRecording(); return; }
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    ctx  = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: TARGET_RATE });
+    src  = ctx.createMediaStreamSource(stream);
+    // ScriptProcessor is deprecated but supported everywhere and dead simple
+    // for raw-PCM capture. Buffer of 4096 frames @ 16 kHz = ~256 ms.
+    proc = ctx.createScriptProcessor(4096, 1, 1);
+    samples = [];
+    proc.onaudioprocess = (e) => samples.push(new Float32Array(e.inputBuffer.getChannelData(0)));
+    src.connect(proc); proc.connect(ctx.destination);
+    recording = true;
+    btn.textContent = '⏹ Stop recording'; btn.className = 'stop';
+    stat.textContent = ' recording…';
+    verdict.textContent = '';
+  } catch (e) {
+    verdict.innerHTML = `<span class="nope">Mic permission denied: ${e}</span>`;
+  }
+};
+
+async function stopRecording() {
+  recording = false;
+  btn.disabled = true;
+  proc.disconnect(); src.disconnect(); ctx.close();
+  stat.textContent = ' processing…';
+
+  // Flatten float32 chunks → int16 PCM
+  const total = samples.reduce((s, c) => s + c.length, 0);
+  const buf = new Int16Array(total);
+  let off = 0;
+  for (const c of samples) {
+    for (let i = 0; i < c.length; ++i) {
+      const s = Math.max(-1, Math.min(1, c[i]));
+      buf[off + i] = s < 0 ? s * 0x8000 : s * 0x7fff;
+    }
+    off += c.length;
+  }
+
+  const resp = await fetch('/predict', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/octet-stream' },
+    body: buf.buffer,
+  });
+  const data = await resp.json();
+  btn.disabled = false;
+  btn.textContent = '🎙 Start recording'; btn.className = 'rec';
+  stat.textContent = '';
+  if (data.error) {
+    verdict.innerHTML = `<span class="nope">${data.error}</span>`;
+    return;
+  }
+
+  const cls = data.max_prob >= 0.5 ? 'ok'
+             : data.max_prob >= 0.15 ? 'meh' : 'nope';
+  const tag = data.max_prob >= 0.5 ? '✓ recognized'
+             : data.max_prob >= 0.15 ? '~ weak signal' : '✗ not recognized';
+  verdict.innerHTML = `<span class="${cls}">${tag}</span> &nbsp; max p(wake) = ${data.max_prob.toFixed(3)} @ ${data.peak_time_ms} ms`;
+  meta.innerHTML = `<table>
+    <tr><td>audio</td><td>${data.n_samples} samples (${(data.n_samples / 16000).toFixed(2)} s),
+                            RMS=${data.audio_rms.toFixed(0)}, peak=${data.audio_peak}</td></tr>
+    <tr><td>frontend</td><td>${data.n_slices} feature slices (${(data.n_slices*10)} ms)</td></tr>
+  </table>`;
+  drawChart(data.probs);
+}
+
+function drawChart(probs) {
+  const c = canvas.getContext('2d');
+  const W = canvas.width, H = canvas.height;
+  c.clearRect(0, 0, W, H);
+
+  // Threshold + zero baselines
+  c.strokeStyle = '#fca5a5'; c.lineWidth = 1; c.setLineDash([4, 3]);
+  c.beginPath(); c.moveTo(0, H * 0.5); c.lineTo(W, H * 0.5); c.stroke();
+  c.setLineDash([]);
+  c.strokeStyle = '#e5e7eb';
+  c.beginPath(); c.moveTo(0, H - 1); c.lineTo(W, H - 1); c.stroke();
+
+  // Probability curve
+  c.strokeStyle = '#2563eb'; c.lineWidth = 1.5;
+  c.beginPath();
+  const xs = W / Math.max(probs.length - 1, 1);
+  for (let i = 0; i < probs.length; ++i) {
+    const y = H - probs[i] * H;
+    if (i === 0) c.moveTo(0, y); else c.lineTo(i * xs, y);
+  }
+  c.stroke();
+
+  const durMs = probs.length * 10;
+  tMid.textContent = `${(durMs / 2 / 1000).toFixed(1)} s`;
+  tEnd.textContent = `${(durMs / 1000).toFixed(1)} s`;
+}
+</script>
+</body>
+</html>
