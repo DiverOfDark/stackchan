@@ -88,6 +88,16 @@ static uint8_t                    *s_ww_arena         = nullptr;
 static TfLiteTensor               *s_ww_input         = nullptr;
 static TfLiteTensor               *s_ww_output        = nullptr;
 static size_t                      s_ww_input_slices  = 1;   // = input.bytes / 40, set at init
+// Combined feature → int8 transform, derived at init from the model's own
+// input quantization params (matches microWakeWord's quantize_input_data).
+// Formula: int8 = round(uint16_frontend_value * k_mult + k_offset).
+static float                       s_quant_mult       = 0.0f;
+static float                       s_quant_offset     = 0.0f;
+// Slice-filling buffer between FrontendProcessSamples emits and an Invoke.
+// Streaming MixedNet wants s_ww_input_slices NEW feature slices per Invoke;
+// we accumulate them here.
+static int8_t                      s_pending_features[40 * 8]; // generous upper bound
+static size_t                      s_pending_count    = 0;
 
 // (No PCM window state — FrontendProcessSamples buffers internally.)
 
@@ -217,6 +227,18 @@ extern "C" esp_err_t wake_word_init(void)
     }
     s_ww_input_slices = s_ww_input->bytes / FRONTEND_FEATURE_SIZE;
 
+    // The C microfrontend lib emits uint16 spectrogram values in roughly
+    // 0..670 range. pymicro-features (which microWakeWord training uses)
+    // returns the same values pre-scaled by 0.0390625 (= 1/25.6), giving
+    // floats in 0..26. The model's int8 input quantization then maps that
+    // float range into [-128, 127] via int8 = round(f / scale + zp).
+    // Combine: int8 = round(uint16 * (0.0390625 / scale) + zp).
+    s_quant_mult   = 0.0390625f / s_ww_input->params.scale;
+    s_quant_offset = (float)s_ww_input->params.zero_point;
+    ESP_LOGI(TAG, "input quant: scale=%.5f zp=%d → feature mult=%.4f offset=%.1f",
+             (double)s_ww_input->params.scale, s_ww_input->params.zero_point,
+             (double)s_quant_mult, (double)s_quant_offset);
+
     ESP_LOGI(TAG, "microfrontend ready (40-bin, %d ms window, %d ms stride)",
              FRONTEND_WINDOW_MS, FRONTEND_STRIDE_MS);
     ESP_LOGI(TAG, "wake-word model: %zu bytes, in=%d×%d×%d×%d (%s) → out=%d (%s), arena=%u used",
@@ -277,32 +299,27 @@ static void update_window(float prob_float)
     }
 }
 
-static void run_wake_word(const int8_t *features_40)
+static void run_wake_word(void)
 {
-    // Shift in the newest 40-feature slice from the right of the input
-    // tensor, dropping the oldest from the left. This keeps a sliding
-    // window of the last s_ww_input_slices feature frames inside the
-    // model's input — required because the streaming graph reads multiple
-    // adjacent slices per Invoke.
+    // The streaming MixedNet consumes s_ww_input_slices NEW feature slices
+    // per Invoke (it maintains its own context across calls via
+    // VAR_HANDLE-backed resource variables). Shifting the window by 1 slice
+    // and re-running on overlapping data — which my original code did —
+    // corrupts that state and the model never fires. We accumulate exactly
+    // s_ww_input_slices fresh slices in s_pending_features and copy them in
+    // as a non-overlapping block.
     int8_t *dst = tflite::GetTensorData<int8_t>(s_ww_input);
-    if (s_ww_input_slices > 1) {
-        memmove(dst, dst + FRONTEND_FEATURE_SIZE,
-                (s_ww_input_slices - 1) * FRONTEND_FEATURE_SIZE);
-    }
-    memcpy(dst + (s_ww_input_slices - 1) * FRONTEND_FEATURE_SIZE,
-           features_40, FRONTEND_FEATURE_SIZE);
+    memcpy(dst, s_pending_features, s_ww_input_slices * FRONTEND_FEATURE_SIZE);
 
-    // Diagnostic: log feature stats + raw output once per second so we can
-    // see what the model actually sees / produces.
+    // Diagnostic: log feature stats + raw output once per second.
     static int s_invoke_counter = 0;
-    bool emit_diag = (++s_invoke_counter >= 100);
-    int feat_min = 127, feat_max = -128, feat_nonzero = 0;
+    bool emit_diag = (++s_invoke_counter >= 33);   // ~1 s @ 30 ms/inference
+    int feat_min = 127, feat_max = -128;
     if (emit_diag) {
+        const int8_t *last = s_pending_features + (s_ww_input_slices - 1) * FRONTEND_FEATURE_SIZE;
         for (int i = 0; i < FRONTEND_FEATURE_SIZE; ++i) {
-            int v = features_40[i];
-            if (v < feat_min) feat_min = v;
-            if (v > feat_max) feat_max = v;
-            if (v != 0) feat_nonzero++;
+            if (last[i] < feat_min) feat_min = last[i];
+            if (last[i] > feat_max) feat_max = last[i];
         }
     }
 
@@ -310,26 +327,23 @@ static void run_wake_word(const int8_t *features_40)
         ESP_LOGW(TAG, "ww Invoke failed");
         return;
     }
-    int8_t raw = tflite::GetTensorData<int8_t>(s_ww_output)[0];
-    // Latch the max raw int8 we've ever seen so we can tell if the model
-    // EVER moves off its quantized bias, even briefly.
-    static int8_t s_raw_max = INT8_MIN;
-    if (raw > s_raw_max) s_raw_max = raw;
-    if (emit_diag) {
-        float  scl  = s_ww_output->params.scale;
-        int    zp   = s_ww_output->params.zero_point;
-        ESP_LOGI(TAG, "diag(model): features min=%d max=%d nz=%d/%d → raw=%d raw_max_ever=%d (scale=%.4f zp=%d)",
-                 feat_min, feat_max, feat_nonzero, FRONTEND_FEATURE_SIZE,
-                 (int)raw, (int)s_raw_max, (double)scl, zp);
-        s_invoke_counter = 0;
-    }
-    // Dequantize the output (int8 → float in [0, 1] after sigmoid).
-    int8_t  q     = tflite::GetTensorData<int8_t>(s_ww_output)[0];
+    // Output is uint8 (per the trained .tflite). raw is in [0, 255].
+    // Dequantize: prob = scale * (raw - zp). For sigmoid head with scale
+    // ≈ 1/256 and zp = 0, this gives prob in [0, 1].
+    uint8_t raw   = tflite::GetTensorData<uint8_t>(s_ww_output)[0];
     float   scale = s_ww_output->params.scale;
     int     zp    = s_ww_output->params.zero_point;
-    float   prob  = scale * (q - zp);
+    float   prob  = scale * ((int)raw - zp);
     if (prob < 0) prob = 0;
     if (prob > 1) prob = 1;
+
+    if (emit_diag) {
+        static uint8_t s_raw_max = 0;
+        if (raw > s_raw_max) s_raw_max = raw;
+        ESP_LOGI(TAG, "diag(model): feat min=%d max=%d → raw=%u raw_max_ever=%u p=%.3f",
+                 feat_min, feat_max, (unsigned)raw, (unsigned)s_raw_max, (double)prob);
+        s_invoke_counter = 0;
+    }
     update_window(prob);
 }
 
@@ -363,8 +377,10 @@ extern "C" esp_err_t wake_word_process(const int16_t *pcm, size_t n_samples)
     }
 
     // The frontend consumes audio in arbitrary chunks and emits one feature
-    // slice per FRONTEND_STRIDE_MS of audio internally — we just keep feeding
-    // it until it tells us it has no output left to give us.
+    // slice per FRONTEND_STRIDE_MS of audio internally — we just keep
+    // feeding it. Each slice is appended to s_pending_features; when we
+    // have s_ww_input_slices fresh slices we Invoke the model with them
+    // and reset the pending buffer for the next batch.
     size_t remaining = n_samples;
     const int16_t *p = pcm;
     while (remaining > 0) {
@@ -376,20 +392,25 @@ extern "C" esp_err_t wake_word_process(const int16_t *pcm, size_t n_samples)
         remaining -= consumed;
         if (out.size == 0 || out.values == nullptr) continue;
 
-        // ESPHome's manual int8 quantization (matches microWakeWord training):
-        //   q = clip(((u * 256) + 333) / 666 + INT8_MIN, -128, 127)
-        // where u is the uint16 spectrogram bin value (range ~0..670).
-        int8_t features[FRONTEND_FEATURE_SIZE];
-        const int32_t value_scale = 256;
-        const int32_t value_div   = 666;
+        // microWakeWord training feeds pymicro-features floats (0..~26)
+        // directly through the model's input quantization:
+        //   int8 = round(uint16_value * 0.0390625 / input_scale + input_zp)
+        // (s_quant_mult / s_quant_offset precomputed at init from the
+        // model's params). The earlier ESPHome `(u*256+333)/666` formula
+        // assumed input was uint16 0..670 — fine in the abstract, but
+        // doesn't actually match what training fed the model.
+        int8_t *dst = &s_pending_features[s_pending_count * FRONTEND_FEATURE_SIZE];
         for (size_t i = 0; i < (size_t)FRONTEND_FEATURE_SIZE && i < out.size; ++i) {
-            int32_t v = ((int32_t)out.values[i] * value_scale + value_div / 2) / value_div;
-            v += INT8_MIN;
+            int32_t v = (int32_t)lroundf((float)out.values[i] * s_quant_mult
+                                          + s_quant_offset);
             if (v < INT8_MIN) v = INT8_MIN;
             if (v > INT8_MAX) v = INT8_MAX;
-            features[i] = (int8_t)v;
+            dst[i] = (int8_t)v;
         }
-        run_wake_word(features);
+        if (++s_pending_count >= s_ww_input_slices) {
+            run_wake_word();
+            s_pending_count = 0;
+        }
     }
     return ESP_OK;
 }

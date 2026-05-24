@@ -51,7 +51,16 @@ print(f"loaded {MODEL_PATH.name}: in={_in['shape']} ({_in['dtype'].__name__}) "
 
 
 def features_for_audio(samples: np.ndarray) -> list[np.ndarray]:
-    """Run pymicro-features over int16 mono samples → list of int8[40] slices."""
+    """Run pymicro-features → quantize using the model's own input scale/zp.
+
+    pymicro-features returns features as floats in roughly 0..25 (already
+    log-scaled internally). microWakeWord training feeds these floats
+    directly to quantize_input_data which does `int8 = round(f/scale + zp)`.
+    The model's input quantization is what makes those tiny floats map to
+    a useful int8 range — using ESPHome's uint16-formula `(u*256+333)/666`
+    here would assume features are 0..670 and collapse them all to -128.
+    """
+    in_scale, in_zp = _in["quantization"]
     mf = MicroFrontend()
     mf.reset()
     slices: list[np.ndarray] = []
@@ -60,36 +69,41 @@ def features_for_audio(samples: np.ndarray) -> list[np.ndarray]:
         chunk = samples[pos:pos + STRIDE_SAMPLES]
         out = mf.process_samples(chunk.tobytes())
         if len(out.features) >= FEATURE_SIZE:
-            # Convert uint16 spectrogram bins → int8 the same way the firmware
-            # and microWakeWord training do.
-            int8 = np.empty(FEATURE_SIZE, dtype=np.int8)
-            for i in range(FEATURE_SIZE):
-                v = (int(out.features[i]) * 256 + 333) // 666
-                v -= 128
-                int8[i] = max(-128, min(127, v))
+            f   = np.asarray(out.features[:FEATURE_SIZE], dtype=np.float32)
+            q   = np.round(f / in_scale + in_zp)
+            int8 = np.clip(q, -128, 127).astype(np.int8)
             slices.append(int8)
         pos += STRIDE_SAMPLES
     return slices
 
 
 def probabilities_for_features(slices: list[np.ndarray]) -> list[float]:
-    """Slide a 3-frame window through `slices`, invoke the model, return per-frame p(wake)."""
+    """Run the streaming model — invoke per non-overlapping INPUT_SLICES-block.
+
+    The streaming model maintains its own internal state via TF resource
+    variables (VAR_HANDLE). Each Invoke must consume INPUT_SLICES NEW
+    feature slices (3 in our case = 30 ms of fresh audio). Shifting the
+    window by 1 slice per invoke — like my earlier code did — feeds the
+    model overlapping data, corrupts state, and ends up with a model that
+    appears to never fire. This matches microWakeWord/inference.py
+    predict_spectrogram (stride defaults to input_feature_slices).
+    """
     if not slices:
         return []
-    # Reset streaming state so each request starts clean.
     _interpreter.reset_all_variables()
     scale, zp = _out["quantization"]
-    win = np.zeros((1, INPUT_SLICES, FEATURE_SIZE), dtype=np.int8)
+    block = np.empty((1, INPUT_SLICES, FEATURE_SIZE), dtype=np.int8)
     probs: list[float] = []
-    for i, slc in enumerate(slices):
-        # Shift left, append newest at the right (matches device code).
-        win[0, :INPUT_SLICES - 1] = win[0, 1:INPUT_SLICES]
-        win[0, INPUT_SLICES - 1]  = slc
-        _interpreter.set_tensor(_in["index"], win)
+    for i in range(0, len(slices) - INPUT_SLICES + 1, INPUT_SLICES):
+        for k in range(INPUT_SLICES):
+            block[0, k] = slices[i + k]
+        _interpreter.set_tensor(_in["index"], block)
         _interpreter.invoke()
         raw = int(_interpreter.get_tensor(_out["index"]).flatten()[0])
         p = max(0.0, float(scale * (raw - zp)))
-        probs.append(p)
+        # Repeat the probability for each slice in the block so the UI
+        # timeline still maps to ~10 ms per data point.
+        probs.extend([p] * INPUT_SLICES)
     return probs
 
 
