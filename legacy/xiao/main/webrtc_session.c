@@ -71,10 +71,9 @@ static const char *TAG = "webrtc";
 
 // Channel mapping of TTS playback inside the stereo I2S TX frame to XVF3800.
 // XMOS docs say AEC reference goes on the **left** channel of XVF3800's I2S
-// input; we keep this as a #define so flipping it on the bench is one line.
-#ifndef AEC_REF_TX_CHANNEL
-#define AEC_REF_TX_CHANNEL  0    // 0 = L, 1 = R
-#endif
+// input. Constant rather than #ifdef-overridable because we shipped with L
+// and changing it without coordinated XVF3800 reconfig breaks AEC.
+#define AEC_REF_TX_CHANNEL  0    // 0 = L
 
 typedef struct {
     PeerConnection        *peer;

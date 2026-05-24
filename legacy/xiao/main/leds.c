@@ -7,18 +7,12 @@
 
 static const char *TAG = "leds";
 
-// XVF3800 LED effect IDs (per the reSpeaker_XVF3800_USB_4MIC_ARRAY host_control
-// README — github.com/respeaker/reSpeaker_XVF3800_USB_4MIC_ARRAY). The Seeed
-// XIAO RGB wiki only ever uses 1, leaving the rest of the enum undocumented;
-// we burned a session believing "1 = solid" when it actually means BREATH.
-//   0 = off          1 = breath
-//   2 = rainbow      3 = single color (this is the real "solid fill")
-//   4 = DoA          (rotates to point at the loudest mic direction)
-#define EFFECT_OFF      0
-#define EFFECT_BREATH   1     // breathing pulse
-#define EFFECT_RAINBOW  2     // cycle through hues
-#define EFFECT_SOLID    3     // steady single-colour fill
-#define EFFECT_DOA      4     // direction-of-arrival rotating segment
+// XVF3800 effect IDs live in xvf3800.h next to the I2C command constants.
+// Local aliases keep the switch below readable without re-exporting the
+// XVF3800 namespace through every caller.
+#define EFFECT_OFF      XVF3800_EFFECT_OFF
+#define EFFECT_BREATH   XVF3800_EFFECT_BREATH
+#define EFFECT_SOLID    XVF3800_EFFECT_SOLID
 
 // Colour palette in 24-bit RGB. Tuned for daylight visibility on the
 // Seeed carrier's diffused ring.

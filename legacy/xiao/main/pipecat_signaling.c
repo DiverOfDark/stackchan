@@ -171,53 +171,6 @@ esp_err_t pipecat_signaling_send_offer(pipecat_signaling_t *sig,
     return ESP_OK;
 }
 
-esp_err_t pipecat_signaling_send_ice(pipecat_signaling_t *sig,
-                                     const pipecat_ice_candidate_t *cands,
-                                     size_t n)
-{
-    if (!sig || !cands || n == 0) return ESP_ERR_INVALID_ARG;
-    if (!sig->pc_id) {
-        ESP_LOGE(TAG, "send_ice before send_offer");
-        return ESP_ERR_INVALID_STATE;
-    }
-
-    cJSON *req = cJSON_CreateObject();
-    cJSON_AddStringToObject(req, "pc_id", sig->pc_id);
-    cJSON *arr = cJSON_AddArrayToObject(req, "candidates");
-    for (size_t i = 0; i < n; ++i) {
-        cJSON *c = cJSON_CreateObject();
-        cJSON_AddStringToObject(c, "candidate",      cands[i].candidate);
-        cJSON_AddStringToObject(c, "sdp_mid",        cands[i].sdp_mid);
-        cJSON_AddNumberToObject(c, "sdp_mline_index", cands[i].sdp_mline_index);
-        cJSON_AddItemToArray(arr, c);
-    }
-    char *body = cJSON_PrintUnformatted(req);
-    cJSON_Delete(req);
-    if (!body) return ESP_ERR_NO_MEM;
-
-    char tiny_resp[128];
-    int  status = 0;
-    esp_err_t err = do_request(sig->offer_url, HTTP_METHOD_PATCH,
-                               body, tiny_resp, sizeof(tiny_resp), &status);
-    free(body);
-
-    if (err != ESP_OK) {
-        ESP_LOGE(TAG, "ice PATCH failed: %s", esp_err_to_name(err));
-        return err;
-    }
-    if (status / 100 != 2) {
-        ESP_LOGE(TAG, "ice PATCH status=%d body=%s", status, tiny_resp);
-        return ESP_FAIL;
-    }
-    ESP_LOGI(TAG, "ice PATCH ok (%u candidate%s)", (unsigned)n, n == 1 ? "" : "s");
-    return ESP_OK;
-}
-
-const char *pipecat_signaling_pc_id(const pipecat_signaling_t *sig)
-{
-    return sig ? sig->pc_id : NULL;
-}
-
 // ---------- ICE server discovery -----------------------------------------
 
 void pipecat_signaling_free_ice_servers(pipecat_ice_server_t *servers,

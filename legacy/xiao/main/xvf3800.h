@@ -24,6 +24,15 @@
 #define XVF3800_CMD_LED_SPEED       15
 #define XVF3800_CMD_LED_COLOR       16
 
+// XVF3800 LED effect IDs (firmware-defined; per the reSpeaker_XVF3800
+// USB_4MIC_ARRAY host_control README — the USB-mic firmware shares the
+// LED control servicer with the I2S carrier).
+#define XVF3800_EFFECT_OFF      0
+#define XVF3800_EFFECT_BREATH   1     // breathing pulse
+#define XVF3800_EFFECT_RAINBOW  2     // cycle through hues
+#define XVF3800_EFFECT_SOLID    3     // steady single-colour fill
+#define XVF3800_EFFECT_DOA      4     // direction-of-arrival rotating segment
+
 // Default XIAO ESP32-S3 I2C pin assignment. Override at build time if your
 // carrier rewires them.
 #ifndef XVF3800_I2C_SDA_GPIO
@@ -43,7 +52,7 @@ esp_err_t xvf3800_write(uint8_t resid, uint8_t cmd,
 // LED ring convenience wrappers. Pass-through to xvf3800_write with the
 // right resource + command IDs. Safe to call from any task context (each
 // call is a single short I2C transaction).
-esp_err_t xvf3800_set_led_effect    (uint8_t effect);     // 0=off, 1=solid, ... (Seeed firmware-specific)
+esp_err_t xvf3800_set_led_effect    (uint8_t effect);     // one of XVF3800_EFFECT_*
 esp_err_t xvf3800_set_led_brightness(uint8_t brightness); // 0..255
 esp_err_t xvf3800_set_led_speed     (uint8_t speed);
 esp_err_t xvf3800_set_led_color     (uint8_t r, uint8_t g, uint8_t b);
