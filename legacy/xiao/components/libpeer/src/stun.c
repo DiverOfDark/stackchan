@@ -143,11 +143,23 @@ void stun_parse_msg_buf(StunMessage* msg) {
     msg->stunclass = STUN_CLASS_REQUEST;
   }
 
-  /* The STUN method is the low 12 bits of `type` (with the class bits
-   * interleaved). Compare against exact values rather than the bitwise-AND
-   * trick used originally — that gave false positives (e.g. CREATE_PERMISSION
-   * 0x0008 has 0x0001 set, so it'd be misread as BINDING). */
-  msg->stunmethod = ntohs(header->type) & 0x0FFF;
+  /* Extract the STUN method per RFC 5389 §6. The 16-bit Type field
+   * interleaves method bits M0..M11 with class bits C0 (bit 4) and C1
+   * (bit 8), so we have to extract method bits by their actual positions:
+   *   M0..M3  → bits 0..3   (mask 0x000F, no shift)
+   *   M4..M6  → bits 5..7   (mask 0x00E0, shift right 1 to skip C0)
+   *   M7..M11 → bits 9..13  (mask 0x3E00, shift right 2 to skip C0 + C1)
+   *
+   * Upstream libpeer side-stepped this with a bitwise-AND trick
+   * (`(raw & ALLOCATE) == ALLOCATE`) that worked for BINDING/ALLOCATE by
+   * coincidence but mis-classifies error responses (where the C0+C1 bits
+   * are set, contaminating the method value) and the new TURN methods. */
+  {
+    uint16_t raw = ntohs(header->type);
+    msg->stunmethod = (raw & 0x000F)
+                    | ((raw & 0x00E0) >> 1)
+                    | ((raw & 0x3E00) >> 2);
+  }
   switch (msg->stunmethod) {
     case STUN_METHOD_BINDING:
     case STUN_METHOD_ALLOCATE:
