@@ -25,4 +25,5 @@ idf_component_register(
     PRIV_REQUIRES
         espressif__cjson
         espressif__esp_peer
+        esphome__micro-opus
 )

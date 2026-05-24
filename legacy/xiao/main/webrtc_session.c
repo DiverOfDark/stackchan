@@ -8,23 +8,30 @@
 #include "esp_peer_default.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "opus.h"
 
 #include "audio_io.h"
+#include "button.h"
 #include "pipecat_signaling.h"
 
 static const char *TAG = "webrtc";
 
 #define MAIN_LOOP_TASK_STACK   4096
 #define CAPTURE_TASK_STACK     8192
-#define CAPTURE_FRAMES_PER_PKT 320   // 20 ms @ 16 kHz
+#define CAPTURE_FRAMES_PER_PKT 320     // 20 ms @ 16 kHz — matches Opus VoIP framing
+#define OPUS_MAX_PACKET_BYTES  600     // worst-case 20 ms @ 32 kbps + headroom
+#define OPUS_BITRATE_BPS       24000   // 24 kbps mono voice — comfortable margin
+#define OPUS_COMPLEXITY        5       // 0..10; 5 is the practical S3 sweet spot
 
 typedef struct {
     esp_peer_handle_t      peer;
     pipecat_signaling_t   *sig;
+    OpusEncoder           *opus_enc;
     TaskHandle_t           main_loop_task;
     TaskHandle_t           capture_task;
     volatile bool          running;
     volatile bool          connected;
+    uint32_t               pts;        // monotonic frame timestamp
 } session_t;
 
 static session_t s_session = {0};
@@ -104,11 +111,11 @@ static void main_loop_task(void *arg)
 
 static void capture_task(void *arg)
 {
-    // Reads stereo 32-bit frames from XVF3800, downmixes to mono int16
-    // because the Opus encoder we'll add wants 16-bit mono PCM.
+    // Reads stereo 32-bit frames from XVF3800, downmixes to mono int16,
+    // Opus-encodes 20 ms packets, hands them to esp_peer for SRTP transit.
     static int32_t stereo[CAPTURE_FRAMES_PER_PKT * AUDIO_IO_CHANNELS];
-    static int16_t mono[CAPTURE_FRAMES_PER_PKT];  // fed to Opus encoder (M4 follow-up)
-    (void)mono;
+    static int16_t mono[CAPTURE_FRAMES_PER_PKT];
+    static uint8_t opus_buf[OPUS_MAX_PACKET_BYTES];
 
     while (s_session.running) {
         if (!s_session.connected) {
@@ -118,20 +125,30 @@ static void capture_task(void *arg)
         if (audio_io_read(stereo, CAPTURE_FRAMES_PER_PKT) != ESP_OK) {
             continue;
         }
+        if (button_is_muted()) {
+            continue;  // drop the frame; XVF3800 keeps the audio path alive
+        }
         // Channel 0 of XVF3800 = processed mono audio. 32-bit MSB-aligned →
         // shift to int16. (XMOS conventionally outputs Q1.31; right-shift 16.)
         for (size_t i = 0; i < CAPTURE_FRAMES_PER_PKT; ++i) {
             mono[i] = (int16_t)(stereo[i * AUDIO_IO_CHANNELS] >> 16);
         }
 
-        // TODO(M4-followup): Opus-encode `mono` and hand to esp_peer_send_audio.
-        // Need to add an Opus encoder dependency first — espressif/esp_audio_codec
-        // is the standard choice. Once wired:
-        //   uint8_t opus_buf[600];
-        //   int opus_len = opus_encode(enc, mono, CAPTURE_FRAMES_PER_PKT,
-        //                              opus_buf, sizeof(opus_buf));
-        //   esp_peer_audio_frame_t f = {.pts = ..., .data = opus_buf, .size = opus_len};
-        //   esp_peer_send_audio(s_session.peer, &f);
+        int n = opus_encode(s_session.opus_enc, mono, CAPTURE_FRAMES_PER_PKT,
+                            opus_buf, sizeof(opus_buf));
+        if (n < 0) {
+            ESP_LOGW(TAG, "opus_encode err %d", n);
+            continue;
+        }
+        esp_peer_audio_frame_t f = {
+            .pts  = s_session.pts,
+            .data = opus_buf,
+            .size = n,
+        };
+        if (esp_peer_send_audio(s_session.peer, &f) != 0) {
+            ESP_LOGW(TAG, "send_audio dropped");
+        }
+        s_session.pts += CAPTURE_FRAMES_PER_PKT;  // 16 kHz sample-count clock
     }
     vTaskDelete(NULL);
 }
@@ -145,6 +162,21 @@ esp_err_t webrtc_session_start(const char *backend_url)
 
     s_session.sig = pipecat_signaling_create(backend_url);
     if (!s_session.sig) return ESP_ERR_NO_MEM;
+
+    int opus_err = 0;
+    s_session.opus_enc = opus_encoder_create(
+        AUDIO_IO_SAMPLE_RATE, 1, OPUS_APPLICATION_VOIP, &opus_err);
+    if (!s_session.opus_enc || opus_err != OPUS_OK) {
+        ESP_LOGE(TAG, "opus_encoder_create failed: %d", opus_err);
+        pipecat_signaling_destroy(s_session.sig);
+        s_session.sig = NULL;
+        return ESP_ERR_NO_MEM;
+    }
+    opus_encoder_ctl(s_session.opus_enc, OPUS_SET_BITRATE(OPUS_BITRATE_BPS));
+    opus_encoder_ctl(s_session.opus_enc, OPUS_SET_COMPLEXITY(OPUS_COMPLEXITY));
+    opus_encoder_ctl(s_session.opus_enc, OPUS_SET_SIGNAL(OPUS_SIGNAL_VOICE));
+    opus_encoder_ctl(s_session.opus_enc, OPUS_SET_INBAND_FEC(1));
+    opus_encoder_ctl(s_session.opus_enc, OPUS_SET_PACKET_LOSS_PERC(10));
 
     // Self-signed cert generation is expensive; warm it up before opening
     // the first peer connection so the first call doesn't stall the event
@@ -200,6 +232,10 @@ void webrtc_session_stop(void)
         esp_peer_disconnect(s_session.peer);
         esp_peer_close(s_session.peer);
         s_session.peer = NULL;
+    }
+    if (s_session.opus_enc) {
+        opus_encoder_destroy(s_session.opus_enc);
+        s_session.opus_enc = NULL;
     }
     if (s_session.sig) {
         pipecat_signaling_destroy(s_session.sig);
