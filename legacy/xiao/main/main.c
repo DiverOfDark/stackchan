@@ -8,6 +8,7 @@
 #include "freertos/task.h"
 
 #include "audio_io.h"
+#include "webrtc_session.h"
 #include "wifi_provision.h"
 
 static const char *TAG = "main";
@@ -30,16 +31,19 @@ void app_main(void)
     size_t psram_bytes = esp_psram_get_size();
     ESP_LOGI(TAG, "psram=%u KB", (unsigned)(psram_bytes / 1024));
 
-    // Audio path is independent of networking — start it first so M1 hardware
-    // verification still works when no Wi-Fi credentials are saved.
     ESP_ERROR_CHECK(audio_io_init());
-    ESP_ERROR_CHECK(audio_io_start_loopback());
-
-    // Either connect to saved Wi-Fi or come up as SoftAP for provisioning.
     ESP_ERROR_CHECK(wifi_provision_start());
+
     if (wifi_provision_state() == WIFI_PROV_STATE_CONNECTED) {
-        ESP_LOGI(TAG, "wifi connected, backend=%s",
-                 wifi_provision_backend_url() ? wifi_provision_backend_url() : "(unset)");
+        const char *backend = wifi_provision_backend_url();
+        ESP_LOGI(TAG, "wifi connected, backend=%s", backend ? backend : "(unset)");
+        if (backend) {
+            ESP_ERROR_CHECK(webrtc_session_start(backend));
+        }
+    } else {
+        // No backend reachable — fall back to local audio loopback so the
+        // M1 ear-test still works during provisioning.
+        ESP_ERROR_CHECK(audio_io_start_loopback());
     }
 
     while (1) {

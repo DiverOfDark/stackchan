@@ -5,6 +5,7 @@ idf_component_register(
         "wifi_provision.c"
         "captive_portal_index_html.c"
         "pipecat_signaling.c"
+        "webrtc_session.c"
     INCLUDE_DIRS
         "."
     REQUIRES
@@ -19,4 +20,5 @@ idf_component_register(
         nvs_flash
     PRIV_REQUIRES
         espressif__cjson
+        espressif__esp_peer
 )

@@ -7,7 +7,14 @@ dependencies:
   # M3: cJSON for HTTP signaling request/response bodies. IDF 6.x dropped the
   # bundled `json` component; pull from the registry.
   espressif/cjson: "^1.7.18"
-  # M4+: WebRTC stack (Opus + DTLS-SRTP + ICE + signaling abstraction)
-  # espressif/esp-webrtc-solution: "^1.0.0"
+  # M4+: WebRTC stack. We use the lower-level espressif/esp_peer directly
+  # rather than the esp_webrtc convenience wrapper. Rationale: esp_webrtc's
+  # in-monorepo `override_path` deps (tempotian/media_lib_sal, av_render) have
+  # incompatible esp_codec_dev pin ranges across versions, making it
+  # impractical to consume via Component Manager. esp_peer alone gives us the
+  # peer-connection lifecycle + Opus + DTLS-SRTP + ICE and lets us own the
+  # audio path completely — which we want anyway for the XVF3800 + AEC + wake
+  # word gating + format conversion glue.
+  espressif/esp_peer: "~1.4"
   # M6b: TensorFlow Lite Micro for microWakeWord inference
   # espressif/esp-tflite-micro: "^1.3.0"
