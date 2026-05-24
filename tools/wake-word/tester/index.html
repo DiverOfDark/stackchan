@@ -25,6 +25,16 @@
     .meta { font-size: 0.85rem; color: #4b5563; margin-top: 0.5rem; font-family: monospace; }
     table { border-collapse: collapse; margin-top: 0.5rem; font-size: 0.85rem; }
     td { padding: 0.15rem 0.5rem; }
+    .counter { margin-top: 1.25rem; padding: 0.6rem 0.9rem; background: #ecfdf5; border: 1px solid #a7f3d0;
+               border-radius: 6px; font-family: monospace; display: flex; align-items: center; gap: 1rem; }
+    .counter .num { font-size: 1.5rem; font-weight: bold; color: #047857; }
+    .bar { flex: 1; height: 8px; background: #d1fae5; border-radius: 4px; overflow: hidden; }
+    .bar > div { height: 100%; background: #10b981; transition: width 0.3s ease; }
+    .actions { margin-top: 0.8rem; display: flex; gap: 0.5rem; flex-wrap: wrap; }
+    button.save { background: #047857; color: white; }
+    button.discard { background: #fff; color: #6b7280; border: 1px solid #d1d5db; }
+    button.automode { background: #fde68a; color: #92400e; }
+    button.automode.on { background: #f59e0b; color: white; }
   </style>
 </head>
 <body>
@@ -37,12 +47,30 @@
   <button id="rec" class="rec">🎙 Start recording</button>
   <span id="status" class="meta"></span>
 
-  <div id="verdict">Press the button, say <b>"Эй, Фемто!"</b> a few times, then press stop.</div>
+  <div id="verdict">Press the button, say <b>"Эй, Фемто!"</b> (one utterance per recording), press stop, then save.</div>
 
   <canvas id="chart" width="760" height="160"></canvas>
   <div class="axis"><span>t=0</span><span id="t-mid">—</span><span id="t-end">—</span></div>
 
   <div class="meta" id="meta"></div>
+
+  <div id="actions" class="actions" style="display:none">
+    <button id="save" class="save">💾 Save this as positive sample</button>
+    <button id="discard" class="discard">Discard</button>
+  </div>
+
+  <div class="counter">
+    <span>📦 saved samples:</span>
+    <span id="cnt" class="num">…</span>
+    <span class="bar"><div id="bar" style="width:0%"></div></span>
+    <span id="target">/ <span id="target-n">15</span></span>
+  </div>
+  <p class="sub" style="margin-top:0.6rem">
+    <b>Tip:</b> 10–15 real recordings is enough — <code>augment_samples.py</code>
+    blows each one up to ~15 variants via pitch/speed/EQ/noise shifts.
+    Vary your delivery between takes: close vs far from mic, normal vs quick,
+    different intonation. Then run training.
+  </p>
 
 <script>
 const TARGET_RATE = 16000;
@@ -55,6 +83,19 @@ const tEnd    = document.getElementById('t-end');
 const meta    = document.getElementById('meta');
 
 let ctx, src, proc, samples = [], recording = false;
+let lastPcmBlob = null;     // ArrayBuffer of last recording, for /save
+const TARGET = parseInt(new URLSearchParams(location.search).get('target') || '15', 10);
+document.getElementById('target-n').textContent = TARGET;
+
+async function refreshCount() {
+  try {
+    const r = await fetch('/count'); const j = await r.json();
+    document.getElementById('cnt').textContent = j.saved;
+    const pct = Math.min(100, (j.saved / TARGET) * 100);
+    document.getElementById('bar').style.width = pct + '%';
+  } catch (e) { /* swallow */ }
+}
+refreshCount();
 
 btn.onclick = async () => {
   if (recording) { stopRecording(); return; }
@@ -95,6 +136,8 @@ async function stopRecording() {
     off += c.length;
   }
 
+  lastPcmBlob = buf.buffer;          // remember so /save can re-POST it
+
   const resp = await fetch('/predict', {
     method: 'POST',
     headers: { 'Content-Type': 'application/octet-stream' },
@@ -106,8 +149,12 @@ async function stopRecording() {
   stat.textContent = '';
   if (data.error) {
     verdict.innerHTML = `<span class="nope">${data.error}</span>`;
+    document.getElementById('actions').style.display = 'none';
     return;
   }
+  // Audio is usable for training even if the model doesn't fire yet (that's
+  // the whole point of saving these). Show the save buttons unconditionally.
+  document.getElementById('actions').style.display = 'flex';
 
   const cls = data.max_prob >= 0.5 ? 'ok'
              : data.max_prob >= 0.15 ? 'meh' : 'nope';
@@ -121,6 +168,38 @@ async function stopRecording() {
   </table>`;
   drawChart(data.probs);
 }
+
+document.getElementById('save').onclick = async () => {
+  if (!lastPcmBlob) return;
+  const r = await fetch('/save', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/octet-stream' },
+    body: lastPcmBlob,
+  });
+  const j = await r.json();
+  if (j.error) {
+    verdict.innerHTML += ` <span class="nope">save failed: ${j.error}</span>`;
+    return;
+  }
+  document.getElementById('cnt').textContent = j.saved;
+  const pct = Math.min(100, (j.saved / TARGET) * 100);
+  document.getElementById('bar').style.width = pct + '%';
+  document.getElementById('actions').style.display = 'none';
+  lastPcmBlob = null;
+  if (j.saved >= TARGET) {
+    verdict.innerHTML = `<span class="ok">✓ target reached (${j.saved}/${TARGET})!</span>
+                         Now run <code>python tools/wake_word_tester/augment_samples.py</code>
+                         and then <code>python tools/train_wake_word/train_production.py</code>.`;
+  } else {
+    verdict.innerHTML = `<span class="ok">saved ${j.saved}/${TARGET}</span> — record another.`;
+  }
+};
+
+document.getElementById('discard').onclick = () => {
+  document.getElementById('actions').style.display = 'none';
+  lastPcmBlob = null;
+  verdict.innerHTML = '<span class="meh">discarded — record again</span>';
+};
 
 function drawChart(probs) {
   const c = canvas.getContext('2d');

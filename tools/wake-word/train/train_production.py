@@ -37,14 +37,16 @@ from urllib.request import urlretrieve
 
 import yaml
 
-ROOT       = Path(__file__).resolve().parent
-POS_DIR    = ROOT / "corpus" / "positive"
-NEG_HF_DIR = ROOT / "negative_datasets"
-RIR_DIR    = ROOT / "mit_rirs"
-FMA_DIR    = ROOT / "fma_16k"
-FEAT_ROOT  = ROOT / "generated_features"
-MODEL_DIR  = ROOT / "trained_models" / "wakeword_prod"
-FINAL_OUT  = ROOT.parents[1] / "main" / "models" / "wake_word_ru.tflite"
+ROOT          = Path(__file__).resolve().parent
+POS_DIR       = ROOT / "corpus" / "positive"
+POS_REAL_DIR  = ROOT / "corpus" / "positive_real"        # raw recordings (app.py /save)
+POS_AUG_DIR   = ROOT / "corpus" / "positive_real_aug"    # pitch/time/EQ-augmented copies
+NEG_HF_DIR    = ROOT / "negative_datasets"
+RIR_DIR       = ROOT / "mit_rirs"
+FMA_DIR       = ROOT / "fma_16k"
+FEAT_ROOT     = ROOT / "generated_features"
+MODEL_DIR     = ROOT / "trained_models" / "wakeword_prod"
+FINAL_OUT     = ROOT.parents[1] / "main" / "models" / "wake_word_ru.tflite"
 
 
 # ---------- Step 1: Download datasets -------------------------------------
@@ -124,23 +126,33 @@ def fetch_fma_small() -> None:
 
 # ---------- Step 2: Spectrogram generation w/ real augmentation ----------
 
-def gen_positive_spectrograms() -> None:
-    from microwakeword.audio.augmentation import Augmentation
+def _make_clips(input_dir: Path):
     from microwakeword.audio.clips import Clips
-    from microwakeword.audio.spectrograms import SpectrogramGeneration
-    from mmap_ninja.ragged import RaggedMmap
-
-    out_root = FEAT_ROOT / "positive"
-    out_root.mkdir(parents=True, exist_ok=True)
-
-    clips = Clips(
-        input_directory=str(POS_DIR),
+    return Clips(
+        input_directory=str(input_dir),
         file_pattern="*.wav",
         max_clip_duration_s=None,
         remove_silence=False,
         random_split_seed=10,
         split_count=0.1,
     )
+
+
+def gen_positive_spectrograms_for(input_dir: Path, label: str, repeat_mul: int = 1) -> None:
+    """Generate train/val/test mmap features for one positive WAV directory.
+
+    Output dir is FEAT_ROOT / label / {training,validation,testing}/wakeword_mmap.
+    Each `label` becomes its own entry in the training config so we can give
+    real recordings + their augmentations higher sampling weight than synth.
+    """
+    from microwakeword.audio.augmentation import Augmentation
+    from microwakeword.audio.spectrograms import SpectrogramGeneration
+    from mmap_ninja.ragged import RaggedMmap
+
+    out_root = FEAT_ROOT / label
+    out_root.mkdir(parents=True, exist_ok=True)
+
+    clips = _make_clips(input_dir)
     augmenter = Augmentation(
         augmentation_duration_s=3.2,
         augmentation_probabilities={
@@ -161,7 +173,7 @@ def gen_positive_spectrograms() -> None:
         max_jitter_s=0.205,
     )
     for split, split_name, repeat, slide in [
-        ("training",  "train",      4, 10),    # 4× repetition for more variety
+        ("training",  "train",      4 * repeat_mul, 10),
         ("validation","validation", 1, 10),
         ("testing",   "test",       1, 1),
     ]:
@@ -181,21 +193,60 @@ def gen_positive_spectrograms() -> None:
         )
 
 
+def gen_positive_spectrograms() -> None:
+    """Generate features for whichever positive corpora the user has prepared."""
+    if POS_DIR.exists() and any(POS_DIR.glob("*.wav")):
+        n = len(list(POS_DIR.glob("*.wav")))
+        print(f"\n--- positive synthetic ({n} clips) ---")
+        gen_positive_spectrograms_for(POS_DIR, "positive_synth", repeat_mul=1)
+    if POS_REAL_DIR.exists() and any(POS_REAL_DIR.glob("*.wav")):
+        n = len(list(POS_REAL_DIR.glob("*.wav")))
+        print(f"\n--- positive real ({n} clips — recorded via wake_word_tester) ---")
+        # Heavier repetition on the small real corpus so it gets the same
+        # in-batch frequency as the large synthetic set under sampling_weight.
+        gen_positive_spectrograms_for(POS_REAL_DIR, "positive_real", repeat_mul=8)
+    if POS_AUG_DIR.exists() and any(POS_AUG_DIR.glob("*.wav")):
+        n = len(list(POS_AUG_DIR.glob("*.wav")))
+        print(f"\n--- positive real-augmented ({n} clips) ---")
+        gen_positive_spectrograms_for(POS_AUG_DIR, "positive_real_aug", repeat_mul=2)
+
+
 # ---------- Step 3: Config + train ---------------------------------------
 
 def write_config() -> Path:
+    positive_features = []
+    if (FEAT_ROOT / "positive_synth").exists():
+        positive_features.append({
+            "features_dir":        str(FEAT_ROOT / "positive_synth"),
+            "sampling_weight":     1.0,    # synthetic — the baseline
+            "penalty_weight":      1.0,
+            "truth":               True,
+            "truncation_strategy": "truncate_start",
+            "type":                "mmap",
+        })
+    if (FEAT_ROOT / "positive_real").exists():
+        positive_features.append({
+            "features_dir":        str(FEAT_ROOT / "positive_real"),
+            "sampling_weight":     8.0,    # real human voice — heavily oversampled
+            "penalty_weight":      1.5,
+            "truth":               True,
+            "truncation_strategy": "truncate_start",
+            "type":                "mmap",
+        })
+    if (FEAT_ROOT / "positive_real_aug").exists():
+        positive_features.append({
+            "features_dir":        str(FEAT_ROOT / "positive_real_aug"),
+            "sampling_weight":     4.0,    # augmented real — between the two
+            "penalty_weight":      1.0,
+            "truth":               True,
+            "truncation_strategy": "truncate_start",
+            "type":                "mmap",
+        })
+
     config = {
         "window_step_ms":      10,
         "train_dir":           str(MODEL_DIR),
-        "features": [
-            {
-                "features_dir":        str(FEAT_ROOT / "positive"),
-                "sampling_weight":     2.0,
-                "penalty_weight":      1.0,
-                "truth":               True,
-                "truncation_strategy": "truncate_start",
-                "type":                "mmap",
-            },
+        "features": positive_features + [
             {
                 "features_dir":        str(NEG_HF_DIR / "speech"),
                 "sampling_weight":     10.0,

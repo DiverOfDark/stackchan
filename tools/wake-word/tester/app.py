@@ -21,18 +21,23 @@ import os
 from pathlib import Path
 
 import numpy as np
+import soundfile as sf
 import tensorflow as tf
 from flask import Flask, jsonify, request, send_from_directory
 from pymicro_features import MicroFrontend
 
-ROOT       = Path(__file__).resolve().parent
-MODEL_PATH = ROOT.parents[1] / "main" / "models" / "wake_word_ru.tflite"
+ROOT        = Path(__file__).resolve().parent
+MODEL_PATH  = ROOT.parents[1] / "main" / "models" / "wake_word_ru.tflite"
+# Saved positive samples land here; train_production.py picks them up as
+# a second feature source with higher sampling weight than synthetic.
+CORPUS_DIR  = ROOT.parent / "train_wake_word" / "corpus" / "positive_real"
 
 SAMPLE_RATE      = 16000
 STRIDE_SAMPLES   = 160      # 10 ms @ 16 kHz
 FEATURE_SIZE     = 40
 INPUT_SLICES     = 3        # matches the model's 1×3×40 input
 WARMUP_SLICES    = 30       # ignore first ~300 ms (model state hasn't filled)
+CLIP_SAMPLES     = SAMPLE_RATE * 3 // 2   # 1.5 s — matches microWakeWord's clip_duration_ms
 
 app = Flask(__name__, static_folder=str(ROOT / "static"))
 
@@ -88,9 +93,59 @@ def probabilities_for_features(slices: list[np.ndarray]) -> list[float]:
     return probs
 
 
+def auto_trim_clip(samples: np.ndarray) -> np.ndarray:
+    """Center a CLIP_SAMPLES (1.5 s) window on the peak-energy region.
+
+    Recording usually has silence padding before/after the utterance; the
+    training pipeline expects clips already trimmed to ~1.5 s. We find the
+    loudest 100 ms region (sliding RMS) and center the 1.5 s output around it.
+    """
+    if len(samples) <= CLIP_SAMPLES:
+        out = np.zeros(CLIP_SAMPLES, dtype=np.int16)
+        out[:len(samples)] = samples
+        return out
+    win = 1600  # 100 ms sliding window
+    energy = np.cumsum(np.abs(samples.astype(np.int32)))
+    energy = energy[win:] - energy[:-win]
+    peak   = int(np.argmax(energy)) + win // 2
+    start  = max(0, peak - CLIP_SAMPLES // 2)
+    start  = min(start, len(samples) - CLIP_SAMPLES)
+    return samples[start:start + CLIP_SAMPLES]
+
+
+def saved_count() -> int:
+    if not CORPUS_DIR.exists():
+        return 0
+    return sum(1 for _ in CORPUS_DIR.glob("real_*.wav"))
+
+
 @app.route("/")
 def index():
     return send_from_directory(ROOT, "index.html")
+
+
+@app.route("/count")
+def count():
+    return jsonify({"saved": saved_count()})
+
+
+@app.route("/save", methods=["POST"])
+def save():
+    raw = request.get_data()
+    if not raw:
+        return jsonify({"error": "no audio"}), 400
+    samples = np.frombuffer(raw, dtype=np.int16)
+    if len(samples) < 4800:   # < 300 ms = nothing useful
+        return jsonify({"error": f"too short ({len(samples)} samples)"}), 400
+
+    clip = auto_trim_clip(samples)
+    CORPUS_DIR.mkdir(parents=True, exist_ok=True)
+    # Avoid races: enumerate existing then take next index.
+    existing = sorted(CORPUS_DIR.glob("real_*.wav"))
+    idx = int(existing[-1].stem.split("_")[1]) + 1 if existing else 0
+    out_path = CORPUS_DIR / f"real_{idx:05d}.wav"
+    sf.write(out_path, clip, SAMPLE_RATE, subtype="PCM_16")
+    return jsonify({"saved": saved_count(), "path": str(out_path.relative_to(ROOT.parent))})
 
 
 @app.route("/predict", methods=["POST"])
