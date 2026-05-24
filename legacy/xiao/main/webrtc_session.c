@@ -46,8 +46,12 @@ static const char *TAG = "webrtc";
 // Playback jitter buffer: 200 ms of mono int16 @ 16 kHz. Long enough to
 // absorb network bursts, short enough that barge-in feels responsive.
 #define PLAYBACK_BUFFER_BYTES  (16000 * 2 / 5)
-// Mark as "speaking" if a TTS frame arrived within this window.
+// Mark as "speaking" if a non-silent TTS frame arrived within this window.
 #define SPEAKING_HOLD_MS       400
+// PCM abs-max above which we treat a decoded frame as actual TTS audio
+// rather than aiortc/Opus comfort-noise (a few-byte payload that decodes
+// to near-silence). int16 amplitude — about -52 dBFS.
+#define SPEAKING_PCM_THRESHOLD 200
 // End the conversation if no wake event AND no inbound TTS for this long.
 #define SESSION_IDLE_TIMEOUT_MS  10000
 
@@ -206,8 +210,24 @@ static void on_audio_track(uint8_t *data, size_t size, void *userdata)
         // latency upward forever.
         ESP_LOGW(TAG, "playback buffer full, dropped %u bytes", (unsigned)(bytes - sent));
     }
-    s_session.last_rx_frame_tick = xTaskGetTickCount();
-    s_session.last_activity_tick = s_session.last_rx_frame_tick;
+    // Energy-gate the SPEAKING latch. aiortc keeps the RTP stream alive
+     // with comfort-noise / silence frames; bumping last_rx_frame_tick on
+     // every arrival made the LED ring read as "speaking" for the whole
+     // call. Only count frames whose abs-max crosses SPEAKING_PCM_THRESHOLD
+     // as real TTS audio. Activity-tick (used for the 10 s idle timeout)
+     // still bumps unconditionally — any inbound packet proves the peer
+     // is alive.
+    int32_t peak = 0;
+    for (int i = 0; i < decoded; ++i) {
+        int32_t a = pcm[i];
+        if (a < 0) a = -a;
+        if (a > peak) peak = a;
+    }
+    TickType_t now_tick = xTaskGetTickCount();
+    if (peak >= SPEAKING_PCM_THRESHOLD) {
+        s_session.last_rx_frame_tick = now_tick;
+    }
+    s_session.last_activity_tick = now_tick;
 }
 
 // ---------- Peer connection lifecycle -------------------------------------
