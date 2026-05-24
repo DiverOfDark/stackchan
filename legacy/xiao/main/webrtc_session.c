@@ -565,6 +565,14 @@ esp_err_t webrtc_session_start(const char *backend_url)
     opus_encoder_ctl(s_session.opus_enc, OPUS_SET_SIGNAL(OPUS_SIGNAL_VOICE));
     opus_encoder_ctl(s_session.opus_enc, OPUS_SET_INBAND_FEC(1));
     opus_encoder_ctl(s_session.opus_enc, OPUS_SET_PACKET_LOSS_PERC(10));
+    // Discontinuous transmission: during silence segments Opus emits
+    // 1-3 byte filler frames that decode as silence on the backend.
+    // Without DTX the encoder keeps producing 30-50 byte "low-energy
+    // noise" frames the whole time the mic is open — those frames are
+    // quiet enough that *we* don't think the user is talking, but loud
+    // enough that pipecat's Silero VAD never sees stop_secs of silence
+    // and never finalises the turn. STT/LLM/TTS never get triggered.
+    opus_encoder_ctl(s_session.opus_enc, OPUS_SET_DTX(1));
 
     s_session.opus_dec = opus_decoder_create(AUDIO_IO_SAMPLE_RATE, 1, &opus_err);
     if (!s_session.opus_dec || opus_err != OPUS_OK) {
