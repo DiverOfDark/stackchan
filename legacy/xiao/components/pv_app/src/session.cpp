@@ -37,7 +37,13 @@ constexpr int  kMainCore              = 0;
 constexpr int  kAvCore                = 1;
 
 constexpr std::size_t kPlaybackBufBytes = domain::kSampleRateHz * 2 / 5;  // 200 ms @ 16 kHz mono
-constexpr std::size_t kPlaybackBufTrig  = 320;                            // wake reader at 20 ms
+// Trigger level = one full 20 ms packet (640 bytes of int16 PCM). Anything
+// smaller wakes the playback task on a partial read and pads the rest with
+// silence — the half-packet "click click click" stream that comes out of
+// the speaker poisons the XVF3800's AEC reference, so user speech reaches
+// the backend mixed with un-cancelled bot echo and Whisper transcribes
+// garbage. Bug caught by an STT regression after the C → C++ port.
+constexpr std::size_t kPlaybackBufTrig  = domain::kFramesPerPacket * sizeof(int16_t);
 
 } // namespace
 
