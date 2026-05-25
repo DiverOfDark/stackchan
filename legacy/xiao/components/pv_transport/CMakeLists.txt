@@ -3,7 +3,10 @@
 # C-function-pointer-callback dance behind typed std::function events.
 
 set(TRANSPORT_SRCS
-    # Phase D adds: peer.cpp, opus_codec.cpp, wake_engine.cpp, signaling.cpp
+    "src/opus_codec.cpp"
+    "src/signaling.cpp"
+    "src/wake_engine.cpp"
+    "src/peer.cpp"
 )
 
 idf_component_register(
@@ -12,6 +15,9 @@ idf_component_register(
     REQUIRES
         pv_domain
         pv_hal
-        # Phase D will add: libpeer, esphome__micro-opus,
-        # espressif__esp-tflite-micro
+        libpeer
+        esphome__micro-opus
+        wake_word
+    PRIV_REQUIRES
+        espressif__cjson
 )
