@@ -62,3 +62,11 @@ endfunction()
 add_domain_test(test_led_fsm
     ${DOMAIN_DIR}/src/led_fsm.cpp
     ${DOMAIN_DIR}/test/test_led_fsm.cpp)
+
+add_domain_test(test_wake_window
+    ${DOMAIN_DIR}/src/wake_window.cpp
+    ${DOMAIN_DIR}/test/test_wake_window.cpp)
+
+add_domain_test(test_energy_gate
+    ${DOMAIN_DIR}/src/energy_gate.cpp
+    ${DOMAIN_DIR}/test/test_energy_gate.cpp)
