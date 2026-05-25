@@ -2,8 +2,8 @@
 # and wires Transport + HAL together using Domain types.
 
 set(APP_SRCS
-    # Phase E adds: capture_pipeline.cpp, playback_pipeline.cpp, ui.cpp,
-    # provisioning_app.cpp, session.cpp
+    "src/ui.cpp"
+    "src/session.cpp"
 )
 
 idf_component_register(

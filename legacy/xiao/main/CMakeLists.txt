@@ -1,32 +1,14 @@
+# Thin app_main + the embedded captive-portal HTML blob. All real
+# code lives in components/pv_{domain,hal,transport,app}/.
 idf_component_register(
     SRCS
-        "main.c"
-        "audio_io.c"
-        "wifi_provision.c"
+        "main.cpp"
         "captive_portal_index_html.c"
-        "pipecat_signaling.c"
-        "webrtc_session.c"
-        "button.c"
-        "leds.c"
-        "xvf3800.c"
-    INCLUDE_DIRS
-        "."
+    INCLUDE_DIRS "."
     REQUIRES
-        esp_driver_i2s
         esp_driver_i2c
-        esp_driver_gpio
-        esp_event
-        esp_http_client
-        esp_http_server
-        esp-tls
-        esp_netif
-        esp_wifi
-        lwip
         nvs_flash
-        wake_word
-    PRIV_REQUIRES
-        espressif__cjson
-        libpeer
-        esphome__micro-opus
-        espressif__button
+        pv_hal
+        pv_transport
+        pv_app
 )

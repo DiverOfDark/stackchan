@@ -23,6 +23,7 @@
 #include <string>
 #include <vector>
 
+#include "esp_err.h"
 extern "C" {
 #include "peer.h"
 }
@@ -46,14 +47,24 @@ public:
     using OnLocalSdp       = std::function<void(std::string)>;
     using OnInboundAudio   = std::function<void(const uint8_t*, std::size_t)>;
 
-    // Factory. `ice` is copied into the Peer (and the underlying
-    // libpeer config holds references into the copy).
-    static std::optional<Peer> create(const std::vector<PeerIceServer>& ice);
+    // Process-global libpeer init (initialises libsrtp + usrsctp).
+    // Must be called once before any Peer::create(). Idempotent.
+    static esp_err_t initLibpeerOnce();
 
+    // Factory. Returns a unique_ptr so the address of *this stays
+    // stable for the lifetime of the libpeer connection — libpeer
+    // stores `Peer*` in its config.user_data and dereferences it on
+    // every callback. A move-able Peer would invalidate that pointer
+    // the first time it gets relocated; std::unique_ptr keeps the
+    // object pinned in place.
+    static std::unique_ptr<Peer> create(const std::vector<PeerIceServer>& ice);
+
+    // Non-copyable, non-movable for the same reason — only the
+    // unique_ptr moves; the underlying object stays put.
     Peer(const Peer&)            = delete;
     Peer& operator=(const Peer&) = delete;
-    Peer(Peer&& other) noexcept;
-    Peer& operator=(Peer&& other) noexcept;
+    Peer(Peer&&)                 = delete;
+    Peer& operator=(Peer&&)      = delete;
     ~Peer();
 
     void setOnStateChange(OnStateChange cb);

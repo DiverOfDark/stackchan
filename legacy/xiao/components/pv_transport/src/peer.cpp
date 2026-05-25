@@ -11,6 +11,18 @@ constexpr const char* kTag = "peer";
 
 namespace transport {
 
+esp_err_t Peer::initLibpeerOnce()
+{
+    static bool inited = false;
+    if (inited) return ESP_OK;
+    if (peer_init() != 0) {
+        ESP_LOGE(kTag, "peer_init failed (libsrtp / usrsctp init)");
+        return ESP_FAIL;
+    }
+    inited = true;
+    return ESP_OK;
+}
+
 PeerState fromLibpeer(PeerConnectionState s)
 {
     switch (s) {
@@ -25,70 +37,33 @@ PeerState fromLibpeer(PeerConnectionState s)
     return PeerState::Failed;
 }
 
-std::optional<Peer> Peer::create(const std::vector<PeerIceServer>& ice)
+std::unique_ptr<Peer> Peer::create(const std::vector<PeerIceServer>& ice)
 {
-    Peer p;
-    p.ice_ = ice;
+    auto p   = std::unique_ptr<Peer>(new Peer);
+    p->ice_  = ice;
 
     PeerConfiguration cfg{};
     cfg.audio_codec  = CODEC_OPUS;
     cfg.video_codec  = CODEC_NONE;
     cfg.datachannel  = DATA_CHANNEL_NONE;
     cfg.onaudiotrack = &Peer::thunkOnAudio;
-    cfg.user_data    = &p;   // see NOTE below about move-stability
+    cfg.user_data    = p.get();   // unique_ptr keeps the address stable
 
-    const std::size_t n = std::min<std::size_t>(p.ice_.size(), 5);
+    const std::size_t n = std::min<std::size_t>(p->ice_.size(), 5);
     for (std::size_t i = 0; i < n; ++i) {
-        cfg.ice_servers[i].urls       = p.ice_[i].url.c_str();
-        cfg.ice_servers[i].username   = p.ice_[i].username.c_str();
-        cfg.ice_servers[i].credential = p.ice_[i].credential.c_str();
+        cfg.ice_servers[i].urls       = p->ice_[i].url.c_str();
+        cfg.ice_servers[i].username   = p->ice_[i].username.c_str();
+        cfg.ice_servers[i].credential = p->ice_[i].credential.c_str();
     }
 
-    p.pc_ = peer_connection_create(&cfg);
-    if (!p.pc_) {
+    p->pc_ = peer_connection_create(&cfg);
+    if (!p->pc_) {
         ESP_LOGE(kTag, "peer_connection_create failed");
-        return std::nullopt;
+        return nullptr;
     }
-    peer_connection_oniceconnectionstatechange(p.pc_, &Peer::thunkOnState);
-    peer_connection_onicecandidate            (p.pc_, &Peer::thunkOnSdp);
-
-    // NOTE on user_data lifetime: libpeer copies cfg into the PeerConnection
-    // and stores the user_data pointer there. We pass `&p` which would be
-    // unsafe across a move(). The caller MUST keep the Peer in a stable
-    // location (e.g. as a class member by value, NOT a local that gets
-    // moved) for the lifetime of the connection. close()/move are
-    // responsible for tearing down the pc before allowing relocation.
+    peer_connection_oniceconnectionstatechange(p->pc_, &Peer::thunkOnState);
+    peer_connection_onicecandidate            (p->pc_, &Peer::thunkOnSdp);
     return p;
-}
-
-Peer::Peer(Peer&& other) noexcept
-    : pc_(other.pc_)
-    , ice_(std::move(other.ice_))
-    , on_state_(std::move(other.on_state_))
-    , on_sdp_(std::move(other.on_sdp_))
-    , on_audio_(std::move(other.on_audio_))
-{
-    pending_answer_.store(other.pending_answer_.exchange(nullptr));
-    other.pc_ = nullptr;
-    // NOTE: see comment in create() — the moved-from `&other` is now
-    // dangling inside libpeer's stored user_data. Caller must close
-    // BEFORE moving. We document this in the header; runtime detection
-    // would require an extra indirection we don't want.
-}
-
-Peer& Peer::operator=(Peer&& other) noexcept
-{
-    if (this != &other) {
-        close();
-        pc_       = other.pc_;
-        ice_      = std::move(other.ice_);
-        on_state_ = std::move(other.on_state_);
-        on_sdp_   = std::move(other.on_sdp_);
-        on_audio_ = std::move(other.on_audio_);
-        pending_answer_.store(other.pending_answer_.exchange(nullptr));
-        other.pc_ = nullptr;
-    }
-    return *this;
 }
 
 Peer::~Peer()
@@ -117,11 +92,16 @@ void Peer::publishAnswer(std::string sdp)
 void Peer::tick()
 {
     if (!pc_) return;
+    // Order matters: pump libpeer FIRST (drains the UDP queue, advances
+    // ICE/DTLS state), THEN apply any pending SDP answer. Doing
+    // set_remote_description before the loop on tick #N+1 — at the
+    // moment DTLS keys aren't derived yet — can let a stray packet
+    // hit srtp_unprotect with srtp_in == NULL and crash.
+    peer_connection_loop(pc_);
     if (auto* parked = pending_answer_.exchange(nullptr)) {
         peer_connection_set_remote_description(pc_, parked->c_str(), SDP_TYPE_ANSWER);
         delete parked;
     }
-    peer_connection_loop(pc_);
 }
 
 int Peer::sendAudio(const uint8_t* opus, std::size_t bytes)
