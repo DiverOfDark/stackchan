@@ -11,7 +11,8 @@ set(DOMAIN_SRCS
     "src/led_fsm.cpp"
     "src/wake_window.cpp"
     "src/energy_gate.cpp"
-    # session_fsm, form_urlencoded added in subsequent Phase B commits.
+    "src/form_urlencoded.cpp"
+    "src/session_fsm.cpp"
 )
 
 # idf_component_register requires either SRCS or INCLUDE_DIRS to be non-

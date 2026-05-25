@@ -70,3 +70,11 @@ add_domain_test(test_wake_window
 add_domain_test(test_energy_gate
     ${DOMAIN_DIR}/src/energy_gate.cpp
     ${DOMAIN_DIR}/test/test_energy_gate.cpp)
+
+add_domain_test(test_form_urlencoded
+    ${DOMAIN_DIR}/src/form_urlencoded.cpp
+    ${DOMAIN_DIR}/test/test_form_urlencoded.cpp)
+
+add_domain_test(test_session_fsm
+    ${DOMAIN_DIR}/src/session_fsm.cpp
+    ${DOMAIN_DIR}/test/test_session_fsm.cpp)
