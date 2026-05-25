@@ -233,7 +233,15 @@ void Session::mainLoopTask()
 void Session::captureTask()
 {
     static int32_t stereo[domain::kFramesPerPacket * hal::AudioIo::kChannels];
-    static int16_t mono  [domain::kFramesPerPacket];
+    // Two separate mono buffers: the wake-word detector needs the +18 dB
+    // software boost (the trained microWakeWord model was fed audio at
+    // that level) while the uplink path wants clean unboosted audio so
+    // backend Whisper / Silero see what the XVF3800's AEC + AGC actually
+    // produced. Earlier code used one boosted buffer for both, which
+    // sent over-amplified, often clipped audio to the backend — STT
+    // transcribed it as garbage.
+    static int16_t mono_wake  [domain::kFramesPerPacket];   // post >>13 boost
+    static int16_t mono_uplink[domain::kFramesPerPacket];   // post >>16, raw level
     static uint8_t opus_buf[domain::kOpusMaxPacketBytes];
 
     while (running_.load()) {
@@ -241,25 +249,31 @@ void Session::captureTask()
             vTaskDelay(pdMS_TO_TICKS(20));
             continue;
         }
-        // Channel 0 of XVF3800 = processed mono. 18 dB software boost
-        // (>>13) so wake-word + downstream STT see voice in the
-        // 30-50 % dynamic-range band.
+        // XVF3800 default output: channel 0 (left) = auto-select beam
+        // (processed mono); channel 1 (right) = silence. Per the
+        // reSpeaker_XVF3800_USB_4MIC_ARRAY host_control docs.
         for (std::size_t i = 0; i < domain::kFramesPerPacket; ++i) {
-            int32_t s = stereo[i * hal::AudioIo::kChannels] >> 13;
-            if (s >  INT16_MAX) s = INT16_MAX;
-            if (s <  INT16_MIN) s = INT16_MIN;
-            mono[i] = static_cast<int16_t>(s);
+            const int32_t raw = stereo[i * hal::AudioIo::kChannels];
+            // Uplink: take the top 16 bits — the conventional 32→16
+            // bit reduction, matches what ESPHome's i2s_audio does on
+            // the same hardware.
+            mono_uplink[i] = static_cast<int16_t>(raw >> 16);
+            // Wake word: +18 dB boost (>>13 + clamp) so the trained
+            // model sees voice at the 30-50 % level it expects.
+            int32_t boosted = raw >> 13;
+            if (boosted >  INT16_MAX) boosted = INT16_MAX;
+            if (boosted <  INT16_MIN) boosted = INT16_MIN;
+            mono_wake[i] = static_cast<int16_t>(boosted);
         }
 
-        // Local mic-RMS gate → LED TALKING + uplink hysteresis.
-        const uint32_t rms = domain::rms_i16(mono, domain::kFramesPerPacket);
+        // Local mic-RMS gate uses the boosted buffer (matches the
+        // threshold tuning that was done against the boosted levels).
+        const uint32_t rms = domain::rms_i16(mono_wake, domain::kFramesPerPacket);
         if (rms >= static_cast<uint32_t>(kMicActiveRmsThreshold)) {
             last_mic_active_tick_ = xTaskGetTickCount();
         }
 
-        // Wake-word detector runs unconditionally (pre-wake / muted /
-        // mid-conversation — all useful contexts).
-        transport::WakeEngine::process(mono, domain::kFramesPerPacket);
+        transport::WakeEngine::process(mono_wake, domain::kFramesPerPacket);
         if (transport::WakeEngine::detected()) {
             ui_.setLed(domain::LedState::WakeAck);
             last_mic_active_tick_ = xTaskGetTickCount();
@@ -267,15 +281,12 @@ void Session::captureTask()
 
         if (!connected_.load() || button_.isMuted()) continue;
 
-        // Device-side VAD: only stream within UPLINK_HOLD_MS of the
-        // last loud mic frame. Backend Silero sees real silence gaps;
-        // we avoid Opus DTX (which trips the SILK Burg watchdog).
         if ((xTaskGetTickCount() - last_mic_active_tick_.load()) >
                 pdMS_TO_TICKS(kUplinkHoldMs)) {
             continue;
         }
 
-        int n = enc_->encode(mono, domain::kFramesPerPacket,
+        int n = enc_->encode(mono_uplink, domain::kFramesPerPacket,
                              opus_buf, sizeof(opus_buf));
         if (n > 0 && peer_) {
             peer_->sendAudio(opus_buf, static_cast<std::size_t>(n));
