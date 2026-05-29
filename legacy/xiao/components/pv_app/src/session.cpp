@@ -39,6 +39,11 @@ constexpr int  kAecRefTxChannel       = 0;        // L channel of XVF3800 input
 // itself and self-interrupting. See the capture task.
 constexpr int  kEchoGuardMs           = 400;
 
+// Conversation ends (mic uplink closes, wake word required again) after this
+// much continuous silence from BOTH the user and the bot. Keeps a turn open
+// for follow-ups while someone is still talking.
+constexpr int  kConversationSilenceMs = 4000;
+
 constexpr int  kMainStack             = 32 * 1024;
 constexpr int  kCapStack              = 32 * 1024;
 constexpr int  kPlayStack             = 16 * 1024;
@@ -284,34 +289,47 @@ void Session::captureTask()
             mono_wake[i]   = domain::scale_to_i16(raw, kWakeGain);
         }
 
-        // RMS only feeds the TALKING-LED activity indicator now — the
-        // uplink runs continuously (below) and the backend's Silero VAD
-        // decides turn boundaries.
+        const TickType_t now = xTaskGetTickCount();
+
+        // Is the bot playing TTS right now? Used both for echo suppression and
+        // to keep the conversation alive while the bot talks. last_rx_frame_
+        // tick_ marks the last inbound TTS frame; the guard also spans the
+        // playback-buffer tail (~200 ms) still draining to the speaker.
+        const TickType_t rx = last_rx_frame_tick_.load();
+        const bool bot_speaking = rx != 0 &&
+            (now - rx) < pdMS_TO_TICKS(kEchoGuardMs);
+
+        // User mic energy, but only when the bot ISN'T speaking — otherwise the
+        // speaker bleed would register as user activity. Feeds the TALKING LED
+        // and the conversation keep-alive timer.
         const uint32_t rms = domain::rms_i16(mono_wake, domain::kFramesPerPacket);
-        if (rms >= static_cast<uint32_t>(kMicActiveRmsThreshold)) {
-            last_mic_active_tick_ = xTaskGetTickCount();
+        if (!bot_speaking && rms >= static_cast<uint32_t>(kMicActiveRmsThreshold)) {
+            last_mic_active_tick_ = now;
         }
 
+        // Wake word arms the conversation (starts streaming to the backend).
         transport::WakeEngine::process(mono_wake, domain::kFramesPerPacket);
         if (transport::WakeEngine::detected()) {
             ui_.setLed(domain::LedState::WakeAck);
-            last_mic_active_tick_ = xTaskGetTickCount();
+            conversation_active_ = true;
+            last_mic_active_tick_ = now;   // give the user the full window to start
+        }
+
+        // End the turn after a silence from BOTH user and bot — then the wake
+        // word is required again. Bot speech (last_rx) counts as activity so a
+        // long answer doesn't drop the conversation mid-sentence.
+        if (conversation_active_.load()) {
+            const TickType_t last_activity =
+                std::max(last_mic_active_tick_.load(), last_rx_frame_tick_.load());
+            if ((now - last_activity) > pdMS_TO_TICKS(kConversationSilenceMs)) {
+                conversation_active_ = false;
+                ESP_LOGI(kTag, "conversation idle — wake word required again");
+            }
         }
 
         if (!connected_.load() || button_.isMuted()) continue;
-
-        // Half-duplex echo suppression. The speaker bleeds into the mic, so if
-        // we keep streaming while the bot is talking, the backend VAD hears the
-        // TTS as the user and interrupts the bot — a self-interruption loop.
-        // The XVF3800 has hardware AEC but it isn't configured here, so we gate
-        // the uplink instead: stay quiet while TTS is playing. last_rx_frame_
-        // tick_ marks the last inbound TTS frame; the guard also spans the
-        // playback-buffer tail (~200 ms) still draining to the speaker.
-        // Cost: no barge-in mid-utterance until the XVF3800 AEC is set up.
-        const TickType_t rx = last_rx_frame_tick_.load();
-        const bool bot_speaking = rx != 0 &&
-            (xTaskGetTickCount() - rx) < pdMS_TO_TICKS(kEchoGuardMs);
-        if (bot_speaking) continue;
+        if (!conversation_active_.load()) continue;   // listen only after wake
+        if (bot_speaking) continue;                   // half-duplex echo guard
 
         // G.711 encode is ~free, so the capture loop stays comfortably real-time.
         const std::size_t n = domain::g711_encode_16k(
