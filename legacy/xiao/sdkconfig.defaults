@@ -26,6 +26,16 @@ CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
 CONFIG_LOG_DEFAULT_LEVEL_INFO=y
 CONFIG_LOG_COLORS=y
 
+# Console on the native USB-Serial-JTAG (the /dev/ttyACM port), NOT UART0.
+# The default UART0 console pins on the ESP32-S3 are GPIO43/44 — which this
+# board uses for the I2S data lines (see hal/audio_io.cpp). With the UART
+# console as primary, every ESP_LOG line is muxed onto pins driven by the
+# audio bus and never reaches a serial adapter, so the device looks silent.
+# Routing the console over USB-Serial-JTAG gives a working log on the same
+# USB cable used for flashing.
+# CONFIG_ESP_CONSOLE_UART_DEFAULT is not set
+CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y
+
 # FreeRTOS — bump task stack a bit; WebRTC + Opus need headroom
 CONFIG_ESP_MAIN_TASK_STACK_SIZE=8192
 
