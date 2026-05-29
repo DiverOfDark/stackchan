@@ -50,7 +50,7 @@ import numpy as np
 # the frontend half of this contract; keep these three in step by hand.
 WAKE_WINDOW_LEN = 5
 WAKE_MIN_HITS = 2
-WAKE_THRESHOLD = 0.10
+WAKE_THRESHOLD = 0.70
 WAKE_COOLDOWN_MS = 2000
 
 FRONTEND_STRIDE_MS = 10          # one feature slice per 10 ms of audio
@@ -86,9 +86,10 @@ def extract_features(pcm: np.ndarray):
     # window internally and emits one slice per 10 ms step.
     for off in range(0, len(pcm) - STRIDE_SAMPLES + 1, STRIDE_SAMPLES):
         chunk = raw[off * 2 : (off + STRIDE_SAMPLES) * 2]
-        result = fe.process_samples(chunk)
-        # process_samples -> (features: list[float], samples_read: int)
-        values = result[0] if isinstance(result, tuple) else result
+        # process_samples -> MicroFrontendOutput(features: list[float],
+        # samples_read: int). `features` is empty until the 30 ms window
+        # fills, then carries one 40-dim slice per 10 ms step.
+        values = fe.process_samples(chunk).features
         if values:
             feats.append(np.asarray(values, dtype=np.float32))
     return feats
@@ -104,7 +105,10 @@ class StreamingModel:
         try:
             from tflite_runtime.interpreter import Interpreter
         except ImportError:
-            from tensorflow.lite import Interpreter  # type: ignore
+            try:
+                from ai_edge_litert.interpreter import Interpreter
+            except ImportError:
+                from tensorflow.lite import Interpreter  # type: ignore
 
         self.interp = Interpreter(model_path=str(model_path))
         self.interp.allocate_tensors()
