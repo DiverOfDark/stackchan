@@ -33,6 +33,12 @@ constexpr float kWakeGain             = 8.0f;     // +18 dB — what the model t
 
 constexpr int  kAecRefTxChannel       = 0;        // L channel of XVF3800 input
 
+// Half-duplex echo guard: how long after the last inbound TTS frame to keep
+// the mic uplink muted. Must outlast the playback-buffer tail (~200 ms) so the
+// speaker has gone quiet before we listen again. Prevents the bot hearing
+// itself and self-interrupting. See the capture task.
+constexpr int  kEchoGuardMs           = 400;
+
 constexpr int  kMainStack             = 32 * 1024;
 constexpr int  kCapStack              = 32 * 1024;
 constexpr int  kPlayStack             = 16 * 1024;
@@ -294,10 +300,20 @@ void Session::captureTask()
 
         if (!connected_.load() || button_.isMuted()) continue;
 
-        // Stream every frame while connected and unmuted. Continuous send is
-        // the normal WebRTC model; the backend VAD gates STT, so a device-side
-        // energy gate here only risks dropping speech onsets. G.711 encode is
-        // ~free, so this keeps the capture loop comfortably real-time.
+        // Half-duplex echo suppression. The speaker bleeds into the mic, so if
+        // we keep streaming while the bot is talking, the backend VAD hears the
+        // TTS as the user and interrupts the bot — a self-interruption loop.
+        // The XVF3800 has hardware AEC but it isn't configured here, so we gate
+        // the uplink instead: stay quiet while TTS is playing. last_rx_frame_
+        // tick_ marks the last inbound TTS frame; the guard also spans the
+        // playback-buffer tail (~200 ms) still draining to the speaker.
+        // Cost: no barge-in mid-utterance until the XVF3800 AEC is set up.
+        const TickType_t rx = last_rx_frame_tick_.load();
+        const bool bot_speaking = rx != 0 &&
+            (xTaskGetTickCount() - rx) < pdMS_TO_TICKS(kEchoGuardMs);
+        if (bot_speaking) continue;
+
+        // G.711 encode is ~free, so the capture loop stays comfortably real-time.
         const std::size_t n = domain::g711_encode_16k(
             mono_uplink, domain::kFramesPerPacket, ulaw_buf);   // 320 → 160 bytes
         if (peer_) peer_->sendAudio(ulaw_buf, n);
