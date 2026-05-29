@@ -78,3 +78,7 @@ add_domain_test(test_form_urlencoded
 add_domain_test(test_session_fsm
     ${DOMAIN_DIR}/src/session_fsm.cpp
     ${DOMAIN_DIR}/test/test_session_fsm.cpp)
+
+# gain.hpp is header-only — no src/ translation unit to compile in.
+add_domain_test(test_gain
+    ${DOMAIN_DIR}/test/test_gain.cpp)

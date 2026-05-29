@@ -8,6 +8,7 @@
 #include "esp_timer.h"
 
 #include "domain/energy_gate.hpp"
+#include "domain/gain.hpp"
 #include "transport/wake_engine.hpp"
 
 namespace {
@@ -19,8 +20,16 @@ constexpr const char* kTag = "session";
 constexpr int  kRetryIntervalMs       = 5000;
 constexpr int  kSessionIdleTimeoutMs  = 10'000;
 constexpr int  kSpeakingPcmThreshold  = 1000;     // ~ -30 dBFS
-constexpr int  kMicActiveRmsThreshold = 4000;     // ~ -18 dBFS (post 18 dB boost)
-constexpr int  kUplinkHoldMs          = 2000;     // device-side VAD hysteresis
+// Drives the TALKING LED only — NOT uplink gating. Turn detection lives on
+// the backend (Silero VAD); a device-side energy gate on top of it just
+// clipped the quiet start of commands and starved STT.
+constexpr int  kMicActiveRmsThreshold = 4000;     // ~ -18 dBFS (post boost)
+
+// Mic input gain (linear), applied with a soft-knee limiter via
+// domain::scale_to_i16 so loud speech saturates smoothly instead of
+// hard-clipping. gain 1.0 == the old `raw >> 16`.
+constexpr float kUplinkGain           = 4.0f;     // +12 dB — healthy STT level
+constexpr float kWakeGain             = 8.0f;     // +18 dB — what the model trained on
 
 constexpr int  kAecRefTxChannel       = 0;        // L channel of XVF3800 input
 
@@ -233,15 +242,16 @@ void Session::mainLoopTask()
 void Session::captureTask()
 {
     static int32_t stereo[domain::kFramesPerPacket * hal::AudioIo::kChannels];
-    // Two separate mono buffers: the wake-word detector needs the +18 dB
-    // software boost (the trained microWakeWord model was fed audio at
-    // that level) while the uplink path wants clean unboosted audio so
-    // backend Whisper / Silero see what the XVF3800's AEC + AGC actually
-    // produced. Earlier code used one boosted buffer for both, which
-    // sent over-amplified, often clipped audio to the backend — STT
-    // transcribed it as garbage.
-    static int16_t mono_wake  [domain::kFramesPerPacket];   // post >>13 boost
-    static int16_t mono_uplink[domain::kFramesPerPacket];   // post >>16, raw level
+    // Two separate mono buffers at different gains, both soft-limited (no
+    // hard clipping — see domain::scale_to_i16). The wake-word detector
+    // wants +18 dB because the trained microWakeWord model was fed audio at
+    // that level; the uplink path wants a more moderate +12 dB so backend
+    // Whisper / Silero get a healthy but undistorted level. Earlier code
+    // used one hard-clipped +18 dB buffer for both, which sent square-wave
+    // garbage to the backend; the later "raw >> 16" uplink swung the other
+    // way and sent audio ~18 dB too quiet for STT to hear.
+    static int16_t mono_wake  [domain::kFramesPerPacket];   // +18 dB, soft-limited
+    static int16_t mono_uplink[domain::kFramesPerPacket];   // +12 dB, soft-limited
     static uint8_t opus_buf[domain::kOpusMaxPacketBytes];
 
     while (running_.load()) {
@@ -254,20 +264,13 @@ void Session::captureTask()
         // reSpeaker_XVF3800_USB_4MIC_ARRAY host_control docs.
         for (std::size_t i = 0; i < domain::kFramesPerPacket; ++i) {
             const int32_t raw = stereo[i * hal::AudioIo::kChannels];
-            // Uplink: take the top 16 bits — the conventional 32→16
-            // bit reduction, matches what ESPHome's i2s_audio does on
-            // the same hardware.
-            mono_uplink[i] = static_cast<int16_t>(raw >> 16);
-            // Wake word: +18 dB boost (>>13 + clamp) so the trained
-            // model sees voice at the 30-50 % level it expects.
-            int32_t boosted = raw >> 13;
-            if (boosted >  INT16_MAX) boosted = INT16_MAX;
-            if (boosted <  INT16_MIN) boosted = INT16_MIN;
-            mono_wake[i] = static_cast<int16_t>(boosted);
+            mono_uplink[i] = domain::scale_to_i16(raw, kUplinkGain);
+            mono_wake[i]   = domain::scale_to_i16(raw, kWakeGain);
         }
 
-        // Local mic-RMS gate uses the boosted buffer (matches the
-        // threshold tuning that was done against the boosted levels).
+        // RMS only feeds the TALKING-LED activity indicator now — the
+        // uplink runs continuously (below) and the backend's Silero VAD
+        // decides turn boundaries.
         const uint32_t rms = domain::rms_i16(mono_wake, domain::kFramesPerPacket);
         if (rms >= static_cast<uint32_t>(kMicActiveRmsThreshold)) {
             last_mic_active_tick_ = xTaskGetTickCount();
@@ -281,11 +284,9 @@ void Session::captureTask()
 
         if (!connected_.load() || button_.isMuted()) continue;
 
-        if ((xTaskGetTickCount() - last_mic_active_tick_.load()) >
-                pdMS_TO_TICKS(kUplinkHoldMs)) {
-            continue;
-        }
-
+        // Stream every frame while connected and unmuted. Continuous send is
+        // the normal WebRTC model; the backend VAD gates STT, so a
+        // device-side energy gate here only risks dropping speech onsets.
         int n = enc_->encode(mono_uplink, domain::kFramesPerPacket,
                              opus_buf, sizeof(opus_buf));
         if (n > 0 && peer_) {

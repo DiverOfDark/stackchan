@@ -47,19 +47,23 @@ static const char *TAG = "wake_word";
 
 // ---- Detection-side tuning ---------------------------------------------
 //
-// microWakeWord's reference: average ~10 successive probabilities, fire
-// when sustained > threshold. 10 inferences × 10 ms stride = 100 ms of
-// sustained confidence before we declare wake.
-#define WAKE_WINDOW_LEN     10
-// Lowered from 0.95 during hardware bring-up debugging. 0.95 is the target
-// for a clean false-accept rate; 0.50 lets us see ANY detection so we can
-// tune. Adjust upward once the path is confirmed end-to-end.
+// microWakeWord's reference averages ~10 successive probabilities and fires
+// when the MEAN stays above threshold — which assumes a well-trained model
+// that holds high confidence across the whole wake word. Ours doesn't: it
+// was trained from ~15 real samples + augmentation and only spikes to
+// p_max ≈ 0.12 for a couple of invokes during the word, sitting near 0
+// otherwise. A mean-over-window detector dilutes that burst to ~0.03 and
+// never fires (this was the main cause of the ~1-in-5 hit rate).
 //
-// Temporarily lowered to 0.10. Our model (trained from ~15 real samples
-// + augmentation) tops out at p_max ≈ 0.12 on actual wake-word speech —
-// 0.50 was unreachable in practice. 0.10 lets us validate the rest of
-// the voice loop end-to-end at the cost of occasional false wakes from
-// loud non-wake speech. Bump back up once we retrain with more data.
+// Instead we count how many recent invokes cleared the threshold and fire
+// when at least WAKE_MIN_HITS of them did within a WAKE_WINDOW_LEN window
+// (~150 ms of invokes). That catches the spike while a lone-frame blip from
+// random loud speech still gets rejected. Retrain with more data and this
+// can move back to a higher threshold + mean detector.
+#define WAKE_WINDOW_LEN     5
+#define WAKE_MIN_HITS       2
+// 0.10 is a bring-up value matched to the current weak model's p_max ≈ 0.12.
+// Raise it (toward 0.5–0.95) once a retrained model clears it comfortably.
 #define WAKE_THRESHOLD      0.10f
 #define WAKE_COOLDOWN_MS    2000
 
@@ -300,12 +304,18 @@ static void update_window(float prob_float)
 #endif
 
     if (s_prob_window_count < WAKE_WINDOW_LEN) return;
-    float sum = 0;
-    for (int i = 0; i < WAKE_WINDOW_LEN; ++i) sum += s_prob_window[i];
-    float avg = sum / WAKE_WINDOW_LEN;
+    // Fire on a burst of spikes, not on a sustained mean — see the tuning
+    // note above. Count threshold crossings in the window (and track the
+    // peak just for the log line).
+    int   hits = 0;
+    float peak = 0.0f;
+    for (int i = 0; i < WAKE_WINDOW_LEN; ++i) {
+        if (s_prob_window[i] >= WAKE_THRESHOLD) ++hits;
+        if (s_prob_window[i] > peak) peak = s_prob_window[i];
+    }
 
     int64_t now_us = esp_timer_get_time();
-    if (avg >= WAKE_THRESHOLD &&
+    if (hits >= WAKE_MIN_HITS &&
         (now_us - s_last_fire_us) > (int64_t)WAKE_COOLDOWN_MS * 1000) {
         s_last_fire_us = now_us;
         atomic_store(&s_detected_latch, true);
@@ -313,7 +323,7 @@ static void update_window(float prob_float)
         // utterance; cooldown is belt-and-suspenders.
         for (int i = 0; i < WAKE_WINDOW_LEN; ++i) s_prob_window[i] = 0;
         s_prob_window_count = 0;
-        ESP_LOGI(TAG, "wake!  avg=%.2f", (double)avg);
+        ESP_LOGI(TAG, "wake!  hits=%d/%d peak=%.2f", hits, WAKE_WINDOW_LEN, (double)peak);
     }
 }
 
