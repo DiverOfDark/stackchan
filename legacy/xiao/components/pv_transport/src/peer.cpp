@@ -108,10 +108,10 @@ void Peer::tick()
     }
 }
 
-int Peer::sendAudio(const uint8_t* opus, std::size_t bytes)
+int Peer::sendAudio(const uint8_t* payload, std::size_t bytes)
 {
-    if (!pc_ || !opus) return -1;
-    return peer_connection_send_audio(pc_, opus, bytes);
+    if (!pc_ || !payload) return -1;
+    return peer_connection_send_audio(pc_, payload, bytes);
 }
 
 void Peer::close()

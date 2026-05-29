@@ -36,10 +36,10 @@ CONFIG_LOG_COLORS=y
 # CONFIG_ESP_CONSOLE_UART_DEFAULT is not set
 CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y
 
-# FreeRTOS — bump task stack a bit; WebRTC + Opus need headroom
+# FreeRTOS — bump task stack a bit; the WebRTC + DTLS handshake path needs headroom
 CONFIG_ESP_MAIN_TASK_STACK_SIZE=8192
 
-# Compiler — let -O2 ride; size-optimized hurts Opus too much
+# Compiler — favour speed (-O2); TFLM wake inference and the DTLS path benefit
 CONFIG_COMPILER_OPTIMIZATION_PERF=y
 
 # TLS — bundle the standard public-CA roots so HTTPS to the backend works
@@ -69,11 +69,6 @@ CONFIG_MBEDTLS_EXTERNAL_MEM_ALLOC=y
 # WebRTC DTLS-SRTP REQUIRES post-handshake fingerprint matching against
 # the SDP a=fingerprint: line, so we need the cert.
 CONFIG_MBEDTLS_SSL_KEEP_PEER_CERTIFICATE=y
-
-# Bump esphome/micro-opus pseudostack from 120 KB → 240 KB. The encoder
-# path (capture_task → opus_encode → SRTP-encrypt) overflows at 120 KB
-# inside celt/bands.c. PSRAM-backed allocation so no internal-RAM cost.
-CONFIG_OPUS_PSEUDOSTACK_SIZE=240000
 
 # X.509 cert generation — libpeer mints a self-signed ECDSA P-256 cert
 # per session for the DTLS handshake fingerprint that goes into the SDP.

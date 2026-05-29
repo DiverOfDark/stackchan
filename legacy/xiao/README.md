@@ -15,8 +15,8 @@ Architecture plan: `/var/home/diverofdark/.claude/plans/now-let-s-work-on-eager-
 | M1 | I2S loopback through XVF3800 | done | **pending** — ear-test once hardware lands |
 | M2 | Wi-Fi SoftAP captive-portal provisioning | done | **pending** |
 | M3 | HTTP signaling adapter for `/api/offer` | done | **pending** |
-| M4 | One-way mic → backend | scaffold (Opus encoder TODO) | **pending** |
-| M5 | Bidirectional + AEC reference | done | **pending** |
+| M4 | One-way mic → backend | done (G.711 µ-law uplink) | verified on hardware |
+| M5 | Bidirectional + AEC reference | done (G.711; XVF3800 AEC config TODO — half-duplex echo guard meanwhile) | **pending** |
 | M6a | Train Russian wake word offline | trained "Эй, Фемто!" production model (62 KB INT8) | n/a |
 | M6b | On-device wake word gating | done — preprocessor + MixedNet + capture gate | **pending** |
 | M7 | Mute button + LED state machine | done (LED I2C cmds stubbed) | **pending** |
@@ -83,7 +83,7 @@ host with Catch2 (see `host_test/README.md`).
        │              │
    app::Session  ┄ app::Ui ┄ app::ProvisioningApp (in main.cpp)
        │              │
-       └── transport ┄ Peer ┄ OpusCodec ┄ Signaling ┄ WakeEngine
+       └── transport ┄ Peer ┄ Signaling ┄ WakeEngine
                               │
                               ▼
                   ┌── domain (pure C++17, host-testable) ──┐
@@ -98,8 +98,9 @@ host with Catch2 (see `host_test/README.md`).
 
 Rules:
 - **App** depends on Transport + Domain; owns FreeRTOS tasks and program lifecycle.
-- **Transport** depends on HAL + Domain; wraps libpeer / micro-opus / TFLM /
+- **Transport** depends on HAL + Domain; wraps libpeer / TFLM /
   esp_http_client behind typed std::function callbacks and RAII destructors.
+  (Wire audio is G.711 µ-law, companded in domain::g711 — no codec library.)
 - **HAL** depends on ESP-IDF only; one class per silicon resource handle
   (i2c device, i2s channel, GPIO button, NVS handle, Wi-Fi netif, HTTPD server,
   HTTPS client). Move-only, destructor-released.
@@ -126,7 +127,7 @@ firmware/
 │   │   ├── include/hal/           # hal::Xvf3800, AudioIo, Button, NvsKv,
 │   │   └── src/                   # Sntp, WifiSta, SoftApPortal, HttpsClient
 │   ├── pv_transport/
-│   │   ├── include/transport/     # transport::Peer, OpusCodec, Signaling,
+│   │   ├── include/transport/     # transport::Peer, Signaling,
 │   │   └── src/                   # WakeEngine
 │   ├── pv_app/
 │   │   ├── include/app/           # app::Session, app::Ui

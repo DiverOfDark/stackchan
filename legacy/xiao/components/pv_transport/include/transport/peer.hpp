@@ -84,9 +84,9 @@ public:
     // into libpeer, then pumps peer_connection_loop().
     void tick();
 
-    // Send a bare Opus payload (libpeer handles RTP framing + SRTP).
-    // Returns the libpeer return code (≥0 on success).
-    int sendAudio(const uint8_t* opus, std::size_t bytes);
+    // Send a bare audio payload — G.711 µ-law bytes (libpeer handles RTP
+    // framing + SRTP). Returns the libpeer return code (≥0 on success).
+    int sendAudio(const uint8_t* payload, std::size_t bytes);
 
     // Close + destroy the peer connection. The Peer is reusable after
     // this only via move-assignment from a fresh create().

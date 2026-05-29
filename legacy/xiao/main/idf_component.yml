@@ -26,11 +26,11 @@ dependencies:
   # SRTP support libpeer needs comes from sepfy/srtp (NOT espressif/esp_libsrtp
   # — different API, esp_peer's transitive dep).
   sepfy/srtp: "^2.0.4"
-  # Opus encoder/decoder for the WebRTC audio path. esphome/micro-opus is a
-  # direct libopus port with Xtensa DSP + PSRAM optimizations for ESP32-S3,
-  # smaller than espressif/esp_audio_codec which bundles many codecs we don't
-  # need (AAC/G.711/etc.).
-  esphome/micro-opus: "~0.3"
+  # Audio on the WebRTC wire is G.711 µ-law (PCMU), companded in
+  # pv_domain/g711.hpp — no codec dependency. We started on Opus
+  # (esphome/micro-opus) but its >120 KB SILK scratch only fits in PSRAM on
+  # this board and ran slower than real time; G.711 is free and the standard
+  # codec for memory-constrained WebRTC devices. See domain/g711.hpp.
   # M6b: TensorFlow Lite Micro for the wake-word model inference. Lives in
   # the isolated `wake_word` component (firmware/components/wake_word/) so
   # its C++ build flags don't pollute the C sources in main/. Declared here

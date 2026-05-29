@@ -1,8 +1,8 @@
 #pragma once
 
-// Cheap integer audio-energy primitives. Used by the capture pipeline
-// to drive the TALKING LED and to gate Opus encode/send during silence.
-// Pure functions; same source compiles on host for unit testing.
+// Cheap integer audio-energy primitives. Used by the capture pipeline to
+// drive the TALKING LED and the conversation keep-alive timer. Pure
+// functions; same source compiles on host for unit testing.
 
 #include <cstddef>
 #include <cstdint>

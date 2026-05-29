@@ -25,7 +25,7 @@ unmodified.
 ## What's NOT tested here
 
 - HAL (depends on ESP-IDF drivers)
-- Transport (libpeer, opus, TFLM — all ESP32 hot paths)
+- Transport (libpeer, TFLM — all ESP32 hot paths)
 - App (FreeRTOS tasks)
 
 Those layers get integration-tested on real hardware via the serial-log

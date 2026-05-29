@@ -45,7 +45,7 @@ using Ms = std::chrono::milliseconds;
 
 struct LedInputs {
     Ms   now;
-    Ms   last_inbound_audio;   // bumped when an energetic Opus frame arrives
+    Ms   last_inbound_audio;   // bumped when an energetic TTS frame arrives
     Ms   last_mic_active;      // bumped when local mic RMS crosses the gate
     bool connected;            // peer past DTLS-COMPLETED
     bool muted;                // hardware mute switch

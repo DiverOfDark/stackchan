@@ -25,10 +25,9 @@ inline constexpr int   kChannels       = 1;
 // ownership, by const-ref when you only read.
 using Frame16 = std::array<int16_t, kFramesPerPacket>;
 
-// Max bytes we ever pass to Opus encode/decode for one frame. Sized for
-// the worst-case 48 kHz / 120 ms FEC payload so a misbehaving sender
-// can't overflow even if backend ever switches modes.
-inline constexpr std::size_t kOpusMaxPacketBytes = 1500;
-inline constexpr std::size_t kOpusMaxDecodedSamples = 5760;  // 48 kHz × 120 ms
+// Decode scratch for one inbound audio packet, in 16 kHz samples. A 20 ms
+// PCMU frame is 160 bytes → 320 samples; this is sized generously so an
+// oversized inbound packet can't overflow the playback decode buffer.
+inline constexpr std::size_t kMaxDecodedSamples = 2048;
 
 } // namespace domain

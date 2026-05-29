@@ -220,7 +220,7 @@ void Session::onInboundAudio(const uint8_t* data, std::size_t size)
     // Inbound is G.711 µ-law @ 8 kHz: one byte per sample. Decode + upsample
     // to 16 kHz mono for the I2S DAC. Cap the payload so 2× upsample can't
     // overflow pcm[].
-    static int16_t pcm[domain::kOpusMaxDecodedSamples];
+    static int16_t pcm[domain::kMaxDecodedSamples];
     constexpr std::size_t kMaxBytes = (sizeof(pcm) / sizeof(pcm[0])) / 2;
     if (size > kMaxBytes) size = kMaxBytes;
 
