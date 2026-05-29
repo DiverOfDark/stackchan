@@ -85,14 +85,47 @@ model is automatically quantized INT8 by the upstream pipeline.
 
 ## Verify before flashing
 
+Two scripts, both mirroring the device so their numbers actually mean
+something on hardware.
+
+**1. Feature-frontend parity** (no ML deps — safe for CI):
+
+```bash
+python check_feature_parity.py
+```
+
+Parses the microfrontend config out of `wake_word.cc` and diffs it against the
+pymicro_features reference (the extractor microWakeWord trains on). If any knob
+drifts, the model silently degrades — this catches it. As of the current tree
+all 16 parameters match (window 30 / step 10 / 40 ch / 125–7500 Hz / PCAN
+0.95·80·21 / log-shift 6 / 0.0390625 prescale).
+
+**2. FRR / FAR on a holdout** (needs the training venv — tflite + pymicro_features):
+
 ```bash
 python verify_model.py \
     --model ../../main/models/wake_word_ru.tflite \
-    --test-dir corpus/holdout
+    --positive-dir corpus/holdout/positive \
+    --negative-dir corpus/holdout/negative
+
+# Sweep threshold x min-hits to choose an operating point:
+python verify_model.py --model ... --positive-dir ... --negative-dir ... --roc
 ```
 
-Reports FRR / FAR. Targets for a first usable model: FRR < 15 %, FAR < 1/hr
-(see plan M6b verification section).
+`verify_model.py` runs the streaming `.tflite` through the SAME frontend, the
+SAME int8 quantization, and the SAME burst detector (`>= WAKE_MIN_HITS of the
+last WAKE_WINDOW_LEN invokes over WAKE_THRESHOLD`) as `wake_word.cc`, so the
+FRR/FAR predict on-device behavior. Targets for a first usable model:
+FRR < 15 %, FAPh < 1/hr. The `--roc` table is how you pick
+`WAKE_THRESHOLD` / `WAKE_MIN_HITS` from data instead of guessing.
+
+> **Synthetic-holdout caveat.** Run against Piper-generated clips, these
+> scripts prove feature parity, that the model fires on clean positives, and
+> let you pick a threshold — but they do **not** predict real-world FRR/FAR.
+> The device hears your voice through the XVF3800 DSP + the +18 dB
+> soft-limiter, a different acoustic distribution. For field-accurate numbers,
+> point `--positive-dir`/`--negative-dir` at audio captured through the device
+> (e.g. via `tools/wake_word_tester`).
 
 ## Current trained artifact
 
