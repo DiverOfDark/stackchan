@@ -50,7 +50,7 @@ import numpy as np
 # the frontend half of this contract; keep these three in step by hand.
 WAKE_WINDOW_LEN = 5
 WAKE_MIN_HITS = 2
-WAKE_THRESHOLD = 0.70
+WAKE_THRESHOLD = 0.95
 WAKE_COOLDOWN_MS = 2000
 
 FRONTEND_STRIDE_MS = 10          # one feature slice per 10 ms of audio
