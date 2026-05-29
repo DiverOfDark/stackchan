@@ -6,7 +6,14 @@ EMBED_FILES path resolution, so we generate a .c file the build links in
 directly. Run from firmware/:
 
     python3 tools/embed_tflite.py
+
+Pass --check to verify the committed .c is in sync with the .tflite without
+rewriting it (exit 1 if stale) — wire this into CI so a retrained model can't
+ship without re-embedding. (This exact drift once shipped a synthetic-overfit
+model to the device while a better .tflite sat un-embedded in the repo.)
 """
+import re
+import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -18,6 +25,19 @@ if not SRC.exists():
                      "(see tools/train_wake_word/README.md)")
 
 data = SRC.read_bytes()
+
+if "--check" in sys.argv[1:]:
+    if not DST.exists():
+        raise SystemExit(f"{DST.name} missing — run: python3 tools/embed_tflite.py")
+    embedded = bytes(int(x, 16) for x in re.findall(
+        r"0x([0-9a-fA-F]{2})", DST.read_text()))
+    if embedded == data:
+        print(f"OK — {DST.name} matches {SRC.name} ({len(data)} bytes)")
+        raise SystemExit(0)
+    raise SystemExit(
+        f"STALE — {DST.name} ({len(embedded)} bytes) does not match "
+        f"{SRC.name} ({len(data)} bytes). The device would run an old model. "
+        f"Run: python3 tools/embed_tflite.py")
 
 lines = [
     "/* Auto-generated from main/models/wake_word_ru.tflite — regenerate via tools/embed_tflite.py. */",
