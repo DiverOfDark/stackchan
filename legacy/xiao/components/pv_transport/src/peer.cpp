@@ -43,7 +43,11 @@ std::unique_ptr<Peer> Peer::create(const std::vector<PeerIceServer>& ice)
     p->ice_  = ice;
 
     PeerConfiguration cfg{};
-    cfg.audio_codec  = CODEC_OPUS;
+    // G.711 µ-law @ 8 kHz, not Opus: Opus's >120 KB SILK scratch only fits in
+    // PSRAM here and ran ~1.5× real time, stalling audio capture. G.711 encode/
+    // decode are free, so the pipeline stays real time. libpeer drives the
+    // PCMU SDP + RTP (PT 0, 8 kHz clock); the app does the µ-law companding.
+    cfg.audio_codec  = CODEC_PCMU;
     cfg.video_codec  = CODEC_NONE;
     cfg.datachannel  = DATA_CHANNEL_NONE;
     cfg.onaudiotrack = &Peer::thunkOnAudio;

@@ -82,3 +82,7 @@ add_domain_test(test_session_fsm
 # gain.hpp is header-only — no src/ translation unit to compile in.
 add_domain_test(test_gain
     ${DOMAIN_DIR}/test/test_gain.cpp)
+
+# g711.hpp is header-only too.
+add_domain_test(test_g711
+    ${DOMAIN_DIR}/test/test_g711.cpp)

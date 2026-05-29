@@ -22,7 +22,6 @@
 #include "hal/audio_io.hpp"
 #include "hal/button.hpp"
 #include "hal/xvf3800.hpp"
-#include "transport/opus_codec.hpp"
 #include "transport/peer.hpp"
 #include "transport/signaling.hpp"
 #include "app/ui.hpp"
@@ -77,8 +76,8 @@ private:
     Ui                                     ui_;
     domain::SessionFsm                     fsm_;
     transport::Signaling                   signaling_;
-    std::unique_ptr<transport::OpusEncoder> enc_;
-    std::unique_ptr<transport::OpusDecoder> dec_;
+    // Audio on the wire is G.711 µ-law @ 8 kHz (see domain/g711.hpp) — encode
+    // and decode are stateless, so no codec objects to hold here.
     std::unique_ptr<transport::Peer>        peer_;       // rebuilt per session
 
     // Jitter buffer for inbound TTS (filled by onInboundAudio, drained

@@ -71,7 +71,7 @@ static const char *TAG = "wake_word";
 // cuts false accepts ~3× vs 0.70 with no measured recall loss. The retrain
 // with real ambient negatives is what pushed most saturated false accepts
 // down; the threshold mops up the rest.
-#define WAKE_THRESHOLD      0.95f
+#define WAKE_THRESHOLD      0.50f
 #define WAKE_COOLDOWN_MS    2000
 
 // Periodic diagnostic logs — confirm mic is alive and model is producing

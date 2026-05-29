@@ -5,9 +5,9 @@
 #include <utility>
 
 #include "esp_log.h"
-#include "esp_timer.h"
 
 #include "domain/energy_gate.hpp"
+#include "domain/g711.hpp"
 #include "domain/gain.hpp"
 #include "transport/wake_engine.hpp"
 
@@ -92,15 +92,12 @@ void Session::start()
     }
 
     playback_buf_ = xStreamBufferCreate(kPlaybackBufBytes, kPlaybackBufTrig);
-    auto e = transport::OpusEncoder::create();
-    auto d = transport::OpusDecoder::create();
-    if (!e || !d || !playback_buf_) {
-        ESP_LOGE(kTag, "codec / buffer alloc failed");
+    if (!playback_buf_) {
+        ESP_LOGE(kTag, "playback buffer alloc failed");
         running_ = false;
         return;
     }
-    enc_ = std::make_unique<transport::OpusEncoder>(std::move(*e));
-    dec_ = std::make_unique<transport::OpusDecoder>(std::move(*d));
+    // No codec objects: G.711 µ-law is stateless (domain/g711.hpp).
 
     transport::WakeEngine::initOnce();
 
@@ -110,9 +107,18 @@ void Session::start()
         return;
     }
 
-    xTaskCreatePinnedToCore(mainLoopTaskEntry, "rtc_loop", kMainStack, this, kMainPrio, &t_main_, kMainCore);
-    xTaskCreatePinnedToCore(captureTaskEntry,  "rtc_cap",  kCapStack,  this, kCapPrio,  &t_cap_,  kAvCore);
-    xTaskCreatePinnedToCore(playbackTaskEntry, "rtc_play", kPlayStack, this, kPlayPrio, &t_play_, kAvCore);
+    // Task stacks come from internal RAM. Check the result of every create:
+    // xTaskCreate returns pdPASS(1) or errCOULD_NOT_ALLOCATE...(-1), and a
+    // silent failure here ran the device with no capture task at all — no mic,
+    // no wake, no uplink. (Do NOT fold the results with `&=`: -1 & 1 == 1 reads
+    // a failure as success, which is exactly how that bug hid.)
+    BaseType_t r_main = xTaskCreatePinnedToCore(mainLoopTaskEntry, "rtc_loop", kMainStack, this, kMainPrio, &t_main_, kMainCore);
+    BaseType_t r_cap  = xTaskCreatePinnedToCore(captureTaskEntry,  "rtc_cap",  kCapStack,  this, kCapPrio,  &t_cap_,  kAvCore);
+    BaseType_t r_play = xTaskCreatePinnedToCore(playbackTaskEntry, "rtc_play", kPlayStack, this, kPlayPrio, &t_play_, kAvCore);
+    if (r_main != pdPASS || r_cap != pdPASS || r_play != pdPASS) {
+        ESP_LOGE(kTag, "task create failed (out of internal RAM?) — main=%d cap=%d play=%d",
+                 (int)r_main, (int)r_cap, (int)r_play);
+    }
 }
 
 void Session::stop()
@@ -198,16 +204,20 @@ void Session::onLocalSdp(std::string sdp)
 
 void Session::onInboundAudio(const uint8_t* data, std::size_t size)
 {
-    if (!data || size == 0 || size > 1500 || !dec_ || !playback_buf_) return;
+    if (!data || size == 0 || !playback_buf_) return;
 
+    // Inbound is G.711 µ-law @ 8 kHz: one byte per sample. Decode + upsample
+    // to 16 kHz mono for the I2S DAC. Cap the payload so 2× upsample can't
+    // overflow pcm[].
     static int16_t pcm[domain::kOpusMaxDecodedSamples];
-    int decoded = dec_->decode(data, size, pcm, sizeof(pcm) / sizeof(pcm[0]));
-    if (decoded <= 0) return;
+    constexpr std::size_t kMaxBytes = (sizeof(pcm) / sizeof(pcm[0])) / 2;
+    if (size > kMaxBytes) size = kMaxBytes;
 
-    const std::size_t bytes = static_cast<std::size_t>(decoded) * sizeof(int16_t);
-    xStreamBufferSend(playback_buf_, pcm, bytes, 0);
+    const std::size_t samples = domain::g711_decode_to_16k(data, size, pcm);  // = size*2
 
-    if (domain::peak_abs_i16(pcm, decoded) >= kSpeakingPcmThreshold) {
+    xStreamBufferSend(playback_buf_, pcm, samples * sizeof(int16_t), 0);
+
+    if (domain::peak_abs_i16(pcm, static_cast<int>(samples)) >= kSpeakingPcmThreshold) {
         last_rx_frame_tick_ = xTaskGetTickCount();
     }
 }
@@ -250,9 +260,9 @@ void Session::captureTask()
     // used one hard-clipped +18 dB buffer for both, which sent square-wave
     // garbage to the backend; the later "raw >> 16" uplink swung the other
     // way and sent audio ~18 dB too quiet for STT to hear.
-    static int16_t mono_wake  [domain::kFramesPerPacket];   // +18 dB, soft-limited
-    static int16_t mono_uplink[domain::kFramesPerPacket];   // +12 dB, soft-limited
-    static uint8_t opus_buf[domain::kOpusMaxPacketBytes];
+    static int16_t mono_wake  [domain::kFramesPerPacket];        // +18 dB, soft-limited
+    static int16_t mono_uplink[domain::kFramesPerPacket];        // +12 dB, soft-limited
+    static uint8_t ulaw_buf   [domain::kFramesPerPacket / 2];    // 8 kHz µ-law on the wire
 
     while (running_.load()) {
         if (audio_.read(stereo, domain::kFramesPerPacket) != ESP_OK) {
@@ -285,13 +295,12 @@ void Session::captureTask()
         if (!connected_.load() || button_.isMuted()) continue;
 
         // Stream every frame while connected and unmuted. Continuous send is
-        // the normal WebRTC model; the backend VAD gates STT, so a
-        // device-side energy gate here only risks dropping speech onsets.
-        int n = enc_->encode(mono_uplink, domain::kFramesPerPacket,
-                             opus_buf, sizeof(opus_buf));
-        if (n > 0 && peer_) {
-            peer_->sendAudio(opus_buf, static_cast<std::size_t>(n));
-        }
+        // the normal WebRTC model; the backend VAD gates STT, so a device-side
+        // energy gate here only risks dropping speech onsets. G.711 encode is
+        // ~free, so this keeps the capture loop comfortably real-time.
+        const std::size_t n = domain::g711_encode_16k(
+            mono_uplink, domain::kFramesPerPacket, ulaw_buf);   // 320 → 160 bytes
+        if (peer_) peer_->sendAudio(ulaw_buf, n);
     }
     vTaskDelete(nullptr);
 }

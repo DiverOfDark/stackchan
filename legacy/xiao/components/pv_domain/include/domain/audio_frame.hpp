@@ -3,11 +3,11 @@
 // Audio shape constants + frame types. Pure compile-time declarations —
 // no .cpp file. Used by everyone who touches PCM (HAL, Transport, App).
 //
-// Sample rate is fixed at 16 kHz mono for both the mic uplink and the
-// decoder output. Choice is set by the backend: faster-whisper STT
-// expects 16 kHz, Piper synthesises 22 kHz but pipecat resamples to
-// 48 kHz Opus on the wire, which we decode and resample down to 16 kHz
-// for the I2S DAC.
+// The mic / I2S path runs at 16 kHz mono. The WebRTC wire codec is G.711
+// µ-law @ 8 kHz (PCMU) — Opus's large SILK scratch can't fit in this board's
+// internal RAM and ran slower than real time (see domain/g711.hpp). We
+// down/upsample 16↔8 kHz at the codec boundary; the local wake word still
+// uses the full 16 kHz mic path.
 
 #include <array>
 #include <cstddef>
