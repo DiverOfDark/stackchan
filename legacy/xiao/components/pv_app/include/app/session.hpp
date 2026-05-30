@@ -19,6 +19,7 @@
 #include "freertos/task.h"
 
 #include "domain/audio_frame.hpp"
+#include "domain/g722.hpp"
 #include "domain/session_fsm.hpp"
 #include "hal/audio_io.hpp"
 #include "hal/button.hpp"
@@ -84,8 +85,11 @@ private:
     Ui                                     ui_;
     domain::SessionFsm                     fsm_;
     transport::Signaling                   signaling_;
-    // Audio on the wire is G.711 µ-law @ 8 kHz (see domain/g711.hpp) — encode
-    // and decode are stateless, so no codec objects to hold here.
+    // Audio on the wire is G.722 wideband @ 16 kHz (see domain/g722.hpp). Both
+    // directions are stateful, so we hold one codec per direction and reset
+    // them on every (re)connect in buildAndOffer().
+    domain::G722Codec                      g722_enc_;   // uplink (capture task)
+    domain::G722Codec                      g722_dec_;   // downlink (onInboundAudio)
     std::unique_ptr<transport::Peer>        peer_;       // rebuilt per session
 
     // Jitter buffer for inbound TTS (filled by onInboundAudio, drained

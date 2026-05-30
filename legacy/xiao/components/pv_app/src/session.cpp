@@ -10,7 +10,7 @@
 #include "esp_timer.h"
 
 #include "domain/energy_gate.hpp"
-#include "domain/g711.hpp"
+#include "domain/g722.hpp"
 #include "domain/gain.hpp"
 #include "transport/wake_engine.hpp"
 
@@ -118,7 +118,8 @@ void Session::start()
         running_ = false;
         return;
     }
-    // No codec objects: G.711 µ-law is stateless (domain/g711.hpp).
+    // G.722 codec state (g722_enc_/g722_dec_) is reset per connection in
+    // buildAndOffer(); nothing to allocate here.
 
     transport::WakeEngine::initOnce();
 
@@ -158,6 +159,11 @@ bool Session::buildAndOffer()
     peer_.reset();
     peer_ = transport::Peer::create(ice_);
     if (!peer_) return false;
+
+    // Fresh G.722 stream each connection: reset the adaptive predictor + QMF
+    // history on both directions to the standard initial state.
+    domain::g722_init(g722_enc_);
+    domain::g722_init(g722_dec_);
 
     peer_->setOnStateChange([this](transport::PeerState s) { onPeerState(s); });
     peer_->setOnLocalSdp   ([this](std::string sdp)        { onLocalSdp(std::move(sdp)); });
@@ -232,14 +238,15 @@ void Session::onInboundAudio(const uint8_t* data, std::size_t size)
 {
     if (!data || size == 0 || !playback_buf_) return;
 
-    // Inbound is G.711 µ-law @ 8 kHz: one byte per sample. Decode + upsample
-    // to 16 kHz mono for the I2S DAC. Cap the payload so 2× upsample can't
-    // overflow pcm[].
+    // Inbound is G.722: each octet decodes to two 16 kHz samples, ready for the
+    // I2S DAC with no resampling. Cap the payload so 2× expansion can't
+    // overflow pcm[]. The decoder is stateful (g722_dec_), reset per connection
+    // in buildAndOffer().
     static int16_t pcm[domain::kMaxDecodedSamples];
     constexpr std::size_t kMaxBytes = (sizeof(pcm) / sizeof(pcm[0])) / 2;
     if (size > kMaxBytes) size = kMaxBytes;
 
-    const std::size_t samples = domain::g711_decode_to_16k(data, size, pcm);  // = size*2
+    const std::size_t samples = domain::g722_decode(g722_dec_, data, size, pcm);  // = size*2
 
     const std::size_t sent = xStreamBufferSend(playback_buf_, pcm, samples * sizeof(int16_t), 0);
     const int32_t peak = domain::peak_abs_i16(pcm, static_cast<int>(samples));
@@ -306,13 +313,14 @@ void Session::captureTask()
     // way and sent audio ~18 dB too quiet for STT to hear.
     static int16_t mono_wake  [domain::kFramesPerPacket];        // +18 dB, soft-limited
     static int16_t mono_uplink[domain::kFramesPerPacket];        // +12 dB, soft-limited
-    static uint8_t ulaw_buf   [domain::kFramesPerPacket / 2];    // 8 kHz µ-law on the wire
-    // µ-law silence (0xFF) sent when the turn is idle/echo-guarded: keeps the
-    // RTP stream — and thus the backend pipeline — alive without the backend's
-    // VAD hearing anything. Without this the backend idle-times-out and tears
-    // down the WebRTC session during silence.
-    uint8_t ulaw_silence[domain::kFramesPerPacket / 2];
-    std::memset(ulaw_silence, 0xFF, sizeof ulaw_silence);
+    static uint8_t wire_buf   [domain::kFramesPerPacket / 2];    // 160 B G.722 on the wire
+    // A zero PCM frame, G.722-encoded and sent when the turn is idle/echo-
+    // guarded. This keeps the RTP stream — and thus the backend pipeline —
+    // alive without the backend's VAD hearing anything; without it the backend
+    // idle-times-out and tears down the WebRTC session during silence. We run
+    // zeros through the *same* encoder (not a constant byte pattern) so its
+    // adaptive state stays coherent across silence→speech transitions.
+    static const int16_t zero_pcm[domain::kFramesPerPacket] = {0};
 
     while (running_.load()) {
         if (audio_.read(stereo, domain::kFramesPerPacket) != ESP_OK) {
@@ -375,13 +383,13 @@ void Session::captureTask()
         // Always send a frame to keep the backend's audio stream alive (else its
         // pipeline idle-times-out and drops the WebRTC session). Send the real
         // mic only during an active turn and when the bot isn't speaking (echo
-        // guard) and we're not muted; otherwise send µ-law silence.
-        if (conversation_active_.load() && !bot_speaking && !button_.isMuted()) {
-            domain::g711_encode_16k(mono_uplink, domain::kFramesPerPacket, ulaw_buf);
-            peer_->sendAudio(ulaw_buf, sizeof ulaw_buf);          // 320 → 160 bytes
-        } else {
-            peer_->sendAudio(ulaw_silence, sizeof ulaw_silence);
-        }
+        // guard) and we're not muted; otherwise send encoded silence. Either
+        // way the bytes go through the one stateful G.722 encoder.
+        const bool send_mic =
+            conversation_active_.load() && !bot_speaking && !button_.isMuted();
+        const int16_t* src = send_mic ? mono_uplink : zero_pcm;
+        domain::g722_encode(g722_enc_, src, domain::kFramesPerPacket, wire_buf);
+        peer_->sendAudio(wire_buf, sizeof wire_buf);              // 320 samples → 160 bytes
     }
     vTaskDelete(nullptr);
 }
