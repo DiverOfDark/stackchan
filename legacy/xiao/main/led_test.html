@@ -87,16 +87,16 @@
   // Must match domain::LedState order and ui.cpp's mapping.
   const STATES = [
     ["Off",          "#000000", "off"],
-    ["Provisioning", "#0080ff", "blue breath (slow)"],
-    ["Connecting",   "#0080ff", "blue breath (fast)"],
-    ["Negotiating",  "#8020ff", "purple breath"],
-    ["Listening",    "#00c840", "green solid"],
-    ["Talking",      "#00c0ff", "cyan solid"],
-    ["Thinking",     "#ff8800", "amber breath"],
-    ["WakeAck",      "#ffffff", "white flash"],
-    ["Speaking",     "#ff3080", "pink solid"],
-    ["Muted",        "#ff2010", "red solid"],
-    ["Error",        "#ff2010", "red breath (fast)"],
+    ["Provisioning", "rainbow", "rainbow · spinning"],
+    ["Connecting",   "#0040ff", "blue · breathing"],
+    ["Negotiating",  "#9000ff", "purple · breathing"],
+    ["Listening",    "#00d040", "green · solid"],
+    ["Talking",      "#00d0d0", "cyan · solid"],
+    ["Thinking",     "#ff8800", "amber · breathing"],
+    ["WakeAck",      "#ffffff", "white · solid (flash)"],
+    ["Speaking",     "#ff1080", "pink · breathing"],
+    ["Muted",        "#c00000", "red · solid"],
+    ["Error",        "#ff0000", "red · breathing"],
   ];
   const statusEl = document.getElementById('status');
   function send(url, label) {
@@ -109,7 +109,10 @@
   const g = document.getElementById('states');
   STATES.forEach(([name, hex, desc], i) => {
     const b = document.createElement('button');
-    b.innerHTML = '<span class="sw" style="color:' + hex + '"></span>' + name +
+    const sw = hex === 'rainbow'
+      ? 'background:conic-gradient(red,#ff0,lime,cyan,blue,magenta,red);box-shadow:none'
+      : 'color:' + hex;
+    b.innerHTML = '<span class="sw" style="' + sw + '"></span>' + name +
                   '<small>' + desc + '</small>';
     b.onclick = () => send('/state?s=' + i, name);
     g.appendChild(b);

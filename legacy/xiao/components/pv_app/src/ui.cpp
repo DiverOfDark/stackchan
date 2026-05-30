@@ -8,16 +8,27 @@ namespace {
 constexpr const char* kTag             = "ui";
 constexpr int64_t     kWakeAckHoldMs   = 1200;
 
-// Colour palette in RGB. Tuned for daylight visibility on the diffused
-// 12-LED ring of the Seeed XVF3800 carrier.
-constexpr hal::Rgb kBlue   {0x00, 0x80, 0xFF};
-constexpr hal::Rgb kGreen  {0x00, 0xC8, 0x40};
-constexpr hal::Rgb kRed    {0xFF, 0x20, 0x10};
-constexpr hal::Rgb kWhite  {0xFF, 0xFF, 0xFF};
-constexpr hal::Rgb kPink   {0xFF, 0x30, 0x80};
-constexpr hal::Rgb kPurple {0x80, 0x20, 0xFF};
-constexpr hal::Rgb kCyan   {0x00, 0xC0, 0xFF};
-constexpr hal::Rgb kAmber  {0xFF, 0x88, 0x00};
+// One consistent brightness + speed for every state — only the effect and
+// colour distinguish them (a deliberate design choice). 0x80 ≈ 50%.
+// NOTE: the XVF3800 only applies LED_BRIGHTNESS / LED_SPEED to the breath and
+// rainbow effects; single-colour mode ignores them, so for the solid states
+// the 50 % level is baked into the RGB (each lit channel ≈ 0x80) instead.
+constexpr uint8_t  kBrightness = 0x80;
+constexpr uint8_t  kSpeed      = 0x40;
+
+// Breath hues — full intensity; LED_BRIGHTNESS scales the pulse to 50 %.
+constexpr hal::Rgb kBreathBlue   {0x00, 0x40, 0xFF};   // connecting
+constexpr hal::Rgb kBreathPurple {0x90, 0x00, 0xFF};   // negotiating
+constexpr hal::Rgb kBreathAmber  {0xFF, 0x80, 0x00};   // thinking
+constexpr hal::Rgb kBreathPink   {0xFF, 0x10, 0x80};   // speaking
+constexpr hal::Rgb kBreathRed    {0xFF, 0x00, 0x00};   // error
+
+// Solid colours — 50 % baked into the RGB (single-colour mode ignores
+// brightness). Each is a distinct hue from the breath set above.
+constexpr hal::Rgb kSolidGreen   {0x00, 0x80, 0x10};   // listening
+constexpr hal::Rgb kSolidCyan    {0x00, 0x80, 0x80};   // talking
+constexpr hal::Rgb kSolidWhite   {0x80, 0x80, 0x80};   // wake ack
+constexpr hal::Rgb kSolidRed     {0x80, 0x00, 0x00};   // muted
 
 const char* stateName(domain::LedState s)
 {
@@ -44,8 +55,8 @@ namespace app {
 
 Ui::Ui(hal::Xvf3800& ring) : ring_(ring)
 {
-    ring_.setBrightness(0x60);
-    ring_.setSpeed(0x40);
+    ring_.setBrightness(kBrightness);
+    ring_.setSpeed(kSpeed);
     ring_.setEffect(hal::Effect::Off);
 }
 
@@ -68,43 +79,29 @@ void Ui::applyState(domain::LedState s, const int64_t now)
     last_pushed_ = s;
     ESP_LOGI(kTag, "→ %s", stateName(s));
 
+    // Consistent for every state — states differ ONLY by effect + colour.
+    // (No-ops for solid/off, which ignore brightness+speed, but cheap and
+    // keeps levels correct after the web LED-test tool has tweaked them.)
+    ring_.setBrightness(kBrightness);
+    ring_.setSpeed(kSpeed);
+
     using L  = domain::LedState;
     using EF = hal::Effect;
     switch (s) {
-    case L::Off:
-        ring_.setEffect(EF::Off);
-        break;
-    case L::Provisioning:
-        ring_.setColor(kBlue);   ring_.setSpeed(0x20);  ring_.setEffect(EF::Breath);
-        break;
-    case L::Connecting:
-        ring_.setColor(kBlue);   ring_.setSpeed(0x80);  ring_.setEffect(EF::Breath);
-        break;
-    case L::Negotiating:
-        ring_.setColor(kPurple); ring_.setSpeed(0x60);  ring_.setEffect(EF::Breath);
-        break;
-    case L::Listening:
-        ring_.setColor(kGreen);  ring_.setEffect(EF::Solid);
-        break;
-    case L::Talking:
-        ring_.setColor(kCyan);   ring_.setEffect(EF::Solid);
-        break;
-    case L::Thinking:
-        ring_.setColor(kAmber);  ring_.setSpeed(0x40);  ring_.setEffect(EF::Breath);
-        break;
+    case L::Off:           ring_.setEffect(EF::Off);                                    break;
+    case L::Provisioning:  ring_.setEffect(EF::Rainbow);                                break;
+    case L::Connecting:    ring_.setColor(kBreathBlue);   ring_.setEffect(EF::Breath);  break;
+    case L::Negotiating:   ring_.setColor(kBreathPurple); ring_.setEffect(EF::Breath);  break;
+    case L::Listening:     ring_.setColor(kSolidGreen);   ring_.setEffect(EF::Solid);   break;
+    case L::Talking:       ring_.setColor(kSolidCyan);    ring_.setEffect(EF::Solid);   break;
+    case L::Thinking:      ring_.setColor(kBreathAmber);  ring_.setEffect(EF::Breath);  break;
     case L::WakeAck:
-        ring_.setColor(kWhite);  ring_.setBrightness(0xFF); ring_.setEffect(EF::Solid);
+        ring_.setColor(kSolidWhite); ring_.setEffect(EF::Solid);
         hold_until_us_ = now + kWakeAckHoldMs * 1000;
         break;
-    case L::Speaking:
-        ring_.setColor(kPink);   ring_.setEffect(EF::Solid);
-        break;
-    case L::Muted:
-        ring_.setColor(kRed);    ring_.setEffect(EF::Solid);
-        break;
-    case L::Error:
-        ring_.setColor(kRed);    ring_.setSpeed(0xC0);  ring_.setEffect(EF::Breath);
-        break;
+    case L::Speaking:      ring_.setColor(kBreathPink);   ring_.setEffect(EF::Breath);  break;
+    case L::Muted:         ring_.setColor(kSolidRed);     ring_.setEffect(EF::Solid);   break;
+    case L::Error:         ring_.setColor(kBreathRed);    ring_.setEffect(EF::Breath);  break;
     }
 }
 
