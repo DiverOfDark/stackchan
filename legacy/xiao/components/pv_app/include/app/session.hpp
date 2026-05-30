@@ -11,6 +11,7 @@
 #include <atomic>
 #include <cstdint>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <vector>
 
@@ -90,7 +91,12 @@ private:
     // them on every (re)connect in buildAndOffer().
     domain::G722Codec                      g722_enc_;   // uplink (capture task)
     domain::G722Codec                      g722_dec_;   // downlink (onInboundAudio)
-    std::unique_ptr<transport::Peer>        peer_;       // rebuilt per session
+    // Guards peer_ lifetime: the capture task sends on peer_ from the AV core
+    // while mainLoop builds/tears it down on the main core. Held briefly around
+    // sendAudio (capture) and reset (mainLoop) so a teardown can't free peer_
+    // mid-send. peer_->tick() (mainLoop, same task as reset) stays lock-free.
+    std::mutex                             peer_mtx_;
+    std::unique_ptr<transport::Peer>        peer_;       // built per turn (on wake)
 
     // Jitter buffer for inbound TTS (filled by onInboundAudio, drained
     // by playback task).
