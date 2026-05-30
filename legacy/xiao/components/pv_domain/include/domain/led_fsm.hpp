@@ -8,11 +8,18 @@
 //
 // Priority order (highest first):
 //   Muted     — hardware switch trumps everything
-//   Speaking  — inbound TTS energy in last SPEAKING_HOLD_MS
+//   Speaking  — inbound TTS energy in last SPEAKING_HOLD_MS (shown even
+//               outside a conversation, e.g. the connect greeting)
+//   Off       — connected but no conversation in progress: ring stays dark
+//               so it only lights for an actual interaction (and ambient
+//               mic noise can't trip Talking when nobody asked)
 //   Talking   — local mic energy in last TALKING_HOLD_MS (suppressed
 //               while Speaking — AEC residual would falsely trip it)
 //   Thinking  — mic just dropped, no TTS yet, within THINKING_MAX_MS
-//   Listening — default idle
+//   Listening — in-conversation idle, waiting for the user to speak
+//
+// A "conversation" is armed by the wake word and ends after a silence
+// timeout (Session owns that flag and passes it in as conversation_active).
 //
 // When !connected the function declines to set anything (returns
 // std::nullopt) — connecting / negotiating LEDs are driven by the
@@ -49,6 +56,7 @@ struct LedInputs {
     Ms   last_mic_active;      // bumped when local mic RMS crosses the gate
     bool connected;            // peer past DTLS-COMPLETED
     bool muted;                // hardware mute switch
+    bool conversation_active;  // wake word fired, turn not yet timed out
 };
 
 // Hold-time tuning. SPEAKING bridges natural inter-word silences inside

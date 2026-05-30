@@ -179,17 +179,20 @@ void Session::onPeerState(transport::PeerState s)
         ui_.setLed(domain::LedState::Negotiating);
         break;
     case PeerState::Completed:
-        connected_         = true;
-        last_mic_active_tick_ = xTaskGetTickCount();   // auto-arm uplink
+        connected_            = true;
+        conversation_active_  = false;   // idle until the wake word arms a turn
         last_rx_frame_tick_   = 0;
-        ui_.setLed(domain::LedState::Listening);
+        // Connected but idle — the LED stays Off (driven by the playback tick)
+        // until the wake word fires. No green "Listening" glow on connect.
+        ui_.setLed(domain::LedState::Off);
         fsm_.onEvent(domain::SessionEvent::PeerLive);
         break;
     case PeerState::Failed:
     case PeerState::Disconnected:
     case PeerState::Closed:
-        connected_         = false;
-        retry_at_tick_     = xTaskGetTickCount() + pdMS_TO_TICKS(kRetryIntervalMs);
+        connected_           = false;
+        conversation_active_ = false;
+        retry_at_tick_       = xTaskGetTickCount() + pdMS_TO_TICKS(kRetryIntervalMs);
         ui_.setLed(domain::LedState::Connecting);
         fsm_.onEvent(domain::SessionEvent::PeerLost);
         break;
@@ -374,6 +377,7 @@ void Session::playbackTask()
             .last_mic_active     = std::chrono::milliseconds{pdTICKS_TO_MS(last_mic_active_tick_.load())},
             .connected           = connected_.load(),
             .muted               = button_.isMuted(),
+            .conversation_active = conversation_active_.load(),
         });
     }
     vTaskDelete(nullptr);

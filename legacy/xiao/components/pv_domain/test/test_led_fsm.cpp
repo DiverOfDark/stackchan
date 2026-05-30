@@ -7,12 +7,15 @@ using namespace std::chrono_literals;
 
 namespace {
 
+// "Idle" here means in an active conversation with nothing happening this
+// instant — the in-conversation default is Listening.
 constexpr LedInputs kIdle{
     .now                 = 10s,
     .last_inbound_audio  = 0ms,    // never
     .last_mic_active     = 0ms,    // never
     .connected           = true,
     .muted               = false,
+    .conversation_active = true,
 };
 
 } // namespace
@@ -31,8 +34,28 @@ TEST_CASE("Muted beats every other live state", "[led_fsm]") {
     REQUIRE(*resolveLedState(in) == LedState::Muted);
 }
 
-TEST_CASE("Listening when nothing has happened recently", "[led_fsm]") {
+TEST_CASE("Listening when in a conversation with nothing happening", "[led_fsm]") {
     REQUIRE(*resolveLedState(kIdle) == LedState::Listening);
+}
+
+TEST_CASE("Off when connected but no conversation is active", "[led_fsm]") {
+    LedInputs in = kIdle;
+    in.conversation_active = false;
+    REQUIRE(*resolveLedState(in) == LedState::Off);
+}
+
+TEST_CASE("ambient mic noise does not light Talking before a conversation", "[led_fsm]") {
+    LedInputs in = kIdle;
+    in.conversation_active = false;
+    in.last_mic_active = in.now;   // noise crossed the gate
+    REQUIRE(*resolveLedState(in) == LedState::Off);
+}
+
+TEST_CASE("Speaking still shows outside a conversation (e.g. greeting)", "[led_fsm]") {
+    LedInputs in = kIdle;
+    in.conversation_active = false;
+    in.last_inbound_audio = in.now;   // bot TTS playing
+    REQUIRE(*resolveLedState(in) == LedState::Speaking);
 }
 
 TEST_CASE("Speaking while inbound audio is within SPEAKING_HOLD", "[led_fsm]") {

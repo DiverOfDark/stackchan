@@ -23,6 +23,13 @@ std::optional<LedState> resolveLedState(const LedInputs& in)
         return LedState::Speaking;
     }
 
+    // No active conversation → ring stays dark. This is what keeps the LED
+    // off in idle (instead of a permanent "Listening" glow) and stops ambient
+    // mic noise from lighting Talking before the wake word arms a turn.
+    if (!in.conversation_active) {
+        return LedState::Off;
+    }
+
     // TALKING is suppressed while bot is speaking — AEC residual would
     // trip the mic gate during the bot's reply otherwise. This branch
     // is unreachable in that case (speaking was true), but the
