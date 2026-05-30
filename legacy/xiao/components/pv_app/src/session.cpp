@@ -55,7 +55,13 @@ constexpr int  kEchoGuardMs           = 400;
 //   - once the bot's reply finishes, end the turn after this much user silence.
 // Each bot TTS frame and each user-speech frame pushes the deadline, so the
 // short window only elapses when both have genuinely gone quiet post-reply.
-constexpr int  kAwaitResponseMs       = 10000;   // user/bot still expected
+// Window to wait for the bot's first reply. On-demand connect adds ~4-5 s of
+// relay/ICE/DTLS bring-up plus the buffered-utterance flush before the backend
+// even hears the question, then STT+LLM+TTS — the first audio can land ~13 s
+// after connect. Generous so we don't tear the turn down right before the
+// answer; reset when the peer reaches Completed (see onPeerState) so the clock
+// starts at connect, not at the user's speech during bring-up.
+constexpr int  kAwaitResponseMs       = 15000;   // user/bot still expected
 constexpr int  kPostResponseSilenceMs = 5000;    // follow-up window after a reply
 
 constexpr int  kMainStack             = 32 * 1024;
@@ -207,7 +213,15 @@ void Session::onPeerState(transport::PeerState s)
         // utterance now that connected_ is true.
         connected_          = true;
         last_rx_frame_tick_ = 0;
-        ui_.setLed(domain::LedState::Listening);
+        // Restart the turn clock at connect: bring-up may have eaten most of the
+        // window the wake word set, and the user's speech (buffered during
+        // bring-up) won't bump it again — so give the backend a full window from
+        // here to deliver the first reply.
+        turn_deadline_      = xTaskGetTickCount() + pdMS_TO_TICKS(kAwaitResponseMs);
+        // Don't force a state here — the playback tick's resolveLedState picks
+        // the right one next tick (Thinking if the user already asked during
+        // bring-up, Listening if they only woke it). Forcing Listening caused a
+        // one-tick green flash before it flipped to amber.
         fsm_.onEvent(domain::SessionEvent::PeerLive);
         break;
     case PeerState::Failed:

@@ -59,13 +59,18 @@ struct LedInputs {
     bool conversation_active;  // wake word fired, turn not yet timed out
 };
 
-// Hold-time tuning. SPEAKING bridges natural inter-word silences inside
-// a TTS reply (comma in "Привет, Кирилл" is ~300 ms). TALKING bridges
-// sub-syllable silences in user speech. THINKING starts when TALKING
-// releases and clears when SPEAKING starts or the window times out.
-inline constexpr Ms SPEAKING_HOLD{1500};
+// Hold-time tuning. SPEAKING bridges silences *inside* a TTS reply — not just
+// inter-word commas but the longer gaps between sentences — so a multi-sentence
+// answer stays one steady pink breath instead of flickering pink↔green.
+// TALKING bridges sub-syllable silences in user speech. THINKING starts when
+// TALKING releases and holds until SPEAKING starts (or the turn ends): it must
+// cover the *whole* backend round-trip, which on the on-demand path is connect
+// + buffered-flush + STT + LLM + TTS ≈ 10-15 s. A short THINKING_MAX used to
+// expire mid-wait and drop the ring back to green "Listening" while the backend
+// was still working — read as "it gave up". Keep it amber for the full wait.
+inline constexpr Ms SPEAKING_HOLD{2500};
 inline constexpr Ms TALKING_HOLD{600};
-inline constexpr Ms THINKING_MAX{5000};
+inline constexpr Ms THINKING_MAX{15000};
 
 // Returns the LedState the ring should display given `in`, or
 // std::nullopt when the live-conversation path declines to set
