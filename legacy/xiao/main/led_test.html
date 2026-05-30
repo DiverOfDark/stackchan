@@ -1,0 +1,249 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>pipecat-voice · LED test</title>
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 20px;
+    font: 15px/1.5 system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+    background: #0e1116; color: #e6edf3;
+    max-width: 620px; margin-inline: auto;
+  }
+  h1 { font-size: 19px; margin: 0 0 4px; }
+  p.sub { color: #8b949e; margin: 0 0 22px; }
+  h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .06em;
+       color: #8b949e; margin: 26px 0 10px; }
+  .grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 8px; }
+  button {
+    font: inherit; cursor: pointer; border: 1px solid #30363d;
+    background: #1b2230; color: #e6edf3; border-radius: 8px;
+    padding: 11px 12px; text-align: left; transition: background .12s, border-color .12s;
+  }
+  button:hover { background: #243044; border-color: #4c8bf5; }
+  button:active { transform: translateY(1px); }
+  button .sw { display: inline-block; width: 10px; height: 10px; border-radius: 50%;
+               margin-right: 8px; vertical-align: middle; box-shadow: 0 0 6px currentColor; }
+  button small { display: block; color: #8b949e; font-size: 12px; margin-top: 2px; }
+  .card { background: #161b22; border: 1px solid #30363d; border-radius: 10px; padding: 16px; }
+  .row { display: flex; align-items: center; gap: 12px; margin: 10px 0; }
+  .row label { width: 92px; color: #8b949e; flex: none; }
+  .row input[type=range] { flex: 1; }
+  .row select, .row input[type=color] { font: inherit; }
+  .row .val { width: 38px; text-align: right; color: #8b949e; font-variant-numeric: tabular-nums; }
+  input[type=color] { width: 48px; height: 30px; border: 1px solid #30363d; border-radius: 6px;
+                      background: #1b2230; padding: 2px; }
+  .apply { width: 100%; text-align: center; background: #1f6feb; border-color: #1f6feb; margin-top: 6px; }
+  .apply:hover { background: #388bfd; }
+  .resume { width: 100%; text-align: center; margin-top: 18px; background: #21262d; }
+  #status { margin-top: 16px; min-height: 18px; color: #58a6ff; font-size: 13px; }
+</style>
+</head>
+<body>
+  <h1>LED effect test</h1>
+  <p class="sub">Preview each state's mapping or any raw effect. Auto-returns to
+     normal after 60&nbsp;s of no clicks — or hit <em>Resume</em>.</p>
+
+  <h2>States (current mapping)</h2>
+  <div class="grid" id="states"></div>
+
+  <h2>Raw effect</h2>
+  <div class="card">
+    <div class="row">
+      <label>Effect</label>
+      <select id="eff">
+        <option value="0">Off</option>
+        <option value="1">Breath</option>
+        <option value="2">Rainbow</option>
+        <option value="3" selected>Solid</option>
+        <option value="4">DoA (rotate)</option>
+      </select>
+    </div>
+    <div class="row">
+      <label>Colour</label>
+      <input type="color" id="col" value="#00c8ff">
+      <span class="val" id="colhex">#00c8ff</span>
+    </div>
+    <div class="row">
+      <label>Brightness</label>
+      <input type="range" id="br" min="0" max="255" value="96">
+      <span class="val" id="brv">96</span>
+    </div>
+    <div class="row">
+      <label>Speed</label>
+      <input type="range" id="sp" min="0" max="255" value="64">
+      <span class="val" id="spv">64</span>
+    </div>
+    <button class="apply" onclick="applyEffect()">Apply effect</button>
+  </div>
+
+  <button class="resume" onclick="send('/resume','resume normal')">Resume normal operation</button>
+  <div id="status">ready</div>
+
+  <h2>Diagnostics</h2>
+  <div class="card">
+    <div class="row" style="justify-content:space-between">
+      <span style="color:#8b949e">device name</span>
+      <span><input id="host" type="text" placeholder="pipecat-voice" maxlength="32"
+                   style="font:inherit;background:#1b2230;color:#e6edf3;border:1px solid #30363d;border-radius:6px;padding:6px 8px">
+            <button onclick="setHost()" style="padding:7px 12px">Set .local</button></span>
+    </div>
+    <pre id="diag" style="margin:8px 0 0;white-space:pre-wrap;color:#9aa7b3;font-size:12px">loading…</pre>
+  </div>
+
+  <h2>Firmware update (OTA)</h2>
+  <div class="card">
+    <div class="row" style="gap:10px">
+      <input type="file" id="otafile" accept=".bin"
+             style="flex:1;font:inherit;color:#e6edf3">
+      <button onclick="otaUpload()" style="padding:8px 14px;background:#1f6feb;border-color:#1f6feb">Flash</button>
+    </div>
+    <progress id="otabar" value="0" max="100" style="width:100%;height:8px;display:none;margin-top:8px"></progress>
+    <div id="otastatus" style="margin-top:8px;font-size:13px;color:#8b949e">select firmware.bin and Flash — device reboots into it (auto-rolls back if it fails to boot)</div>
+  </div>
+
+  <h2>Live console <small style="text-transform:none;letter-spacing:0;color:#8b949e" id="wsstate">connecting…</small></h2>
+  <div class="card" style="padding:10px">
+    <div style="display:flex;gap:8px;margin-bottom:8px">
+      <button onclick="logCopy()" style="padding:6px 10px">Copy</button>
+      <button onclick="logSave()" style="padding:6px 10px">Download</button>
+      <button id="pausebtn" onclick="logPause()" style="padding:6px 10px">Pause</button>
+      <button onclick="document.getElementById('log').textContent=''" style="padding:6px 10px">Clear</button>
+    </div>
+    <pre id="log" style="margin:0;height:280px;overflow:auto;white-space:pre-wrap;word-break:break-word;
+         font:12px/1.45 ui-monospace,Menlo,Consolas,monospace;background:#0a0d12;border:1px solid #20262e;
+         border-radius:6px;padding:10px;color:#c9d1d9"></pre>
+  </div>
+
+<script>
+  // Must match domain::LedState order and ui.cpp's mapping.
+  const STATES = [
+    ["Off",          "#000000", "off"],
+    ["Provisioning", "rainbow", "rainbow · spinning"],
+    ["Connecting",   "#0040ff", "blue · breathing"],
+    ["Negotiating",  "#9000ff", "purple · breathing"],
+    ["Listening",    "#00d040", "green · solid"],
+    ["Talking",      "#00d0d0", "cyan · solid"],
+    ["Thinking",     "#ff8800", "amber · breathing"],
+    ["WakeAck",      "#ffffff", "white · solid (flash)"],
+    ["Speaking",     "#ff1080", "pink · breathing"],
+    ["Muted",        "#c00000", "red · solid"],
+    ["Error",        "#ff0000", "red · breathing"],
+  ];
+  const statusEl = document.getElementById('status');
+  function send(url, label) {
+    statusEl.textContent = '…' + label;
+    fetch(url).then(r => r.ok
+      ? statusEl.textContent = '✓ ' + label
+      : statusEl.textContent = '✗ ' + label + ' (' + r.status + ')')
+      .catch(() => statusEl.textContent = '✗ ' + label + ' (no response)');
+  }
+  const g = document.getElementById('states');
+  STATES.forEach(([name, hex, desc], i) => {
+    const b = document.createElement('button');
+    const sw = hex === 'rainbow'
+      ? 'background:conic-gradient(red,#ff0,lime,cyan,blue,magenta,red);box-shadow:none'
+      : 'color:' + hex;
+    b.innerHTML = '<span class="sw" style="' + sw + '"></span>' + name +
+                  '<small>' + desc + '</small>';
+    b.onclick = () => send('/state?s=' + i, name);
+    g.appendChild(b);
+  });
+  const col = document.getElementById('col'), colhex = document.getElementById('colhex');
+  const br = document.getElementById('br'), brv = document.getElementById('brv');
+  const sp = document.getElementById('sp'), spv = document.getElementById('spv');
+  col.oninput = () => colhex.textContent = col.value;
+  br.oninput = () => brv.textContent = br.value;
+  sp.oninput = () => spv.textContent = sp.value;
+  function applyEffect() {
+    const h = col.value;                 // "#rrggbb"
+    const r = parseInt(h.substr(1,2),16), gg = parseInt(h.substr(3,2),16), b = parseInt(h.substr(5,2),16);
+    const e = document.getElementById('eff').value;
+    send('/effect?e=' + e + '&r=' + r + '&g=' + gg + '&b=' + b +
+         '&br=' + br.value + '&sp=' + sp.value,
+         'effect ' + document.getElementById('eff').selectedOptions[0].text);
+  }
+
+  // --- Diagnostics (poll /diag every 3s) ---
+  const diagEl = document.getElementById('diag');
+  function refreshDiag() {
+    fetch('/diag').then(r => r.json()).then(j => {
+      diagEl.textContent = JSON.stringify(j, null, 2);
+    }).catch(() => { diagEl.textContent = '/diag unreachable'; });
+  }
+  refreshDiag(); setInterval(refreshDiag, 3000);
+
+  function setHost() {
+    const n = document.getElementById('host').value.trim();
+    if (!n) return;
+    send('/hostname?name=' + encodeURIComponent(n), 'hostname → ' + n + '.local');
+  }
+
+  // --- OTA firmware upload ---
+  function otaUpload() {
+    const f = document.getElementById('otafile').files[0];
+    if (!f) { return; }
+    const bar = document.getElementById('otabar'), st = document.getElementById('otastatus');
+    bar.style.display = 'block'; bar.value = 0;
+    const xhr = new XMLHttpRequest();
+    xhr.open('POST', '/ota');
+    xhr.upload.onprogress = e => {
+      if (e.lengthComputable) { bar.value = e.loaded / e.total * 100;
+        st.textContent = 'uploading ' + Math.round(e.loaded/e.total*100) + '% (' + (f.size/1024|0) + ' KB)'; }
+    };
+    xhr.onload  = () => { st.textContent = (xhr.status === 200)
+        ? '✓ ' + xhr.responseText + ' — reconnecting in a few seconds…'
+        : '✗ ' + xhr.status + ' ' + xhr.responseText; };
+    xhr.onerror = () => st.textContent = '✗ upload failed (device may have rejected the image)';
+    st.textContent = 'uploading…';
+    xhr.send(f);
+  }
+
+  // --- Live console over WebSocket ---
+  const logEl = document.getElementById('log');
+  const wsState = document.getElementById('wsstate');
+  let paused = false;
+  function logPause() {
+    paused = !paused;
+    document.getElementById('pausebtn').textContent = paused ? 'Resume' : 'Pause';
+  }
+  function logCopy()  {
+    const t = logEl.textContent;
+    // navigator.clipboard is undefined over plain http:// (non-secure context),
+    // so fall back to a hidden textarea + execCommand.
+    if (navigator.clipboard && navigator.clipboard.writeText) { navigator.clipboard.writeText(t); }
+    else {
+      const ta = document.createElement('textarea');
+      ta.value = t; ta.style.position = 'fixed'; ta.style.opacity = '0';
+      document.body.appendChild(ta); ta.select();
+      try { document.execCommand('copy'); } catch (e) {}
+      document.body.removeChild(ta);
+    }
+  }
+  function logSave()  {
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(new Blob([logEl.textContent], {type:'text/plain'}));
+    a.download = 'pipecat-voice-log.txt'; a.click();
+  }
+  function connectWs() {
+    const ws = new WebSocket('ws://' + location.host + '/ws/logs');
+    ws.onopen    = () => wsState.textContent = '● live';
+    ws.onclose   = () => { wsState.textContent = '○ disconnected — retrying'; setTimeout(connectWs, 2000); };
+    ws.onerror   = () => ws.close();
+    ws.onmessage = (ev) => {
+      if (paused) return;
+      const atBottom = logEl.scrollTop + logEl.clientHeight >= logEl.scrollHeight - 20;
+      logEl.textContent += ev.data;
+      // cap to ~200 KB so a long session doesn't bloat the page
+      if (logEl.textContent.length > 200000)
+        logEl.textContent = logEl.textContent.slice(-150000);
+      if (atBottom) logEl.scrollTop = logEl.scrollHeight;
+    };
+  }
+  connectWs();
+</script>
+</body>
+</html>

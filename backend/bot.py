@@ -241,6 +241,16 @@ async def run_bot(webrtc_connection):
         params=TransportParams(
             audio_in_enabled=True,
             audio_out_enabled=True,
+            # Pin the transport sample rates to the wire codec's native rate.
+            # The firmware now speaks G.722 wideband, which carries 16 kHz audio
+            # (PT 9; its RTP clock is declared 8 kHz per RFC 3551 but the codec
+            # is 16 kHz). Output MUST be 16 kHz so pipecat's SmallWebRTC output
+            # track chunks/paces at the codec rate and aiortc's G.722 encoder
+            # gets matching frames — a mismatch drops the TTS and the device
+            # hears silence. Input is also 16 kHz: aiortc decodes the G.722
+            # uplink to 16 kHz and Whisper wants 16 kHz, so no resampling.
+            audio_in_sample_rate=16000,
+            audio_out_sample_rate=16000,
             # Smaller output chunks -> lower first-audio latency.
             audio_out_10ms_chunks=2,
         ),

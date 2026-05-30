@@ -1,0 +1,9 @@
+.pio/
+.vscode/
+build/
+sdkconfig
+sdkconfig.old
+sdkconfig.seeed_xiao_esp32s3
+managed_components/
+dependencies.lock
+.cache/

@@ -1,0 +1,200 @@
+#!/usr/bin/env python3
+"""Run the wake-word .tflite against laptop-recorded audio.
+
+Mirror of the on-device inference: same feature extractor (pymicro-features
+== the C microfrontend lib vendored under components/wake_word/microfrontend/),
+same int8 quantization formula (ESPHome's `(u*256+333)//666 + INT8_MIN`),
+same 3-slice rolling input. The point is to see the model's behaviour on
+real human voice without the device or firmware in the loop.
+
+Run from firmware/tools/wake_word_tester/ inside the training venv:
+
+    source ../train_wake_word/.venv/bin/activate
+    pip install flask              # one-time
+    python app.py
+    # then open http://localhost:5000
+"""
+
+from __future__ import annotations
+
+import os
+from pathlib import Path
+
+import numpy as np
+import soundfile as sf
+import tensorflow as tf
+from flask import Flask, jsonify, request, send_from_directory
+from pymicro_features import MicroFrontend
+
+ROOT        = Path(__file__).resolve().parent
+MODEL_PATH  = ROOT.parents[1] / "main" / "models" / "wake_word_ru.tflite"
+# Saved positive samples land here; train_production.py picks them up as
+# a second feature source with higher sampling weight than synthetic.
+CORPUS_DIR  = ROOT.parent / "train_wake_word" / "corpus" / "positive_real"
+
+SAMPLE_RATE      = 16000
+STRIDE_SAMPLES   = 160      # 10 ms @ 16 kHz
+FEATURE_SIZE     = 40
+INPUT_SLICES     = 3        # matches the model's 1×3×40 input
+WARMUP_SLICES    = 30       # ignore first ~300 ms (model state hasn't filled)
+CLIP_SAMPLES     = SAMPLE_RATE * 3 // 2   # 1.5 s — matches microWakeWord's clip_duration_ms
+
+app = Flask(__name__, static_folder=str(ROOT / "static"))
+
+# Load model once.
+_interpreter = tf.lite.Interpreter(model_path=str(MODEL_PATH))
+_interpreter.allocate_tensors()
+_in  = _interpreter.get_input_details()[0]
+_out = _interpreter.get_output_details()[0]
+print(f"loaded {MODEL_PATH.name}: in={_in['shape']} ({_in['dtype'].__name__}) "
+      f"→ out={_out['shape']} ({_out['dtype'].__name__})", flush=True)
+
+
+def features_for_audio(samples: np.ndarray) -> list[np.ndarray]:
+    """Run pymicro-features → quantize using the model's own input scale/zp.
+
+    pymicro-features returns features as floats in roughly 0..25 (already
+    log-scaled internally). microWakeWord training feeds these floats
+    directly to quantize_input_data which does `int8 = round(f/scale + zp)`.
+    The model's input quantization is what makes those tiny floats map to
+    a useful int8 range — using ESPHome's uint16-formula `(u*256+333)/666`
+    here would assume features are 0..670 and collapse them all to -128.
+    """
+    in_scale, in_zp = _in["quantization"]
+    mf = MicroFrontend()
+    mf.reset()
+    slices: list[np.ndarray] = []
+    pos = 0
+    while pos + STRIDE_SAMPLES <= len(samples):
+        chunk = samples[pos:pos + STRIDE_SAMPLES]
+        out = mf.process_samples(chunk.tobytes())
+        if len(out.features) >= FEATURE_SIZE:
+            f   = np.asarray(out.features[:FEATURE_SIZE], dtype=np.float32)
+            q   = np.round(f / in_scale + in_zp)
+            int8 = np.clip(q, -128, 127).astype(np.int8)
+            slices.append(int8)
+        pos += STRIDE_SAMPLES
+    return slices
+
+
+def probabilities_for_features(slices: list[np.ndarray]) -> list[float]:
+    """Run the streaming model — invoke per non-overlapping INPUT_SLICES-block.
+
+    The streaming model maintains its own internal state via TF resource
+    variables (VAR_HANDLE). Each Invoke must consume INPUT_SLICES NEW
+    feature slices (3 in our case = 30 ms of fresh audio). Shifting the
+    window by 1 slice per invoke — like my earlier code did — feeds the
+    model overlapping data, corrupts state, and ends up with a model that
+    appears to never fire. This matches microWakeWord/inference.py
+    predict_spectrogram (stride defaults to input_feature_slices).
+    """
+    if not slices:
+        return []
+    _interpreter.reset_all_variables()
+    scale, zp = _out["quantization"]
+    block = np.empty((1, INPUT_SLICES, FEATURE_SIZE), dtype=np.int8)
+    probs: list[float] = []
+    for i in range(0, len(slices) - INPUT_SLICES + 1, INPUT_SLICES):
+        for k in range(INPUT_SLICES):
+            block[0, k] = slices[i + k]
+        _interpreter.set_tensor(_in["index"], block)
+        _interpreter.invoke()
+        raw = int(_interpreter.get_tensor(_out["index"]).flatten()[0])
+        p = max(0.0, float(scale * (raw - zp)))
+        # Repeat the probability for each slice in the block so the UI
+        # timeline still maps to ~10 ms per data point.
+        probs.extend([p] * INPUT_SLICES)
+    return probs
+
+
+def auto_trim_clip(samples: np.ndarray) -> np.ndarray:
+    """Center a CLIP_SAMPLES (1.5 s) window on the peak-energy region.
+
+    Recording usually has silence padding before/after the utterance; the
+    training pipeline expects clips already trimmed to ~1.5 s. We find the
+    loudest 100 ms region (sliding RMS) and center the 1.5 s output around it.
+    """
+    if len(samples) <= CLIP_SAMPLES:
+        out = np.zeros(CLIP_SAMPLES, dtype=np.int16)
+        out[:len(samples)] = samples
+        return out
+    win = 1600  # 100 ms sliding window
+    energy = np.cumsum(np.abs(samples.astype(np.int32)))
+    energy = energy[win:] - energy[:-win]
+    peak   = int(np.argmax(energy)) + win // 2
+    start  = max(0, peak - CLIP_SAMPLES // 2)
+    start  = min(start, len(samples) - CLIP_SAMPLES)
+    return samples[start:start + CLIP_SAMPLES]
+
+
+def saved_count() -> int:
+    if not CORPUS_DIR.exists():
+        return 0
+    return sum(1 for _ in CORPUS_DIR.glob("real_*.wav"))
+
+
+@app.route("/")
+def index():
+    return send_from_directory(ROOT, "index.html")
+
+
+@app.route("/count")
+def count():
+    return jsonify({"saved": saved_count()})
+
+
+@app.route("/save", methods=["POST"])
+def save():
+    raw = request.get_data()
+    if not raw:
+        return jsonify({"error": "no audio"}), 400
+    samples = np.frombuffer(raw, dtype=np.int16)
+    if len(samples) < 4800:   # < 300 ms = nothing useful
+        return jsonify({"error": f"too short ({len(samples)} samples)"}), 400
+
+    clip = auto_trim_clip(samples)
+    CORPUS_DIR.mkdir(parents=True, exist_ok=True)
+    # Avoid races: enumerate existing then take next index.
+    existing = sorted(CORPUS_DIR.glob("real_*.wav"))
+    idx = int(existing[-1].stem.split("_")[1]) + 1 if existing else 0
+    out_path = CORPUS_DIR / f"real_{idx:05d}.wav"
+    sf.write(out_path, clip, SAMPLE_RATE, subtype="PCM_16")
+    return jsonify({"saved": saved_count(), "path": str(out_path.relative_to(ROOT.parent))})
+
+
+@app.route("/predict", methods=["POST"])
+def predict():
+    raw = request.get_data()
+    if not raw:
+        return jsonify({"error": "no audio"}), 400
+    samples = np.frombuffer(raw, dtype=np.int16)
+    if len(samples) < 480:
+        return jsonify({"error": f"too short ({len(samples)} samples)"}), 400
+
+    audio_rms  = float(np.sqrt(np.mean(samples.astype(np.float64) ** 2)))
+    audio_peak = int(np.max(np.abs(samples)))
+
+    slices = features_for_audio(samples)
+    probs  = probabilities_for_features(slices)
+
+    # Skip the warm-up at the beginning when computing the peak.
+    usable = probs[WARMUP_SLICES:] if len(probs) > WARMUP_SLICES else probs
+    if usable:
+        max_p = float(max(usable))
+        peak_i = usable.index(max_p) + WARMUP_SLICES
+    else:
+        max_p, peak_i = 0.0, 0
+
+    return jsonify({
+        "max_prob":      max_p,
+        "peak_time_ms":  peak_i * 10,
+        "n_slices":      len(slices),
+        "n_samples":     int(len(samples)),
+        "audio_rms":     audio_rms,
+        "audio_peak":    audio_peak,
+        "probs":         probs,
+    })
+
+
+if __name__ == "__main__":
+    app.run(host="0.0.0.0", port=int(os.getenv("PORT", "5000")), debug=False)
