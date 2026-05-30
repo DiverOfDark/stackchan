@@ -13,6 +13,7 @@ set(DOMAIN_SRCS
     "src/energy_gate.cpp"
     "src/form_urlencoded.cpp"
     "src/session_fsm.cpp"
+    "src/g722.cpp"
 )
 
 # idf_component_register requires either SRCS or INCLUDE_DIRS to be non-

@@ -86,3 +86,8 @@ add_domain_test(test_gain
 # g711.hpp is header-only too.
 add_domain_test(test_g711
     ${DOMAIN_DIR}/test/test_g711.cpp)
+
+# g722 is a stateful codec with a src/ translation unit.
+add_domain_test(test_g722
+    ${DOMAIN_DIR}/src/g722.cpp
+    ${DOMAIN_DIR}/test/test_g722.cpp)
