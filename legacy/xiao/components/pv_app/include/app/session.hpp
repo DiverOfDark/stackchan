@@ -9,6 +9,7 @@
 // connection on transient drops (retry timer).
 
 #include <atomic>
+#include <cstdint>
 #include <memory>
 #include <string>
 #include <vector>
@@ -50,6 +51,10 @@ public:
 
     // The LED ring driver, exposed so the web LED-test UI can drive effects.
     Ui& ui() { return ui_; }
+
+    // Snapshot of internal state as a JSON object, for the /diag web endpoint.
+    // Lets us inspect a misbehaving device over the network (no serial / reset).
+    std::string diagJson();
 
 private:
     // Build a fresh Peer + push the local offer. Called once at
@@ -93,6 +98,8 @@ private:
 
     std::atomic<bool>                      running_{false};
     std::atomic<bool>                      connected_{false};
+    std::atomic<int>                       last_peer_state_{-1};   // transport::PeerState, -1 = none
+    std::atomic<uint32_t>                  reconnects_{0};         // PeerLost count
     // Conversation gate: false until the wake word fires, true while a turn is
     // in progress, back to false after a silence timeout. Mic audio is only
     // streamed to the backend while this is true.

@@ -1,10 +1,13 @@
 #include "app/session.hpp"
 
 #include <algorithm>
+#include <cstdio>
 #include <cstring>
 #include <utility>
 
+#include "esp_heap_caps.h"
 #include "esp_log.h"
+#include "esp_timer.h"
 
 #include "domain/energy_gate.hpp"
 #include "domain/g711.hpp"
@@ -179,6 +182,7 @@ void Session::onPeerState(transport::PeerState s)
     // hardware register name in xtensa/config/specreg.h and the
     // macros from that header clash with any local PS identifier.
     using transport::PeerState;
+    last_peer_state_ = static_cast<int>(s);
     switch (s) {
     case PeerState::New:
     case PeerState::Checking:
@@ -199,6 +203,7 @@ void Session::onPeerState(transport::PeerState s)
     case PeerState::Closed:
         connected_           = false;
         conversation_active_ = false;
+        reconnects_.fetch_add(1);
         retry_at_tick_       = xTaskGetTickCount() + pdMS_TO_TICKS(kRetryIntervalMs);
         ui_.setLed(domain::LedState::Connecting);
         fsm_.onEvent(domain::SessionEvent::PeerLost);
@@ -397,6 +402,53 @@ void Session::playbackTask()
         });
     }
     vTaskDelete(nullptr);
+}
+
+// ---------- Diagnostics ---------------------------------------------------
+
+std::string Session::diagJson()
+{
+    const TickType_t now = xTaskGetTickCount();
+    auto age_ms = [now](const std::atomic<TickType_t>& t) -> long {
+        const TickType_t v = t.load();
+        return v == 0 ? -1 : static_cast<long>(pdTICKS_TO_MS(now - v));
+    };
+    auto stack_free = [](TaskHandle_t h) -> unsigned {
+        return h ? static_cast<unsigned>(uxTaskGetStackHighWaterMark(h) * sizeof(StackType_t)) : 0;
+    };
+
+    const char* pstate = "none";
+    switch (last_peer_state_.load()) {
+    case static_cast<int>(transport::PeerState::New):          pstate = "new";          break;
+    case static_cast<int>(transport::PeerState::Checking):     pstate = "checking";     break;
+    case static_cast<int>(transport::PeerState::Connected):    pstate = "connected";    break;
+    case static_cast<int>(transport::PeerState::Completed):    pstate = "completed";    break;
+    case static_cast<int>(transport::PeerState::Failed):       pstate = "failed";       break;
+    case static_cast<int>(transport::PeerState::Disconnected): pstate = "disconnected"; break;
+    case static_cast<int>(transport::PeerState::Closed):       pstate = "closed";       break;
+    default: break;
+    }
+
+    char buf[640];
+    snprintf(buf, sizeof buf,
+        "{\"uptime_s\":%lld,"
+        "\"heap_internal_free\":%u,\"heap_internal_min\":%u,\"psram_free\":%u,"
+        "\"connected\":%s,\"peer_state\":\"%s\",\"reconnects\":%u,"
+        "\"conversation_active\":%s,\"muted\":%s,"
+        "\"ms_since_tts\":%ld,\"ms_since_mic\":%ld,\"wake_p\":%.3f,"
+        "\"stack_free_bytes\":{\"main\":%u,\"cap\":%u,\"play\":%u}}",
+        static_cast<long long>(esp_timer_get_time() / 1000000),
+        static_cast<unsigned>(heap_caps_get_free_size(MALLOC_CAP_INTERNAL)),
+        static_cast<unsigned>(heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL)),
+        static_cast<unsigned>(heap_caps_get_free_size(MALLOC_CAP_SPIRAM)),
+        connected_.load() ? "true" : "false", pstate,
+        static_cast<unsigned>(reconnects_.load()),
+        conversation_active_.load() ? "true" : "false",
+        button_.isMuted() ? "true" : "false",
+        age_ms(last_rx_frame_tick_), age_ms(last_mic_active_tick_),
+        static_cast<double>(transport::WakeEngine::lastProbability()),
+        stack_free(t_main_), stack_free(t_cap_), stack_free(t_play_));
+    return std::string(buf);
 }
 
 } // namespace app

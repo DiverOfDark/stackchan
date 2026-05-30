@@ -36,6 +36,11 @@ CONFIG_LOG_COLORS=y
 # CONFIG_ESP_CONSOLE_UART_DEFAULT is not set
 CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y
 
+# WebSocket support in esp_http_server — for the /ws/logs live-log stream that
+# mirrors the console over the network (the USB-JTAG console resets the chip on
+# host open, so it's unusable for long-running debugging).
+CONFIG_HTTPD_WS_SUPPORT=y
+
 # FreeRTOS — bump task stack a bit; the WebRTC + DTLS handshake path needs headroom
 CONFIG_ESP_MAIN_TASK_STACK_SIZE=8192
 

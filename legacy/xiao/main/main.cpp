@@ -25,9 +25,10 @@
 #include "hal/softap_portal.hpp"
 #include "hal/sntp.hpp"
 #include "hal/wifi_sta.hpp"
+#include "hal/mdns.hpp"
 #include "hal/xvf3800.hpp"
-#include "app/led_test_server.hpp"
 #include "app/session.hpp"
+#include "app/web_server.hpp"
 #include "transport/signaling.hpp"
 
 // HTML payloads, embedded as byte blobs by the *_html.c translation units.
@@ -45,6 +46,8 @@ constexpr const char* kNvsNamespace  = "pipecat-cfg";
 constexpr const char* kNvsKeySsid    = "wifi_ssid";
 constexpr const char* kNvsKeyPsk     = "wifi_psk";
 constexpr const char* kNvsKeyBackend = "backend_url";
+constexpr const char* kNvsKeyHostname = "hostname";
+constexpr const char* kDefaultHostname = "pipecat-voice";
 
 i2c_master_bus_handle_t openI2cBus()
 {
@@ -99,6 +102,7 @@ void decideAndRun()
     }
 
     std::string ssid, psk, backend;
+    std::string hostname = kDefaultHostname;
     if (auto nvs = hal::NvsKv::open(kNvsNamespace)) {
         auto s = nvs->getStr(kNvsKeySsid);
         auto b = nvs->getStr(kNvsKeyBackend);
@@ -107,6 +111,8 @@ void decideAndRun()
             backend = std::move(*b);
             if (auto p = nvs->getStr(kNvsKeyPsk)) psk = std::move(*p);
         }
+        if (auto hn = nvs->getStr(kNvsKeyHostname); hn && !hn->empty())
+            hostname = std::move(*hn);
     }
     if (ssid.empty() || backend.empty()) {
         runProvisioning();
@@ -126,6 +132,7 @@ void decideAndRun()
         esp_restart();
     }
     hal::Sntp::syncOrFallback();
+    hal::Mdns::start(hostname);
 
     // Bring up silicon for audio + LED + button.
     auto bus = openI2cBus();
@@ -171,14 +178,13 @@ void decideAndRun()
     };
     session.start();
 
-    // LED-test web UI — http://<device-ip>/ — drives the ring through the
-    // session's Ui override so effects can be previewed without the
-    // conversation state machine reverting them. Held static like the session.
-    static auto led_web = app::LedTestServer::start(
-        session.ui(),
+    // Web console — http://<hostname>.local/ — LED test + /diag + live log
+    // stream over WebSocket. Held static like the session.
+    static auto web = app::WebServer::start(
+        session,
         reinterpret_cast<const uint8_t*>(led_test_html),
         led_test_html_len);
-    if (!led_web) ESP_LOGW(kTag, "LED-test web UI failed to start");
+    if (!web) ESP_LOGW(kTag, "web console failed to start");
 
     // The session's worker tasks own the runtime. Stay alive so
     // ring/audio/button stack-locals don't fall off the end of

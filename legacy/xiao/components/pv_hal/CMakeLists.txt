@@ -13,6 +13,7 @@ set(HAL_SRCS
     "src/wifi_sta.cpp"
     "src/softap_portal.cpp"
     "src/https_client.cpp"
+    "src/mdns.cpp"
 )
 
 idf_component_register(
@@ -20,6 +21,7 @@ idf_component_register(
     INCLUDE_DIRS "include"
     REQUIRES
         pv_domain
+        espressif__mdns
         esp_driver_i2c
         esp_driver_i2s
         esp_driver_gpio

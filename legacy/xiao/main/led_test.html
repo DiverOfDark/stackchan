@@ -83,6 +83,30 @@
   <button class="resume" onclick="send('/resume','resume normal')">Resume normal operation</button>
   <div id="status">ready</div>
 
+  <h2>Diagnostics</h2>
+  <div class="card">
+    <div class="row" style="justify-content:space-between">
+      <span style="color:#8b949e">device name</span>
+      <span><input id="host" type="text" placeholder="pipecat-voice" maxlength="32"
+                   style="font:inherit;background:#1b2230;color:#e6edf3;border:1px solid #30363d;border-radius:6px;padding:6px 8px">
+            <button onclick="setHost()" style="padding:7px 12px">Set .local</button></span>
+    </div>
+    <pre id="diag" style="margin:8px 0 0;white-space:pre-wrap;color:#9aa7b3;font-size:12px">loading…</pre>
+  </div>
+
+  <h2>Live console <small style="text-transform:none;letter-spacing:0;color:#8b949e" id="wsstate">connecting…</small></h2>
+  <div class="card" style="padding:10px">
+    <div style="display:flex;gap:8px;margin-bottom:8px">
+      <button onclick="logCopy()" style="padding:6px 10px">Copy</button>
+      <button onclick="logSave()" style="padding:6px 10px">Download</button>
+      <button id="pausebtn" onclick="logPause()" style="padding:6px 10px">Pause</button>
+      <button onclick="document.getElementById('log').textContent=''" style="padding:6px 10px">Clear</button>
+    </div>
+    <pre id="log" style="margin:0;height:280px;overflow:auto;white-space:pre-wrap;word-break:break-word;
+         font:12px/1.45 ui-monospace,Menlo,Consolas,monospace;background:#0a0d12;border:1px solid #20262e;
+         border-radius:6px;padding:10px;color:#c9d1d9"></pre>
+  </div>
+
 <script>
   // Must match domain::LedState order and ui.cpp's mapping.
   const STATES = [
@@ -131,6 +155,52 @@
          '&br=' + br.value + '&sp=' + sp.value,
          'effect ' + document.getElementById('eff').selectedOptions[0].text);
   }
+
+  // --- Diagnostics (poll /diag every 3s) ---
+  const diagEl = document.getElementById('diag');
+  function refreshDiag() {
+    fetch('/diag').then(r => r.json()).then(j => {
+      diagEl.textContent = JSON.stringify(j, null, 2);
+    }).catch(() => { diagEl.textContent = '/diag unreachable'; });
+  }
+  refreshDiag(); setInterval(refreshDiag, 3000);
+
+  function setHost() {
+    const n = document.getElementById('host').value.trim();
+    if (!n) return;
+    send('/hostname?name=' + encodeURIComponent(n), 'hostname → ' + n + '.local');
+  }
+
+  // --- Live console over WebSocket ---
+  const logEl = document.getElementById('log');
+  const wsState = document.getElementById('wsstate');
+  let paused = false;
+  function logPause() {
+    paused = !paused;
+    document.getElementById('pausebtn').textContent = paused ? 'Resume' : 'Pause';
+  }
+  function logCopy()  { navigator.clipboard.writeText(logEl.textContent); }
+  function logSave()  {
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(new Blob([logEl.textContent], {type:'text/plain'}));
+    a.download = 'pipecat-voice-log.txt'; a.click();
+  }
+  function connectWs() {
+    const ws = new WebSocket('ws://' + location.host + '/ws/logs');
+    ws.onopen    = () => wsState.textContent = '● live';
+    ws.onclose   = () => { wsState.textContent = '○ disconnected — retrying'; setTimeout(connectWs, 2000); };
+    ws.onerror   = () => ws.close();
+    ws.onmessage = (ev) => {
+      if (paused) return;
+      const atBottom = logEl.scrollTop + logEl.clientHeight >= logEl.scrollHeight - 20;
+      logEl.textContent += ev.data;
+      // cap to ~200 KB so a long session doesn't bloat the page
+      if (logEl.textContent.length > 200000)
+        logEl.textContent = logEl.textContent.slice(-150000);
+      if (atBottom) logEl.scrollTop = logEl.scrollHeight;
+    };
+  }
+  connectWs();
 </script>
 </body>
 </html>

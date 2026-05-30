@@ -4,7 +4,7 @@
 set(APP_SRCS
     "src/ui.cpp"
     "src/session.cpp"
-    "src/led_test_server.cpp"
+    "src/web_server.cpp"
 )
 
 idf_component_register(
