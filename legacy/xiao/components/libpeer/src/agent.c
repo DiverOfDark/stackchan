@@ -348,6 +348,10 @@ int agent_turn_set_permission(Agent* agent, Address* peer_addr) {
         recv_msg.stunmethod == STUN_METHOD_CREATE_PERMISSION) {
       memcpy(&agent->turn_permission_addr, peer_addr, sizeof(Address));
       agent->turn_permission_set = true;
+      /* Anchor the keepalive clock here so the first periodic refresh fires
+       * one interval after the permission is actually established, not
+       * immediately. */
+      agent->turn_refresh_time = ports_get_epoch_time();
       LOGD("CreatePermission acked for peer %s:%d", addr_string, peer_addr->port);
       return 0;
     }
@@ -373,6 +377,48 @@ int agent_turn_set_permission(Agent* agent, Address* peer_addr) {
   }
   LOGE("CreatePermission gave up after nonce-retry");
   return -1;
+}
+
+/* Periodic TURN keepalive — see agent.h. Sends a CreatePermission (renews the
+ * 5-min permission for the active peer) and a Refresh (renews the ~10-min
+ * allocation), both authenticated with the cached long-term credential, and
+ * returns immediately without reading the responses. Reading here would
+ * compete with the media recv loop for the shared UDP socket and drop audio
+ * frames; instead the success responses are harmlessly ignored by agent_recv
+ * and a 438/401 Stale-Nonce reply is folded back into agent->turn_nonce there
+ * so the next cycle re-signs correctly. */
+void agent_turn_refresh(Agent* agent) {
+  if (!agent->turn_allocated) return;
+  StunMessage m;
+
+  /* CreatePermission for the active (nominated) peer. */
+  if (agent->turn_permission_set) {
+    char peer_attr[20];
+    int peer_attr_len;
+    memset(&m, 0, sizeof(m));
+    stun_msg_create(&m, STUN_METHOD_CREATE_PERMISSION);
+    peer_attr_len = agent_turn_encode_peer_address(&m, &agent->turn_permission_addr, peer_attr);
+    stun_msg_write_attr(&m, STUN_ATTR_TYPE_XOR_PEER_ADDRESS, peer_attr_len, peer_attr);
+    stun_msg_write_attr(&m, STUN_ATTR_TYPE_USERNAME, strlen(agent->turn_username), agent->turn_username);
+    stun_msg_write_attr(&m, STUN_ATTR_TYPE_NONCE, strlen(agent->turn_nonce), agent->turn_nonce);
+    stun_msg_write_attr(&m, STUN_ATTR_TYPE_REALM, strlen(agent->turn_realm), agent->turn_realm);
+    stun_msg_finish(&m, STUN_CREDENTIAL_LONG_TERM, agent->turn_credential, strlen(agent->turn_credential));
+    agent_socket_send(agent, &agent->turn_server_addr, m.buf, m.size);
+  }
+
+  /* Refresh the allocation itself (LIFETIME requests a fresh ~10-min lease;
+   * the server clamps to its configured maximum). */
+  uint32_t lifetime = htonl(600);
+  memset(&m, 0, sizeof(m));
+  stun_msg_create(&m, STUN_METHOD_REFRESH);
+  stun_msg_write_attr(&m, STUN_ATTR_TYPE_LIFETIME, sizeof(lifetime), (char*)&lifetime);
+  stun_msg_write_attr(&m, STUN_ATTR_TYPE_USERNAME, strlen(agent->turn_username), agent->turn_username);
+  stun_msg_write_attr(&m, STUN_ATTR_TYPE_NONCE, strlen(agent->turn_nonce), agent->turn_nonce);
+  stun_msg_write_attr(&m, STUN_ATTR_TYPE_REALM, strlen(agent->turn_realm), agent->turn_realm);
+  stun_msg_finish(&m, STUN_CREDENTIAL_LONG_TERM, agent->turn_credential, strlen(agent->turn_credential));
+  agent_socket_send(agent, &agent->turn_server_addr, m.buf, m.size);
+
+  LOGI("TURN keepalive sent (CreatePermission + Refresh)");
 }
 
 /* Build a TURN Send indication wrapping `data` for delivery to `peer_addr`.
@@ -631,9 +677,24 @@ int agent_recv(Agent* agent, uint8_t* buf, int len) {
         agent_process_stun_response(agent, &stun_msg);
         break;
       case STUN_CLASS_ERROR:
+        /* The only errors we expect on a live connection are 438 Stale Nonce
+         * / 401 replies to our fire-and-forget TURN keepalives (agent_turn_
+         * refresh). Fold the fresh nonce/realm back in so the next keepalive
+         * re-signs correctly; otherwise the relay would silently expire. */
+        if ((stun_msg.error_code == 438 || stun_msg.error_code == 401) &&
+            strlen(stun_msg.nonce) > 0) {
+          strncpy(agent->turn_nonce, stun_msg.nonce, sizeof(agent->turn_nonce) - 1);
+          agent->turn_nonce[sizeof(agent->turn_nonce) - 1] = '\0';
+          if (strlen(stun_msg.realm) > 0) {
+            strncpy(agent->turn_realm, stun_msg.realm, sizeof(agent->turn_realm) - 1);
+            agent->turn_realm[sizeof(agent->turn_realm) - 1] = '\0';
+          }
+          LOGD("TURN nonce refreshed from %u error", stun_msg.error_code);
+        }
+        break;
       case STUN_CLASS_INDICATION:
-        /* No-op: errors are logged in the parser; non-DATA indications
-         * (e.g., a SEND that bounced back) aren't expected here. */
+        /* No-op: non-DATA indications (e.g., a SEND that bounced back) aren't
+         * expected here. */
         break;
       default:
         break;

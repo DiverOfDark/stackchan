@@ -13,6 +13,11 @@
 #include "sctp.h"
 #include "sdp.h"
 
+/* How often to re-issue the TURN CreatePermission + Refresh while a session
+ * is up. Must be comfortably under STUNner's permission lifetime (~5 min) so a
+ * lost keepalive still leaves several retries before expiry. */
+#define TURN_KEEPALIVE_INTERVAL_MS 60000
+
 #define STATE_CHANGED(pc, curr_state)                                 \
   if (pc->oniceconnectionstatechange && pc->state != curr_state) {    \
     pc->oniceconnectionstatechange(curr_state, pc->config.user_data); \
@@ -349,6 +354,17 @@ int peer_connection_loop(PeerConnection* pc) {
       if (CONFIG_KEEPALIVE_TIMEOUT > 0 && (ports_get_epoch_time() - pc->agent.binding_request_time) > CONFIG_KEEPALIVE_TIMEOUT) {
         LOGI("binding request timeout");
         STATE_CHANGED(pc, PEER_CONNECTION_CLOSED);
+      }
+
+      /* TURN relay keepalive: STUNner expires the permission after ~5 min and
+       * the allocation after ~10 min. Without refreshing, media silently dies
+       * in both directions mid-session (and ICE consent stops, eventually
+       * tripping the timeout above into a full reconnect). Re-issue both well
+       * inside those windows. Fire-and-forget, so this never blocks media. */
+      if (pc->agent.turn_allocated &&
+          (ports_get_epoch_time() - pc->agent.turn_refresh_time) > TURN_KEEPALIVE_INTERVAL_MS) {
+        agent_turn_refresh(&pc->agent);
+        pc->agent.turn_refresh_time = ports_get_epoch_time();
       }
 
       break;

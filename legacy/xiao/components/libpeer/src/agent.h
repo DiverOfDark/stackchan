@@ -104,6 +104,12 @@ struct Agent {
   bool turn_allocated;
   Address turn_permission_addr;
   bool turn_permission_set;
+  /* turn_refresh_time — epoch ms (ports_get_epoch_time) of the last TURN
+   *                    keepalive. peer_connection_loop re-issues
+   *                    CreatePermission + Refresh on an interval so STUNner
+   *                    doesn't expire the permission (~5 min) or allocation
+   *                    (~10 min) out from under an idle-but-live session. */
+  uint32_t turn_refresh_time;
 };
 
 void agent_gather_candidate(Agent* agent, const char* urls, const char* username, const char* credential);
@@ -136,5 +142,12 @@ void agent_update_candidate_pairs(Agent* agent);
  * Safe to call repeatedly with the same address — re-issues the permission
  * (each one is valid for 5 min; this also acts as a refresh). */
 int agent_turn_set_permission(Agent* agent, Address* peer_addr);
+
+/* Fire-and-forget TURN keepalive: re-issue CreatePermission for the active
+ * peer and Refresh the allocation, keeping STUNner from expiring either while
+ * a session is up. Does NOT block for the responses (that would swallow live
+ * media on the shared socket); a rotated nonce in the reply is picked up by
+ * agent_recv. No-op unless an allocation exists. */
+void agent_turn_refresh(Agent* agent);
 
 #endif  // AGENT_H_
