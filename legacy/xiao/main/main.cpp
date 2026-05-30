@@ -13,6 +13,7 @@
 #include "esp_flash.h"
 #include "esp_heap_caps.h"
 #include "esp_log.h"
+#include "esp_ota_ops.h"
 #include "esp_psram.h"
 #include "esp_system.h"
 #include "freertos/FreeRTOS.h"
@@ -185,6 +186,12 @@ void decideAndRun()
         reinterpret_cast<const uint8_t*>(led_test_html),
         led_test_html_len);
     if (!web) ESP_LOGW(kTag, "web console failed to start");
+
+    // We booted far enough to be reachable + OTA-updatable again → confirm this
+    // image so the bootloader won't roll it back. (No-op unless this boot is a
+    // freshly-OTA'd image in the pending-verify state.)
+    if (esp_ota_mark_app_valid_cancel_rollback() == ESP_OK)
+        ESP_LOGI(kTag, "OTA image marked valid");
 
     // The session's worker tasks own the runtime. Stay alive so
     // ring/audio/button stack-locals don't fall off the end of

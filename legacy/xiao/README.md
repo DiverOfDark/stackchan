@@ -20,7 +20,7 @@ Architecture plan: `/var/home/diverofdark/.claude/plans/now-let-s-work-on-eager-
 | M6a | Train Russian wake word offline | trained "Эй, Фемто!" production model (62 KB INT8) | n/a |
 | M6b | On-device wake word gating | done — preprocessor + MixedNet + capture gate | **pending** |
 | M7 | Mute button + LED state machine | done (LED I2C cmds stubbed) | **pending** |
-| M8 | OTA + this README | done | **pending** |
+| M8 | OTA + this README | done — web upload (POST /ota) + rollback | verified on hardware (flashed over Wi-Fi) |
 | Backend prep | `ESP32_COMPAT` documented | done | n/a |
 
 Hardware verification is a single user-side milestone: flash, listen, watch

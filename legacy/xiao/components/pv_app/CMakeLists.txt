@@ -15,4 +15,5 @@ idf_component_register(
         pv_hal
         pv_transport
         esp_http_server
+        app_update
 )

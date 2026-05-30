@@ -9,6 +9,7 @@ idf_component_register(
     REQUIRES
         esp_driver_i2c
         nvs_flash
+        app_update
         pv_hal
         pv_transport
         pv_app

@@ -5,6 +5,7 @@
 
 #include "esp_err.h"
 #include "esp_log.h"
+#include "esp_ota_ops.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/stream_buffer.h"
 #include "freertos/task.h"
@@ -209,6 +210,53 @@ esp_err_t handleHostname(httpd_req_t* req)
     return httpd_resp_sendstr(req, "ok");
 }
 
+// POST /ota — stream the uploaded firmware .bin straight into the inactive OTA
+// slot, then reboot into it. Rollback (sdkconfig) guards against a bad image.
+void ota_reboot_task(void*) { vTaskDelay(pdMS_TO_TICKS(1200)); esp_restart(); }
+
+esp_err_t handleOta(httpd_req_t* req)
+{
+    const esp_partition_t* part = esp_ota_get_next_update_partition(nullptr);
+    if (!part) { httpd_resp_set_status(req, "500 Internal Server Error");
+                 return httpd_resp_sendstr(req, "no OTA partition"); }
+
+    esp_ota_handle_t oh = 0;
+    if (esp_ota_begin(part, OTA_SIZE_UNKNOWN, &oh) != ESP_OK) {
+        httpd_resp_set_status(req, "500 Internal Server Error");
+        return httpd_resp_sendstr(req, "esp_ota_begin failed");
+    }
+
+    char buf[1536];
+    int remaining = req->content_len, total = 0;
+    while (remaining > 0) {
+        int want = remaining < static_cast<int>(sizeof buf) ? remaining : static_cast<int>(sizeof buf);
+        int r = httpd_req_recv(req, buf, want);
+        if (r == HTTPD_SOCK_ERR_TIMEOUT) continue;
+        if (r <= 0 || esp_ota_write(oh, buf, r) != ESP_OK) {
+            esp_ota_abort(oh);
+            httpd_resp_set_status(req, "400 Bad Request");
+            return httpd_resp_sendstr(req, "upload/write failed");
+        }
+        total += r; remaining -= r;
+    }
+
+    esp_err_t e = esp_ota_end(oh);
+    if (e != ESP_OK) {
+        httpd_resp_set_status(req, "400 Bad Request");
+        return httpd_resp_sendstr(req,
+            e == ESP_ERR_OTA_VALIDATE_FAILED ? "invalid firmware image" : "esp_ota_end failed");
+    }
+    if (esp_ota_set_boot_partition(part) != ESP_OK) {
+        httpd_resp_set_status(req, "500 Internal Server Error");
+        return httpd_resp_sendstr(req, "set_boot_partition failed");
+    }
+
+    ESP_LOGW(kTag, "OTA: wrote %d bytes to %s; rebooting into new firmware", total, part->label);
+    httpd_resp_sendstr(req, "ok — rebooting into new firmware");
+    xTaskCreate(ota_reboot_task, "ota_reboot", 2048, nullptr, 5, nullptr);
+    return ESP_OK;
+}
+
 // WebSocket: on handshake register the client fd; we only push (incoming
 // frames are drained and ignored).
 esp_err_t ws_logs_handler(httpd_req_t* req)
@@ -238,10 +286,12 @@ std::optional<WebServer> WebServer::start(Session& session, const uint8_t* html,
         return std::nullopt;
     }
 
-    httpd_config_t cfg   = HTTPD_DEFAULT_CONFIG();
-    cfg.server_port      = port;
-    cfg.lru_purge_enable = true;
-    cfg.max_open_sockets = 7;            // room for the WS log clients
+    httpd_config_t cfg     = HTTPD_DEFAULT_CONFIG();
+    cfg.server_port        = port;
+    cfg.lru_purge_enable   = true;
+    cfg.max_open_sockets   = 7;          // room for the WS log clients
+    cfg.stack_size         = 8192;       // OTA streaming + esp_ota_write headroom
+    cfg.recv_wait_timeout  = 15;         // tolerate slow firmware uploads
     httpd_handle_t h = nullptr;
     if (httpd_start(&h, &cfg) != ESP_OK) {
         ESP_LOGE(kTag, "httpd_start failed on port %u", (unsigned)port);
@@ -256,6 +306,7 @@ std::optional<WebServer> WebServer::start(Session& session, const uint8_t* html,
     httpd_uri_t u_res   { "/resume",  HTTP_GET, handleResume,   nullptr };
     httpd_uri_t u_diag  { "/diag",    HTTP_GET, handleDiag,     nullptr };
     httpd_uri_t u_host  { "/hostname",HTTP_GET, handleHostname, nullptr };
+    httpd_uri_t u_ota   { "/ota",     HTTP_POST,handleOta,      nullptr };
     httpd_uri_t u_ws{};
     u_ws.uri = "/ws/logs"; u_ws.method = HTTP_GET; u_ws.handler = ws_logs_handler;
     u_ws.is_websocket = true;
@@ -265,6 +316,7 @@ std::optional<WebServer> WebServer::start(Session& session, const uint8_t* html,
     httpd_register_uri_handler(h, &u_res);
     httpd_register_uri_handler(h, &u_diag);
     httpd_register_uri_handler(h, &u_host);
+    httpd_register_uri_handler(h, &u_ota);
     httpd_register_uri_handler(h, &u_ws);
 
     xTaskCreatePinnedToCore(log_broadcast_task, "ws_log", 4096, nullptr, 4, nullptr, 0);

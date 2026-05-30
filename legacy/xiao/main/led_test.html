@@ -94,6 +94,17 @@
     <pre id="diag" style="margin:8px 0 0;white-space:pre-wrap;color:#9aa7b3;font-size:12px">loading…</pre>
   </div>
 
+  <h2>Firmware update (OTA)</h2>
+  <div class="card">
+    <div class="row" style="gap:10px">
+      <input type="file" id="otafile" accept=".bin"
+             style="flex:1;font:inherit;color:#e6edf3">
+      <button onclick="otaUpload()" style="padding:8px 14px;background:#1f6feb;border-color:#1f6feb">Flash</button>
+    </div>
+    <progress id="otabar" value="0" max="100" style="width:100%;height:8px;display:none;margin-top:8px"></progress>
+    <div id="otastatus" style="margin-top:8px;font-size:13px;color:#8b949e">select firmware.bin and Flash — device reboots into it (auto-rolls back if it fails to boot)</div>
+  </div>
+
   <h2>Live console <small style="text-transform:none;letter-spacing:0;color:#8b949e" id="wsstate">connecting…</small></h2>
   <div class="card" style="padding:10px">
     <div style="display:flex;gap:8px;margin-bottom:8px">
@@ -169,6 +180,26 @@
     const n = document.getElementById('host').value.trim();
     if (!n) return;
     send('/hostname?name=' + encodeURIComponent(n), 'hostname → ' + n + '.local');
+  }
+
+  // --- OTA firmware upload ---
+  function otaUpload() {
+    const f = document.getElementById('otafile').files[0];
+    if (!f) { return; }
+    const bar = document.getElementById('otabar'), st = document.getElementById('otastatus');
+    bar.style.display = 'block'; bar.value = 0;
+    const xhr = new XMLHttpRequest();
+    xhr.open('POST', '/ota');
+    xhr.upload.onprogress = e => {
+      if (e.lengthComputable) { bar.value = e.loaded / e.total * 100;
+        st.textContent = 'uploading ' + Math.round(e.loaded/e.total*100) + '% (' + (f.size/1024|0) + ' KB)'; }
+    };
+    xhr.onload  = () => { st.textContent = (xhr.status === 200)
+        ? '✓ ' + xhr.responseText + ' — reconnecting in a few seconds…'
+        : '✗ ' + xhr.status + ' ' + xhr.responseText; };
+    xhr.onerror = () => st.textContent = '✗ upload failed (device may have rejected the image)';
+    st.textContent = 'uploading…';
+    xhr.send(f);
   }
 
   // --- Live console over WebSocket ---
