@@ -241,9 +241,21 @@ void Session::onInboundAudio(const uint8_t* data, std::size_t size)
 
     const std::size_t samples = domain::g711_decode_to_16k(data, size, pcm);  // = size*2
 
-    xStreamBufferSend(playback_buf_, pcm, samples * sizeof(int16_t), 0);
+    const std::size_t sent = xStreamBufferSend(playback_buf_, pcm, samples * sizeof(int16_t), 0);
+    const int32_t peak = domain::peak_abs_i16(pcm, static_cast<int>(samples));
 
-    if (domain::peak_abs_i16(pcm, static_cast<int>(samples)) >= kSpeakingPcmThreshold) {
+    // Downlink visibility: count every inbound audio packet (regardless of
+    // level) so /diag shows whether the backend's TTS is reaching us at all,
+    // and the WS log shows it live (rate-limited).
+    const uint32_t n = rx_audio_pkts_.fetch_add(1) + 1;
+    rx_audio_last_peak_ = peak;
+    if ((n % 100) == 1) {
+        ESP_LOGI(kTag, "rx audio: pkt#%u bytes=%u peak=%ld queued=%u/%u",
+                 (unsigned)n, (unsigned)size, (long)peak,
+                 (unsigned)sent, (unsigned)(samples * sizeof(int16_t)));
+    }
+
+    if (peak >= kSpeakingPcmThreshold) {
         const TickType_t now = xTaskGetTickCount();
         last_rx_frame_tick_ = now;
         // The bot is answering: keep the turn open, and start the (short)
@@ -429,13 +441,14 @@ std::string Session::diagJson()
     default: break;
     }
 
-    char buf[640];
+    char buf[768];
     snprintf(buf, sizeof buf,
         "{\"uptime_s\":%lld,"
         "\"heap_internal_free\":%u,\"heap_internal_min\":%u,\"psram_free\":%u,"
         "\"connected\":%s,\"peer_state\":\"%s\",\"reconnects\":%u,"
         "\"conversation_active\":%s,\"muted\":%s,"
         "\"ms_since_tts\":%ld,\"ms_since_mic\":%ld,\"wake_p\":%.3f,"
+        "\"rx_audio_pkts\":%u,\"rx_audio_peak\":%ld,"
         "\"stack_free_bytes\":{\"main\":%u,\"cap\":%u,\"play\":%u}}",
         static_cast<long long>(esp_timer_get_time() / 1000000),
         static_cast<unsigned>(heap_caps_get_free_size(MALLOC_CAP_INTERNAL)),
@@ -447,6 +460,8 @@ std::string Session::diagJson()
         button_.isMuted() ? "true" : "false",
         age_ms(last_rx_frame_tick_), age_ms(last_mic_active_tick_),
         static_cast<double>(transport::WakeEngine::lastProbability()),
+        static_cast<unsigned>(rx_audio_pkts_.load()),
+        static_cast<long>(rx_audio_last_peak_.load()),
         stack_free(t_main_), stack_free(t_cap_), stack_free(t_play_));
     return std::string(buf);
 }

@@ -210,7 +210,19 @@
     paused = !paused;
     document.getElementById('pausebtn').textContent = paused ? 'Resume' : 'Pause';
   }
-  function logCopy()  { navigator.clipboard.writeText(logEl.textContent); }
+  function logCopy()  {
+    const t = logEl.textContent;
+    // navigator.clipboard is undefined over plain http:// (non-secure context),
+    // so fall back to a hidden textarea + execCommand.
+    if (navigator.clipboard && navigator.clipboard.writeText) { navigator.clipboard.writeText(t); }
+    else {
+      const ta = document.createElement('textarea');
+      ta.value = t; ta.style.position = 'fixed'; ta.style.opacity = '0';
+      document.body.appendChild(ta); ta.select();
+      try { document.execCommand('copy'); } catch (e) {}
+      document.body.removeChild(ta);
+    }
+  }
   function logSave()  {
     const a = document.createElement('a');
     a.href = URL.createObjectURL(new Blob([logEl.textContent], {type:'text/plain'}));

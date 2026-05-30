@@ -226,6 +226,11 @@ esp_err_t handleOta(httpd_req_t* req)
         return httpd_resp_sendstr(req, "esp_ota_begin failed");
     }
 
+    // Spin the ring rainbow while flashing (long hold; we reboot before it
+    // lapses). resumeAuto() restores the normal LED on any failure path.
+    app::Ui& ui = g_ctx.session->ui();
+    ui.overrideEffect(hal::Effect::Rainbow, hal::Rgb{0, 0, 0}, 0x80, 0x40, 120'000);
+
     char buf[1536];
     int remaining = req->content_len, total = 0;
     while (remaining > 0) {
@@ -234,6 +239,7 @@ esp_err_t handleOta(httpd_req_t* req)
         if (r == HTTPD_SOCK_ERR_TIMEOUT) continue;
         if (r <= 0 || esp_ota_write(oh, buf, r) != ESP_OK) {
             esp_ota_abort(oh);
+            ui.resumeAuto();
             httpd_resp_set_status(req, "400 Bad Request");
             return httpd_resp_sendstr(req, "upload/write failed");
         }
@@ -242,11 +248,13 @@ esp_err_t handleOta(httpd_req_t* req)
 
     esp_err_t e = esp_ota_end(oh);
     if (e != ESP_OK) {
+        ui.resumeAuto();
         httpd_resp_set_status(req, "400 Bad Request");
         return httpd_resp_sendstr(req,
             e == ESP_ERR_OTA_VALIDATE_FAILED ? "invalid firmware image" : "esp_ota_end failed");
     }
     if (esp_ota_set_boot_partition(part) != ESP_OK) {
+        ui.resumeAuto();
         httpd_resp_set_status(req, "500 Internal Server Error");
         return httpd_resp_sendstr(req, "set_boot_partition failed");
     }

@@ -100,6 +100,8 @@ private:
     std::atomic<bool>                      connected_{false};
     std::atomic<int>                       last_peer_state_{-1};   // transport::PeerState, -1 = none
     std::atomic<uint32_t>                  reconnects_{0};         // PeerLost count
+    std::atomic<uint32_t>                  rx_audio_pkts_{0};      // inbound (downlink) audio packets
+    std::atomic<int32_t>                   rx_audio_last_peak_{0}; // peak of the last decoded frame
     // Conversation gate: false until the wake word fires, true while a turn is
     // in progress, back to false after a silence timeout. Mic audio is only
     // streamed to the backend while this is true.
