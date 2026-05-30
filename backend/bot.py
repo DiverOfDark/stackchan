@@ -365,6 +365,13 @@ async def run_bot(webrtc_connection):
         params=PipelineParams(
             enable_metrics=True,
             enable_usage_metrics=True,
+            # The device owns session lifecycle: it connects only when its local
+            # wake word fires and tears the session down itself after the turn
+            # (a short post-reply silence window). So the backend should never
+            # unilaterally cancel a live conversation — disable pipecat's idle
+            # timeout and let the pipeline live until the peer disconnects (which
+            # aiortc detects via ICE consent loss if the device drops uncleanly).
+            idle_timeout_secs=None,
         ),
         observers=[latency_observer, transcript_observer],
     )
@@ -375,20 +382,11 @@ async def run_bot(webrtc_connection):
 
     @transport.event_handler("on_client_connected")
     async def on_client_connected(transport, client):
-        global _last_greeted_at
-        import time
-        now = time.monotonic()
-        elapsed = now - _last_greeted_at
-        if elapsed < GREETING_COOLDOWN_SECS:
-            logger.info(
-                f"Client connected (pc_id={pc_id}) — skipping greeting "
-                f"({elapsed:.0f}s since last, cooldown {GREETING_COOLDOWN_SECS:.0f}s)"
-            )
-            return
-        _last_greeted_at = now
-        logger.info(f"Client connected (pc_id={pc_id}) — sending greeting")
-        context.add_message({"role": "user", "content": GREETING})
-        await task.queue_frames([LLMRunFrame()])
+        # On-demand model: the device connects only after its local wake word
+        # fired, and the user's buffered speech arrives immediately. No spoken
+        # greeting — the device's LED wake-ack is the "listening" cue, and a
+        # greeting on every wake would be repetitive and delay hearing the user.
+        logger.info(f"Client connected (pc_id={pc_id})")
 
     @transport.event_handler("on_client_disconnected")
     async def on_client_disconnected(transport, client):
