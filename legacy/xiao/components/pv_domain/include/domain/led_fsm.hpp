@@ -69,7 +69,7 @@ struct LedInputs {
 // expire mid-wait and drop the ring back to green "Listening" while the backend
 // was still working — read as "it gave up". Keep it amber for the full wait.
 inline constexpr Ms SPEAKING_HOLD{2500};
-inline constexpr Ms TALKING_HOLD{600};
+inline constexpr Ms TALKING_HOLD{1500};
 inline constexpr Ms THINKING_MAX{15000};
 
 // Returns the LedState the ring should display given `in`, or

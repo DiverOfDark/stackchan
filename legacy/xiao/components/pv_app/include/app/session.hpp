@@ -117,6 +117,11 @@ private:
     // in progress, back to false after a silence timeout. Mic audio is only
     // streamed to the backend while this is true.
     std::atomic<bool>                      conversation_active_{false};
+    // Set once the bot's first TTS of a turn arrives, reset on the next wake.
+    // While false (awaiting the first reply) user mic energy extends the turn;
+    // once true, only the post-reply silence window governs, so ambient room
+    // noise can't hold the session open indefinitely after the answer.
+    std::atomic<bool>                      bot_replied_{false};
     // Tick by which the turn ends unless pushed forward by user speech (await
     // regime) or a bot TTS frame (post-reply regime). See the capture task.
     std::atomic<TickType_t>                turn_deadline_{0};

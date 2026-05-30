@@ -288,6 +288,7 @@ void Session::onInboundAudio(const uint8_t* data, std::size_t size)
     if (peak >= kSpeakingPcmThreshold) {
         const TickType_t now = xTaskGetTickCount();
         last_rx_frame_tick_ = now;
+        bot_replied_ = true;   // first reply landed: switch to post-reply timing
         // The bot is answering: keep the turn open, and start the (short)
         // post-reply silence countdown from this frame. Each frame pushes it,
         // so it only elapses once the reply has actually stopped.
@@ -428,8 +429,14 @@ void Session::captureTask()
         // talking / about to get a reply, so don't time out.
         const uint32_t rms = domain::rms_i16(mono_wake, domain::kFramesPerPacket);
         if (!bot_speaking && rms >= static_cast<uint32_t>(kMicActiveRmsThreshold)) {
-            last_mic_active_tick_ = now;
-            if (conversation_active_.load())
+            last_mic_active_tick_ = now;   // drives the Talking LED
+            // Extend the turn on user speech ONLY while still awaiting the bot's
+            // first reply. Once it has answered, the post-reply silence window
+            // (set per inbound TTS frame) governs end-of-turn, so ambient room
+            // noise can't keep re-arming the deadline and hold the session open
+            // long after the answer — the device hangs up shortly after the
+            // reply, and a follow-up just needs another wake word.
+            if (conversation_active_.load() && !bot_replied_.load())
                 turn_deadline_ = now + pdMS_TO_TICKS(kAwaitResponseMs);
         }
 
@@ -445,6 +452,7 @@ void Session::captureTask()
                 ui_.setLed(domain::LedState::WakeAck);
                 domain::g722_init(g722_enc_);
                 r_head = r_count = 0;
+                bot_replied_ = false;   // awaiting this turn's first reply
             }
             turn_deadline_ = now + pdMS_TO_TICKS(kAwaitResponseMs);
         }
