@@ -59,6 +59,7 @@ typedef enum MediaCodec {
   CODEC_OPUS,  // not implemented yet
   CODEC_PCMA,
   CODEC_PCMU,
+  CODEC_G722,  // 16 kHz wideband ADPCM; payload carried like PCMU (8 kHz RTP clock)
 
 } MediaCodec;
 

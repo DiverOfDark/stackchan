@@ -31,6 +31,7 @@ typedef enum RtpSsrc {
   SSRC_PCMA = 4,
   SSRC_PCMU = 5,
   SSRC_OPUS = 6,
+  SSRC_G722 = 7,
 
 } RtpSsrc;
 

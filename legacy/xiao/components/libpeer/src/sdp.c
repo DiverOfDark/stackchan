@@ -69,6 +69,18 @@ void sdp_append_opus(char* sdp) {
   sdp_append(sdp, "a=rtcp-mux");
 }
 
+void sdp_append_g722(char* sdp) {
+  // G.722 is payload type 9. By RFC 3551 the rtpmap clock rate is written as
+  // 8000 even though the codec actually carries 16 kHz audio.
+  sdp_append(sdp, "m=audio 9 UDP/TLS/RTP/SAVP 9");
+  sdp_append(sdp, "c=IN IP4 0.0.0.0");
+  sdp_append(sdp, "a=rtpmap:9 G722/8000");
+  sdp_append(sdp, "a=ssrc:7 cname:webrtc-g722");
+  sdp_append(sdp, "a=sendrecv");
+  sdp_append(sdp, "a=mid:audio");
+  sdp_append(sdp, "a=rtcp-mux");
+}
+
 void sdp_append_datachannel(char* sdp) {
   sdp_append(sdp, "m=application 50712 UDP/DTLS/SCTP webrtc-datachannel");
   sdp_append(sdp, "c=IN IP4 0.0.0.0");

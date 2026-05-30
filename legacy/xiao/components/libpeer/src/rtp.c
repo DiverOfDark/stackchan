@@ -205,6 +205,14 @@ void rtp_encoder_init(RtpEncoder* rtp_encoder, MediaCodec codec, RtpOnPacket on_
       rtp_encoder->timestamp_increment = CONFIG_AUDIO_DURATION * 8000 / 1000;
       rtp_encoder->encode_func = rtp_encoder_encode_generic;
       break;
+    case CODEC_G722:
+      // G.722 carries 16 kHz audio but uses an 8 kHz RTP clock (RFC 3551), so
+      // its packetisation and timestamp increment match PCMU exactly.
+      rtp_encoder->type = PT_G722;
+      rtp_encoder->ssrc = SSRC_G722;
+      rtp_encoder->timestamp_increment = CONFIG_AUDIO_DURATION * 8000 / 1000;
+      rtp_encoder->encode_func = rtp_encoder_encode_generic;
+      break;
     case CODEC_OPUS:
       rtp_encoder->type = PT_OPUS;
       rtp_encoder->ssrc = SSRC_OPUS;
@@ -285,6 +293,7 @@ void rtp_decoder_init(RtpDecoder* rtp_decoder, MediaCodec codec, RtpOnPacket on_
     case CODEC_PCMA:
     case CODEC_PCMU:
     case CODEC_OPUS:
+    case CODEC_G722:
       rtp_decoder->decode_func = rtp_decode_generic;
     default:
       break;

@@ -43,11 +43,14 @@ std::unique_ptr<Peer> Peer::create(const std::vector<PeerIceServer>& ice)
     p->ice_  = ice;
 
     PeerConfiguration cfg{};
-    // G.711 µ-law @ 8 kHz, not Opus: Opus's >120 KB SILK scratch only fits in
-    // PSRAM here and ran ~1.5× real time, stalling audio capture. G.711 encode/
-    // decode are free, so the pipeline stays real time. libpeer drives the
-    // PCMU SDP + RTP (PT 0, 8 kHz clock); the app does the µ-law companding.
-    cfg.audio_codec  = CODEC_PCMU;
+    // G.722 wideband (16 kHz) ADPCM, not Opus or G.711. Opus's >120 KB SILK
+    // scratch only fits in PSRAM here and ran ~1.5× real time, stalling audio
+    // capture. G.711 ran in real time but is 8 kHz narrowband (muffled
+    // speaker). G.722 is cheap ADPCM that runs in real time *and* doubles the
+    // audio bandwidth to ~7 kHz, so the speaker sounds far better and the
+    // 16 kHz uplink also feeds Whisper natively. libpeer drives the G722 SDP +
+    // RTP (PT 9, 8 kHz RTP clock per RFC 3551); the app does the codec math.
+    cfg.audio_codec  = CODEC_G722;
     cfg.video_codec  = CODEC_NONE;
     cfg.datachannel  = DATA_CHANNEL_NONE;
     cfg.onaudiotrack = &Peer::thunkOnAudio;

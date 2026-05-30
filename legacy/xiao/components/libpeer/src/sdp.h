@@ -18,6 +18,8 @@ void sdp_append_pcmu(char* sdp);
 
 void sdp_append_opus(char* sdp);
 
+void sdp_append_g722(char* sdp);
+
 void sdp_append_datachannel(char* sdp);
 
 void sdp_create(char* sdp, int b_video, int b_audio, int b_datachannel);

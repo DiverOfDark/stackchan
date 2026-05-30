@@ -470,6 +470,9 @@ static const char* peer_connection_create_sdp(PeerConnection* pc, SdpType sdp_ty
     case CODEC_PCMU:
       sdp_append_pcmu(pc->sdp);
       break;
+    case CODEC_G722:
+      sdp_append_g722(pc->sdp);
+      break;
     case CODEC_OPUS:
       sdp_append_opus(pc->sdp);
     default:
