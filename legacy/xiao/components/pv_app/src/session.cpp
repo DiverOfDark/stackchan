@@ -249,6 +249,7 @@ void Session::onInboundAudio(const uint8_t* data, std::size_t size)
     // and the WS log shows it live (rate-limited).
     const uint32_t n = rx_audio_pkts_.fetch_add(1) + 1;
     rx_audio_last_peak_ = peak;
+    if (peak > rx_audio_max_peak_.load()) rx_audio_max_peak_ = peak;
     if ((n % 100) == 1) {
         ESP_LOGI(kTag, "rx audio: pkt#%u bytes=%u peak=%ld queued=%u/%u",
                  (unsigned)n, (unsigned)size, (long)peak,
@@ -306,6 +307,12 @@ void Session::captureTask()
     static int16_t mono_wake  [domain::kFramesPerPacket];        // +18 dB, soft-limited
     static int16_t mono_uplink[domain::kFramesPerPacket];        // +12 dB, soft-limited
     static uint8_t ulaw_buf   [domain::kFramesPerPacket / 2];    // 8 kHz µ-law on the wire
+    // µ-law silence (0xFF) sent when the turn is idle/echo-guarded: keeps the
+    // RTP stream — and thus the backend pipeline — alive without the backend's
+    // VAD hearing anything. Without this the backend idle-times-out and tears
+    // down the WebRTC session during silence.
+    uint8_t ulaw_silence[domain::kFramesPerPacket / 2];
+    std::memset(ulaw_silence, 0xFF, sizeof ulaw_silence);
 
     while (running_.load()) {
         if (audio_.read(stereo, domain::kFramesPerPacket) != ESP_OK) {
@@ -363,14 +370,18 @@ void Session::captureTask()
             }
         }
 
-        if (!connected_.load() || button_.isMuted()) continue;
-        if (!conversation_active_.load()) continue;   // listen only after wake
-        if (bot_speaking) continue;                   // half-duplex echo guard
+        if (!connected_.load() || !peer_) continue;
 
-        // G.711 encode is ~free, so the capture loop stays comfortably real-time.
-        const std::size_t n = domain::g711_encode_16k(
-            mono_uplink, domain::kFramesPerPacket, ulaw_buf);   // 320 → 160 bytes
-        if (peer_) peer_->sendAudio(ulaw_buf, n);
+        // Always send a frame to keep the backend's audio stream alive (else its
+        // pipeline idle-times-out and drops the WebRTC session). Send the real
+        // mic only during an active turn and when the bot isn't speaking (echo
+        // guard) and we're not muted; otherwise send µ-law silence.
+        if (conversation_active_.load() && !bot_speaking && !button_.isMuted()) {
+            domain::g711_encode_16k(mono_uplink, domain::kFramesPerPacket, ulaw_buf);
+            peer_->sendAudio(ulaw_buf, sizeof ulaw_buf);          // 320 → 160 bytes
+        } else {
+            peer_->sendAudio(ulaw_silence, sizeof ulaw_silence);
+        }
     }
     vTaskDelete(nullptr);
 }
@@ -448,7 +459,7 @@ std::string Session::diagJson()
         "\"connected\":%s,\"peer_state\":\"%s\",\"reconnects\":%u,"
         "\"conversation_active\":%s,\"muted\":%s,"
         "\"ms_since_tts\":%ld,\"ms_since_mic\":%ld,\"wake_p\":%.3f,"
-        "\"rx_audio_pkts\":%u,\"rx_audio_peak\":%ld,"
+        "\"rx_audio_pkts\":%u,\"rx_audio_peak\":%ld,\"rx_audio_max_peak\":%ld,"
         "\"stack_free_bytes\":{\"main\":%u,\"cap\":%u,\"play\":%u}}",
         static_cast<long long>(esp_timer_get_time() / 1000000),
         static_cast<unsigned>(heap_caps_get_free_size(MALLOC_CAP_INTERNAL)),
@@ -462,6 +473,7 @@ std::string Session::diagJson()
         static_cast<double>(transport::WakeEngine::lastProbability()),
         static_cast<unsigned>(rx_audio_pkts_.load()),
         static_cast<long>(rx_audio_last_peak_.load()),
+        static_cast<long>(rx_audio_max_peak_.load()),
         stack_free(t_main_), stack_free(t_cap_), stack_free(t_play_));
     return std::string(buf);
 }
