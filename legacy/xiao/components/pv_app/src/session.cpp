@@ -39,10 +39,17 @@ constexpr int  kAecRefTxChannel       = 0;        // L channel of XVF3800 input
 // itself and self-interrupting. See the capture task.
 constexpr int  kEchoGuardMs           = 400;
 
-// Conversation ends (mic uplink closes, wake word required again) after this
-// much continuous silence from BOTH the user and the bot. Keeps a turn open
-// for follow-ups while someone is still talking.
-constexpr int  kConversationSilenceMs = 4000;
+// Conversation turn timeouts. Two regimes so the silence countdown only runs
+// AFTER the bot has answered — not during the (variable, sometimes multi-second)
+// STT+LLM+TTS round-trip, which used to end the turn before the reply arrived:
+//   - while awaiting/receiving the bot's reply (user spoke most recently, or
+//     just woke), keep the turn open this long — a safety net for a slow or
+//     dead backend, and it bridges gaps between TTS chunks / tool-call pauses;
+//   - once the bot's reply finishes, end the turn after this much user silence.
+// Each bot TTS frame and each user-speech frame pushes the deadline, so the
+// short window only elapses when both have genuinely gone quiet post-reply.
+constexpr int  kAwaitResponseMs       = 10000;   // user/bot still expected
+constexpr int  kPostResponseSilenceMs = 5000;    // follow-up window after a reply
 
 constexpr int  kMainStack             = 32 * 1024;
 constexpr int  kCapStack              = 32 * 1024;
@@ -232,7 +239,12 @@ void Session::onInboundAudio(const uint8_t* data, std::size_t size)
     xStreamBufferSend(playback_buf_, pcm, samples * sizeof(int16_t), 0);
 
     if (domain::peak_abs_i16(pcm, static_cast<int>(samples)) >= kSpeakingPcmThreshold) {
-        last_rx_frame_tick_ = xTaskGetTickCount();
+        const TickType_t now = xTaskGetTickCount();
+        last_rx_frame_tick_ = now;
+        // The bot is answering: keep the turn open, and start the (short)
+        // post-reply silence countdown from this frame. Each frame pushes it,
+        // so it only elapses once the reply has actually stopped.
+        turn_deadline_ = now + pdMS_TO_TICKS(kPostResponseSilenceMs);
     }
 }
 
@@ -304,27 +316,31 @@ void Session::captureTask()
 
         // User mic energy, but only when the bot ISN'T speaking — otherwise the
         // speaker bleed would register as user activity. Feeds the TALKING LED
-        // and the conversation keep-alive timer.
+        // and (while in a turn) extends the await deadline: the user is still
+        // talking / about to get a reply, so don't time out.
         const uint32_t rms = domain::rms_i16(mono_wake, domain::kFramesPerPacket);
         if (!bot_speaking && rms >= static_cast<uint32_t>(kMicActiveRmsThreshold)) {
             last_mic_active_tick_ = now;
+            if (conversation_active_.load())
+                turn_deadline_ = now + pdMS_TO_TICKS(kAwaitResponseMs);
         }
 
         // Wake word arms the conversation (starts streaming to the backend).
+        // Note: do NOT bump last_mic_active_tick_ here — that would make the LED
+        // read "Talking" right after the flash; we want "Listening" (go ahead).
         transport::WakeEngine::process(mono_wake, domain::kFramesPerPacket);
         if (transport::WakeEngine::detected()) {
             ui_.setLed(domain::LedState::WakeAck);
             conversation_active_ = true;
-            last_mic_active_tick_ = now;   // give the user the full window to start
+            turn_deadline_       = now + pdMS_TO_TICKS(kAwaitResponseMs);
         }
 
-        // End the turn after a silence from BOTH user and bot — then the wake
-        // word is required again. Bot speech (last_rx) counts as activity so a
-        // long answer doesn't drop the conversation mid-sentence.
+        // End the turn only once the deadline lapses. The deadline is pushed by
+        // user speech (above, await regime) and by each inbound bot TTS frame
+        // (onInboundAudio, post-reply regime) — so the short post-reply silence
+        // window can't elapse until the bot has actually finished answering.
         if (conversation_active_.load()) {
-            const TickType_t last_activity =
-                std::max(last_mic_active_tick_.load(), last_rx_frame_tick_.load());
-            if ((now - last_activity) > pdMS_TO_TICKS(kConversationSilenceMs)) {
+            if (now > turn_deadline_.load()) {
                 conversation_active_ = false;
                 ESP_LOGI(kTag, "conversation idle — wake word required again");
             }

@@ -97,6 +97,9 @@ private:
     // in progress, back to false after a silence timeout. Mic audio is only
     // streamed to the backend while this is true.
     std::atomic<bool>                      conversation_active_{false};
+    // Tick by which the turn ends unless pushed forward by user speech (await
+    // regime) or a bot TTS frame (post-reply regime). See the capture task.
+    std::atomic<TickType_t>                turn_deadline_{0};
     std::atomic<TickType_t>                last_rx_frame_tick_{0};
     std::atomic<TickType_t>                last_mic_active_tick_{0};
     std::atomic<TickType_t>                retry_at_tick_{0};
