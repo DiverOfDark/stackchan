@@ -1,0 +1,133 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>pipecat-voice · LED test</title>
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 20px;
+    font: 15px/1.5 system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+    background: #0e1116; color: #e6edf3;
+    max-width: 620px; margin-inline: auto;
+  }
+  h1 { font-size: 19px; margin: 0 0 4px; }
+  p.sub { color: #8b949e; margin: 0 0 22px; }
+  h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .06em;
+       color: #8b949e; margin: 26px 0 10px; }
+  .grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 8px; }
+  button {
+    font: inherit; cursor: pointer; border: 1px solid #30363d;
+    background: #1b2230; color: #e6edf3; border-radius: 8px;
+    padding: 11px 12px; text-align: left; transition: background .12s, border-color .12s;
+  }
+  button:hover { background: #243044; border-color: #4c8bf5; }
+  button:active { transform: translateY(1px); }
+  button .sw { display: inline-block; width: 10px; height: 10px; border-radius: 50%;
+               margin-right: 8px; vertical-align: middle; box-shadow: 0 0 6px currentColor; }
+  button small { display: block; color: #8b949e; font-size: 12px; margin-top: 2px; }
+  .card { background: #161b22; border: 1px solid #30363d; border-radius: 10px; padding: 16px; }
+  .row { display: flex; align-items: center; gap: 12px; margin: 10px 0; }
+  .row label { width: 92px; color: #8b949e; flex: none; }
+  .row input[type=range] { flex: 1; }
+  .row select, .row input[type=color] { font: inherit; }
+  .row .val { width: 38px; text-align: right; color: #8b949e; font-variant-numeric: tabular-nums; }
+  input[type=color] { width: 48px; height: 30px; border: 1px solid #30363d; border-radius: 6px;
+                      background: #1b2230; padding: 2px; }
+  .apply { width: 100%; text-align: center; background: #1f6feb; border-color: #1f6feb; margin-top: 6px; }
+  .apply:hover { background: #388bfd; }
+  .resume { width: 100%; text-align: center; margin-top: 18px; background: #21262d; }
+  #status { margin-top: 16px; min-height: 18px; color: #58a6ff; font-size: 13px; }
+</style>
+</head>
+<body>
+  <h1>LED effect test</h1>
+  <p class="sub">Preview each state's mapping or any raw effect. Auto-returns to
+     normal after 60&nbsp;s of no clicks — or hit <em>Resume</em>.</p>
+
+  <h2>States (current mapping)</h2>
+  <div class="grid" id="states"></div>
+
+  <h2>Raw effect</h2>
+  <div class="card">
+    <div class="row">
+      <label>Effect</label>
+      <select id="eff">
+        <option value="0">Off</option>
+        <option value="1">Breath</option>
+        <option value="2">Rainbow</option>
+        <option value="3" selected>Solid</option>
+        <option value="4">DoA (rotate)</option>
+      </select>
+    </div>
+    <div class="row">
+      <label>Colour</label>
+      <input type="color" id="col" value="#00c8ff">
+      <span class="val" id="colhex">#00c8ff</span>
+    </div>
+    <div class="row">
+      <label>Brightness</label>
+      <input type="range" id="br" min="0" max="255" value="96">
+      <span class="val" id="brv">96</span>
+    </div>
+    <div class="row">
+      <label>Speed</label>
+      <input type="range" id="sp" min="0" max="255" value="64">
+      <span class="val" id="spv">64</span>
+    </div>
+    <button class="apply" onclick="applyEffect()">Apply effect</button>
+  </div>
+
+  <button class="resume" onclick="send('/resume','resume normal')">Resume normal operation</button>
+  <div id="status">ready</div>
+
+<script>
+  // Must match domain::LedState order and ui.cpp's mapping.
+  const STATES = [
+    ["Off",          "#000000", "off"],
+    ["Provisioning", "#0080ff", "blue breath (slow)"],
+    ["Connecting",   "#0080ff", "blue breath (fast)"],
+    ["Negotiating",  "#8020ff", "purple breath"],
+    ["Listening",    "#00c840", "green solid"],
+    ["Talking",      "#00c0ff", "cyan solid"],
+    ["Thinking",     "#ff8800", "amber breath"],
+    ["WakeAck",      "#ffffff", "white flash"],
+    ["Speaking",     "#ff3080", "pink solid"],
+    ["Muted",        "#ff2010", "red solid"],
+    ["Error",        "#ff2010", "red breath (fast)"],
+  ];
+  const statusEl = document.getElementById('status');
+  function send(url, label) {
+    statusEl.textContent = '…' + label;
+    fetch(url).then(r => r.ok
+      ? statusEl.textContent = '✓ ' + label
+      : statusEl.textContent = '✗ ' + label + ' (' + r.status + ')')
+      .catch(() => statusEl.textContent = '✗ ' + label + ' (no response)');
+  }
+  const g = document.getElementById('states');
+  STATES.forEach(([name, hex, desc], i) => {
+    const b = document.createElement('button');
+    b.innerHTML = '<span class="sw" style="color:' + hex + '"></span>' + name +
+                  '<small>' + desc + '</small>';
+    b.onclick = () => send('/state?s=' + i, name);
+    g.appendChild(b);
+  });
+  const col = document.getElementById('col'), colhex = document.getElementById('colhex');
+  const br = document.getElementById('br'), brv = document.getElementById('brv');
+  const sp = document.getElementById('sp'), spv = document.getElementById('spv');
+  col.oninput = () => colhex.textContent = col.value;
+  br.oninput = () => brv.textContent = br.value;
+  sp.oninput = () => spv.textContent = sp.value;
+  function applyEffect() {
+    const h = col.value;                 // "#rrggbb"
+    const r = parseInt(h.substr(1,2),16), gg = parseInt(h.substr(3,2),16), b = parseInt(h.substr(5,2),16);
+    const e = document.getElementById('eff').value;
+    send('/effect?e=' + e + '&r=' + r + '&g=' + gg + '&b=' + b +
+         '&br=' + br.value + '&sp=' + sp.value,
+         'effect ' + document.getElementById('eff').selectedOptions[0].text);
+  }
+</script>
+</body>
+</html>

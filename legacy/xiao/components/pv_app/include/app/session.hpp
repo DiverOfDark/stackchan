@@ -48,6 +48,9 @@ public:
     void start();
     void stop();
 
+    // The LED ring driver, exposed so the web LED-test UI can drive effects.
+    Ui& ui() { return ui_; }
+
 private:
     // Build a fresh Peer + push the local offer. Called once at
     // start() and again on retry-tick after a PeerLost.

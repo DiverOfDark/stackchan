@@ -4,6 +4,7 @@
 set(APP_SRCS
     "src/ui.cpp"
     "src/session.cpp"
+    "src/led_test_server.cpp"
 )
 
 idf_component_register(
@@ -13,4 +14,5 @@ idf_component_register(
         pv_domain
         pv_hal
         pv_transport
+        esp_http_server
 )

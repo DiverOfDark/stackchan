@@ -51,11 +51,20 @@ Ui::Ui(hal::Xvf3800& ring) : ring_(ring)
 
 void Ui::setLed(domain::LedState s)
 {
+    std::lock_guard<std::mutex> lk(mu_);
     const int64_t now = esp_timer_get_time();
+    // A web LED-test override owns the ring; ignore state-machine updates.
+    if (overrideActive(now)) return;
     // Honour the wake-ack hold (subsequent live ticks should not
     // immediately mask a fresh wake flash).
     if (s != domain::LedState::WakeAck && now < hold_until_us_) return;
-    if (s == last_pushed_) return;
+    if (!force_ && s == last_pushed_) return;
+    force_ = false;
+    applyState(s, now);
+}
+
+void Ui::applyState(domain::LedState s, const int64_t now)
+{
     last_pushed_ = s;
     ESP_LOGI(kTag, "→ %s", stateName(s));
 
@@ -97,6 +106,43 @@ void Ui::setLed(domain::LedState s)
         ring_.setColor(kRed);    ring_.setSpeed(0xC0);  ring_.setEffect(EF::Breath);
         break;
     }
+}
+
+bool Ui::overrideActive(const int64_t now)
+{
+    if (override_until_us_ == 0) return false;
+    if (now < override_until_us_) return true;
+    // Override just expired — resume the state machine and force the next
+    // setLed() to re-apply even if the computed state equals last_pushed_.
+    override_until_us_ = 0;
+    force_ = true;
+    return false;
+}
+
+void Ui::overrideEffect(hal::Effect e, hal::Rgb colour,
+                        uint8_t brightness, uint8_t speed, int hold_ms)
+{
+    std::lock_guard<std::mutex> lk(mu_);
+    override_until_us_ = esp_timer_get_time() + static_cast<int64_t>(hold_ms) * 1000;
+    ring_.setColor(colour);
+    ring_.setBrightness(brightness);
+    ring_.setSpeed(speed);
+    ring_.setEffect(e);
+}
+
+void Ui::overrideState(domain::LedState s, int hold_ms)
+{
+    std::lock_guard<std::mutex> lk(mu_);
+    const int64_t now = esp_timer_get_time();
+    override_until_us_ = now + static_cast<int64_t>(hold_ms) * 1000;
+    applyState(s, now);   // drive the real mapping directly
+}
+
+void Ui::resumeAuto()
+{
+    std::lock_guard<std::mutex> lk(mu_);
+    override_until_us_ = 0;
+    force_ = true;
 }
 
 void Ui::tick(const domain::LedInputs& in)

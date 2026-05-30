@@ -26,14 +26,16 @@
 #include "hal/sntp.hpp"
 #include "hal/wifi_sta.hpp"
 #include "hal/xvf3800.hpp"
+#include "app/led_test_server.hpp"
 #include "app/session.hpp"
 #include "transport/signaling.hpp"
 
-// Captive-portal HTML payload, embedded as a byte blob by the existing
-// captive_portal_index_html.c translation unit.
+// HTML payloads, embedded as byte blobs by the *_html.c translation units.
 extern "C" {
 extern const char  captive_portal_index_html[];
 extern const size_t captive_portal_index_html_len;
+extern const char  led_test_html[];
+extern const size_t led_test_html_len;
 }
 
 namespace {
@@ -168,6 +170,15 @@ void decideAndRun()
         std::move(ice),
     };
     session.start();
+
+    // LED-test web UI — http://<device-ip>/ — drives the ring through the
+    // session's Ui override so effects can be previewed without the
+    // conversation state machine reverting them. Held static like the session.
+    static auto led_web = app::LedTestServer::start(
+        session.ui(),
+        reinterpret_cast<const uint8_t*>(led_test_html),
+        led_test_html_len);
+    if (!led_web) ESP_LOGW(kTag, "LED-test web UI failed to start");
 
     // The session's worker tasks own the runtime. Stay alive so
     // ring/audio/button stack-locals don't fall off the end of
