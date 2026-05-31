@@ -135,9 +135,19 @@ and around teardown. `peer_->tick()` stays lock-free (same task as teardown).
   backend round-trip instead of dropping to green mid-wait).
 
 ## Backend (`app/bot.py`, pipecat)
-- Pipeline: SmallWebRTC in → FastWhisper STT (ru, large-v3-turbo INT8) →
-  LLMUserAggregator → OpenAI-compatible LLM → Piper TTS (`ru_RU-ruslan-medium`) →
-  SmallWebRTC out. Silero VAD + turn analyzer for end-of-utterance.
+- Pipeline: SmallWebRTC in → STT → LLMUserAggregator → OpenAI-compatible LLM →
+  TTS → SmallWebRTC out. Silero VAD + turn analyzer for end-of-utterance.
+- **STT/TTS are provider-switchable** via `STT_PROVIDER` / `TTS_PROVIDER` env:
+  - `elevenlabs` (default): ElevenLabs **Scribe** STT (`scribe_v2`, ru) + **custom
+    Agent-Smith voice** TTS (`eleven_flash_v2_5`, `ELEVENLABS_VOICE_ID` set per-deploy
+    via chart values, `pcm_16000`). Cloud — needs `ELEVENLABS_API_KEY` (chart ExternalSecret →
+    openbao `voice-assistant/elevenlabs` property `api_key`). Scribe needs the
+    shared `_aiohttp_session` (lifespan). Voice character: `ELEVENLABS_STABILITY`
+    (lower=more menacing) / `ELEVENLABS_SIMILARITY`.
+  - `whisper`/`piper`: the local, no-cloud fallback (FastWhisper large-v3-turbo
+    INT8, Piper). lifespan only prewarms the local model a chosen provider uses.
+- **Persona:** the LLM system prompt (chart `values.yaml systemPrompt`, authoritative
+  in-cluster) is an Agent Smith style — calm/cold/measured but still helpful, Russian.
 - `idle_timeout_secs=None`: the **device** owns session lifecycle (connect on
   wake, hang up after the turn); the backend must not unilaterally cancel a live
   conversation. (Default 300 s used to kill the persistent connection at 5 min.)
@@ -216,5 +226,5 @@ deploy together.
 - Piper loads per connection on the backend (latency).
 - XVF3800 AEC config still uses a half-duplex echo guard (`kEchoGuardMs`) rather
   than full AEC reference tuning.
-- A custom voice (e.g. an "Agent Smith"-style soundalike via ElevenLabs/Cartesia)
-  was discussed but not built — would be a `bot.py` TTS-service swap + persona prompt.
+- The Agent Smith voice (ElevenLabs Scribe STT + custom-voice TTS) is now the
+  default; tune persona via `systemPrompt` and timbre via stability/similarity.
