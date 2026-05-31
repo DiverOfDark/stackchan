@@ -114,6 +114,14 @@ private:
     std::atomic<uint32_t>                  rx_audio_pkts_{0};      // inbound (downlink) audio packets
     std::atomic<int32_t>                   rx_audio_last_peak_{0}; // peak of the last decoded frame
     std::atomic<int32_t>                   rx_audio_max_peak_{0};  // loudest decoded frame since boot
+    // Tick of the last inbound audio packet (ANY, incl. silence keep-alive).
+    // A healthy backend streams continuously, so a long gap while connected
+    // means the media path died — used by mainLoop to reconnect mid-session.
+    std::atomic<TickType_t>                last_rx_pkt_tick_{0};
+    // Set by onPeerState on a libpeer-detected drop (Failed/Disconnected/Closed);
+    // mainLoop reacts (reconnect or end). Distinct from media-liveness so both
+    // a clean ICE close and a silent media death are handled the same way.
+    std::atomic<bool>                      peer_dead_{false};
     // Conversation gate: false until the wake word fires, true while a turn is
     // in progress, back to false after a silence timeout. Mic audio is only
     // streamed to the backend while this is true.

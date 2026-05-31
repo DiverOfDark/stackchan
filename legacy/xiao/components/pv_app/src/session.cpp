@@ -26,6 +26,14 @@ constexpr int  kSessionIdleTimeoutMs  = 10'000;
 // On-demand connect: give up bring-up if relay/ICE/DTLS doesn't reach
 // Completed within this window, so a failed connect doesn't strand the turn.
 constexpr int  kConnectTimeoutMs      = 12'000;
+// A healthy backend streams downlink audio continuously (~50 pkts/s, silence
+// between TTS). No inbound packet for this long while connected ⇒ the media
+// path is dead even if ICE consent still trickles through the relay — trigger
+// a reconnect. Generous so brief jitter never false-triggers it.
+constexpr int  kMediaDeadMs           = 5'000;
+// Reconnect attempts within one turn before giving up and ending the session.
+// Bounds a flapping/broken relay so it can't loop forever.
+constexpr int  kMaxReconnectsPerTurn  = 3;
 constexpr int  kSpeakingPcmThreshold  = 1000;     // ~ -30 dBFS
 // Drives the TALKING LED only — NOT uplink gating. Turn detection lives on
 // the backend (Silero VAD); a device-side energy gate on top of it just
@@ -220,6 +228,8 @@ void Session::onPeerState(transport::PeerState s)
         // utterance now that connected_ is true.
         connected_          = true;
         last_rx_frame_tick_ = 0;
+        last_rx_pkt_tick_   = xTaskGetTickCount();   // liveness baseline
+        peer_dead_          = false;
         // Restart the turn clock at connect: bring-up may have eaten most of the
         // window the wake word set, and the user's speech (buffered during
         // bring-up) won't bump it again — so give the backend a full window from
@@ -234,13 +244,14 @@ void Session::onPeerState(transport::PeerState s)
     case PeerState::Failed:
     case PeerState::Disconnected:
     case PeerState::Closed:
-        // Session ended — either we tore it down at end-of-turn or it dropped.
-        // No auto-reconnect in the on-demand model: go dark and wait for the
-        // next wake word. mainLoop reaps peer_ (under peer_mtx_).
-        connected_           = false;
-        conversation_active_ = false;
+        // libpeer detected the path dropped. Flag it but DON'T end the turn
+        // here — mainLoop decides whether to reconnect (mid-conversation) or
+        // give up, the same way it handles a silent media death. Don't touch
+        // peer_ from this callback: it runs inside peer_->tick().
+        connected_ = false;
+        peer_dead_ = true;
         reconnects_.fetch_add(1);
-        ui_.setLed(domain::LedState::Off);
+        ui_.setLed(domain::LedState::Negotiating);
         fsm_.onEvent(domain::SessionEvent::PeerLost);
         break;
     }
@@ -266,6 +277,10 @@ void Session::onLocalSdp(std::string sdp)
 void Session::onInboundAudio(const uint8_t* data, std::size_t size)
 {
     if (!data || size == 0 || !playback_buf_) return;
+
+    // Liveness: any inbound packet (incl. silence keep-alive) proves the media
+    // path is alive. mainLoop watches this to detect a dead path mid-session.
+    last_rx_pkt_tick_ = xTaskGetTickCount();
 
     // Inbound is G.722: each octet decodes to two 16 kHz samples, ready for the
     // I2S DAC with no resampling. Cap the payload so 2× expansion can't
@@ -312,16 +327,23 @@ void Session::playbackTaskEntry(void* arg) { static_cast<Session*>(arg)->playbac
 void Session::mainLoopTask()
 {
     TickType_t connect_started = 0;
+    bool       prev_want       = false;
+    int        reconnects      = 0;   // mid-talk reconnects used this turn
+
     while (running_.load()) {
-        const bool want = conversation_active_.load();
-        const bool have = (peer_ != nullptr);
+        const TickType_t now  = xTaskGetTickCount();
+        const bool       want = conversation_active_.load();
+        const bool       have = (peer_ != nullptr);
+        if (want && !prev_want) reconnects = 0;   // a fresh turn resets the budget
+        prev_want = want;
 
         if (want && !have) {
-            // Wake word armed a turn → bring up a fresh session. The capture
-            // task is already buffering the user's speech into the backlog ring,
-            // so nothing spoken during bring-up is lost.
-            ESP_LOGI(kTag, "wake → connecting");
-            connect_started = xTaskGetTickCount();
+            // Bring up a session — a fresh wake, or a rebuild after a mid-talk
+            // drop. The capture task is already buffering the user's speech into
+            // the backlog ring, so nothing spoken during bring-up is lost.
+            ESP_LOGI(kTag, "%s", reconnects ? "reconnecting" : "wake → connecting");
+            connect_started = now;
+            peer_dead_      = false;
             if (!buildAndOffer()) {
                 ESP_LOGE(kTag, "buildAndOffer failed; abandoning turn");
                 conversation_active_ = false;
@@ -329,11 +351,11 @@ void Session::mainLoopTask()
                 peer_.reset();
             }
         } else if (!want && have) {
-            // Conversation ended (or connect failed/timed out) → tear the
-            // session down and go idle. The backend sees the peer drop and
-            // reaps its pipeline; the next wake word starts clean. The lock +
-            // connected_=false here pair with the capture task's send guard so
-            // we never destroy peer_ out from under an in-flight sendAudio.
+            // Conversation ended (or we've given up) → tear the session down and
+            // go idle. The backend sees the peer drop and reaps its pipeline;
+            // the next wake word starts clean. The lock + connected_=false here
+            // pair with the capture task's send guard so we never destroy peer_
+            // out from under an in-flight sendAudio.
             ESP_LOGI(kTag, "conversation ended → disconnecting");
             {
                 std::lock_guard<std::mutex> lk(peer_mtx_);
@@ -341,10 +363,30 @@ void Session::mainLoopTask()
                 peer_.reset();
             }
             ui_.setLed(domain::LedState::Off);
-        } else if (want && have && !connected_.load()) {
-            // Still negotiating — abandon the turn if bring-up stalls so a
-            // failed connect doesn't strand conversation_active_ forever.
-            if (xTaskGetTickCount() - connect_started > pdMS_TO_TICKS(kConnectTimeoutMs)) {
+        } else if (want && have) {
+            // A turn is live. Detect a dropped connection two ways: libpeer
+            // flagged it (peer_dead_, e.g. ICE consent lost), or — the silent
+            // case where consent survives but media stopped — no inbound audio
+            // for kMediaDeadMs while connected. Either way reconnect (the user
+            // is mid-talk), up to a cap, then give up and end the session.
+            const bool media_dead =
+                connected_.load() && (now - last_rx_pkt_tick_.load()) > pdMS_TO_TICKS(kMediaDeadMs);
+            if (peer_dead_.load() || media_dead) {
+                if (reconnects < kMaxReconnectsPerTurn) {
+                    ++reconnects;
+                    ESP_LOGW(kTag, "connection lost mid-talk (%s) → reconnect %d/%d",
+                             peer_dead_.load() ? "peer" : "media", reconnects, kMaxReconnectsPerTurn);
+                    ui_.setLed(domain::LedState::Negotiating);
+                    std::lock_guard<std::mutex> lk(peer_mtx_);
+                    connected_ = false;
+                    peer_.reset();   // next iteration rebuilds (want && !have)
+                } else {
+                    ESP_LOGW(kTag, "connection lost; reconnects exhausted → ending session");
+                    conversation_active_ = false;
+                }
+            } else if (!connected_.load() &&
+                       (now - connect_started) > pdMS_TO_TICKS(kConnectTimeoutMs)) {
+                // Still negotiating and stalled → abandon the turn.
                 ESP_LOGW(kTag, "connect timed out; abandoning turn");
                 conversation_active_ = false;
             }
