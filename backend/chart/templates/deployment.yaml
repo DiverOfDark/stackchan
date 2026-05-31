@@ -61,6 +61,13 @@ spec:
                 secretKeyRef:
                   name: {{ include "voice-assistant.hermesSecretName" . }}
                   key: {{ .Values.hermes.apiKey.secretKey }}
+            {{- if or (eq .Values.stt.provider "elevenlabs") (eq .Values.tts.provider "elevenlabs") }}
+            - name: ELEVENLABS_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "voice-assistant.elevenlabsSecretName" . }}
+                  key: {{ .Values.elevenlabs.apiKey.secretKey }}
+            {{- end }}
             - name: STUNNER_TURN_USERNAME
               valueFrom:
                 secretKeyRef:

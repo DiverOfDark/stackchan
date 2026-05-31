@@ -14,6 +14,13 @@ data:
   WHISPER_BEST_OF: {{ .Values.whisper.bestOf | quote }}
   OMP_NUM_THREADS: {{ .Values.whisper.ompThreads | quote }}
   PIPER_VOICE: {{ .Values.piper.voice | quote }}
+  STT_PROVIDER: {{ .Values.stt.provider | quote }}
+  TTS_PROVIDER: {{ .Values.tts.provider | quote }}
+  ELEVENLABS_VOICE_ID: {{ .Values.elevenlabs.voiceId | quote }}
+  ELEVENLABS_TTS_MODEL: {{ .Values.elevenlabs.ttsModel | quote }}
+  ELEVENLABS_STT_MODEL: {{ .Values.elevenlabs.sttModel | quote }}
+  ELEVENLABS_STABILITY: {{ .Values.elevenlabs.stability | quote }}
+  ELEVENLABS_SIMILARITY: {{ .Values.elevenlabs.similarity | quote }}
   HF_HOME: "/models/hf"
   PIPER_DOWNLOAD_DIR: "/models/piper"
   HTTP_PORT: "7860"

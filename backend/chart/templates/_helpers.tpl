@@ -51,6 +51,17 @@ Name of the K8s Secret that holds the Hermes API key.
 {{- end -}}
 
 {{/*
+Name of the K8s Secret that holds the ElevenLabs API key.
+*/}}
+{{- define "voice-assistant.elevenlabsSecretName" -}}
+{{- if .Values.elevenlabs.apiKey.existingSecret -}}
+{{- .Values.elevenlabs.apiKey.existingSecret -}}
+{{- else -}}
+{{- printf "%s-elevenlabs" (include "voice-assistant.fullname" .) -}}
+{{- end -}}
+{{- end -}}
+
+{{/*
 Name of the K8s Secret that holds the STUNner TURN credentials.
 */}}
 {{- define "voice-assistant.turnSecretName" -}}

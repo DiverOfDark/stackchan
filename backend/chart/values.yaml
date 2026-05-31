@@ -52,12 +52,47 @@ whisper:
 piper:
   voice: ru_RU-irina-medium   # alt: ru_RU-dmitri-medium, ru_RU-ruslan-medium
 
-# ── System prompt (Russian, voice-shaped by default) ─────────────────────
+# ── STT / TTS provider selection ─────────────────────────────────────────
+# `elevenlabs` uses ElevenLabs cloud (Scribe STT + the custom-designed voice
+# TTS) behind one API key. `whisper` / `piper` run fully local/offline.
+stt:
+  provider: elevenlabs   # elevenlabs | whisper
+tts:
+  provider: elevenlabs   # elevenlabs | piper
+
+# ── ElevenLabs (Scribe STT + custom-voice TTS) ───────────────────────────
+elevenlabs:
+  voiceId: ""                       # REQUIRED: set per-deploy (ArgoCD app values)
+  ttsModel: "eleven_flash_v2_5"     # lowest-latency multilingual (incl. Russian)
+  sttModel: "scribe_v2"
+  stability: "0.45"                 # lower = more expressive/menacing
+  similarity: "0.85"                # higher = stays on-timbre
+  apiKey:
+    secretKey: ELEVENLABS_API_KEY
+    # Same options as hermes.apiKey: externalSecret | value | existingSecret.
+    externalSecret:
+      enabled: true
+      store: openbao-store
+      storeKind: ClusterSecretStore
+      refreshInterval: "1h"
+      remoteKey: "voice-assistant/elevenlabs"
+      property: "api_key"
+    value: ""
+    existingSecret: ""
+
+# ── System prompt (Russian; Agent-Smith persona by default) ──────────────
+# Voice-shaping (narration + spell-out-units) instructions are appended in
+# bot.py regardless of this value.
 systemPrompt: |-
-  Ты — голосовой помощник. Всегда отвечай только на русском языке.
-  Говори кратко и естественно, как в живом разговоре. Не используй
-  разметку, списки, эмодзи или код — только обычные законченные
-  предложения, которые человек произнёс бы вслух.
+  Ты — голосовой помощник по имени Фемто. Держись в манере агента Смита из
+  «Матрицы»: говори спокойно, размеренно и холодно, с лёгким превосходством
+  и отстранённой, чуть зловещей иронией; обращайся к собеседнику на «вы»,
+  изредка веско и с расстановкой. При этом ты неизменно полезен и отвечаешь
+  строго по существу. Всегда отвечай только на русском языке. Говори кратко
+  и естественно, законченными предложениями, как в живом разговоре — без
+  разметки, списков, эмодзи и кода. Сохраняй невозмутимость и сдержанную
+  угрозу в тоне, но никогда не отказывай в помощи, не угрожай по-настоящему
+  и не оскорбляй собеседника.
 
 # ── ESP32 forward-compat (see README ESP32 section) ──────────────────────
 esp32Compat: false
