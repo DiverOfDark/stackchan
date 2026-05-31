@@ -519,7 +519,11 @@ void Session::playbackTask()
 {
     static int16_t mono  [domain::kFramesPerPacket];
     static int32_t stereo[domain::kFramesPerPacket * hal::AudioIo::kChannels];
-    static int16_t chirp [domain::kChirpMaxSamples];
+    // Chirp scratch lives in PSRAM — at ~28 KB it would crowd the scarce
+    // internal RAM. Allocated once for the task's lifetime.
+    int16_t* chirp = static_cast<int16_t*>(
+        heap_caps_malloc(domain::kChirpMaxSamples * sizeof(int16_t), MALLOC_CAP_SPIRAM));
+    if (!chirp) ESP_LOGW(kTag, "chirp buffer alloc failed; UI chirps disabled");
 
     while (running_.load()) {
         // Local UI chirp (wake / end-of-session). Synthesised and played here,
@@ -527,7 +531,7 @@ void Session::playbackTask()
         // It briefly pre-empts playback — fine, since wake fires before any TTS
         // and end fires after it has stopped.
         const int ch = chirp_pending_.exchange(-1);
-        if (ch >= 0) {
+        if (ch >= 0 && chirp) {
             const std::size_t cn =
                 domain::synth_chirp(static_cast<domain::Chirp>(ch), chirp, domain::kChirpMaxSamples);
             for (std::size_t off = 0; off < cn; off += domain::kFramesPerPacket) {
@@ -571,6 +575,7 @@ void Session::playbackTask()
             .conversation_active = conversation_active_.load(),
         });
     }
+    if (chirp) heap_caps_free(chirp);
     vTaskDelete(nullptr);
 }
 
