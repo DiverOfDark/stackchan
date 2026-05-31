@@ -182,6 +182,23 @@ void Session::stop()
 
 bool Session::buildAndOffer()
 {
+    // The STUNner TURN credentials are fetched once at boot. If that fetch
+    // failed (e.g. the backend was restarting), ice_ is empty — and with no
+    // relay the device can't reach the in-cluster backend (its pod IP isn't
+    // LAN-routable), so ICE never completes and the connect times out. Re-fetch
+    // lazily here so a bad boot fetch / backend restart self-heals on the next
+    // wake instead of stranding the device until a reboot. Only when empty, so
+    // the happy path adds no latency.
+    if (ice_.empty()) {
+        ESP_LOGW(kTag, "no ICE servers cached — re-fetching from backend");
+        auto raw = signaling_.fetchIceServers();
+        ice_.clear();
+        ice_.reserve(raw.size());
+        for (auto& s : raw)
+            ice_.push_back({std::move(s.url), std::move(s.username), std::move(s.credential)});
+        ESP_LOGI(kTag, "ICE: %u server(s) after re-fetch", (unsigned)ice_.size());
+    }
+
     peer_.reset();
     peer_ = transport::Peer::create(ice_);
     if (!peer_) return false;
