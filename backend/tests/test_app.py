@@ -13,9 +13,17 @@ from fastapi.testclient import TestClient
 
 @pytest.fixture
 def bot_module(monkeypatch):
-    """Reload bot.py with the configured WHISPER_MODEL default."""
+    """Reload bot.py pinned to the LOCAL providers (whisper/piper).
+
+    The default provider is now ``elevenlabs``, which intentionally skips the
+    local model prewarms. These lifespan/endpoint tests assert on the local
+    prewarm path, so pin whisper/piper here; the elevenlabs skip is covered by
+    its own test below.
+    """
     monkeypatch.delenv("WHISPER_MODEL", raising=False)
     monkeypatch.delenv("PIPER_VOICE", raising=False)
+    monkeypatch.setenv("STT_PROVIDER", "whisper")
+    monkeypatch.setenv("TTS_PROVIDER", "piper")
     import bot
 
     importlib.reload(bot)
@@ -41,11 +49,32 @@ def mocked_prewarm(bot_module, monkeypatch):
 
 
 def test_lifespan_calls_both_prewarms(bot_module, mocked_prewarm):
-    """Entering the lifespan context must call both prewarm hooks once."""
+    """With local providers, the lifespan must call both prewarm hooks once."""
     with TestClient(bot_module.app) as client:
         client.get("/health")
     assert mocked_prewarm["whisper"] == 1
     assert mocked_prewarm["piper"] == 1
+
+
+def test_lifespan_skips_local_prewarm_for_elevenlabs(monkeypatch):
+    """ElevenLabs providers must skip the local Whisper/Piper prewarms.
+
+    Loading the ~1.5 GB Whisper model when a cloud provider handles STT/TTS is
+    pure waste — the lifespan gates each prewarm on its provider being local.
+    """
+    monkeypatch.setenv("STT_PROVIDER", "elevenlabs")
+    monkeypatch.setenv("TTS_PROVIDER", "elevenlabs")
+    import bot
+
+    importlib.reload(bot)
+    calls = {"whisper": 0, "piper": 0}
+    monkeypatch.setattr(bot, "_prewarm_whisper",
+                        lambda app: calls.__setitem__("whisper", calls["whisper"] + 1))
+    monkeypatch.setattr(bot, "_prewarm_piper",
+                        lambda app: calls.__setitem__("piper", calls["piper"] + 1))
+    with TestClient(bot.app) as client:
+        client.get("/health")
+    assert calls == {"whisper": 0, "piper": 0}
 
 
 def test_health_endpoint(bot_module, mocked_prewarm):
