@@ -91,3 +91,7 @@ add_domain_test(test_g711
 add_domain_test(test_g722
     ${DOMAIN_DIR}/src/g722.cpp
     ${DOMAIN_DIR}/test/test_g722.cpp)
+
+# chirp.hpp is header-only.
+add_domain_test(test_chirp
+    ${DOMAIN_DIR}/test/test_chirp.cpp)

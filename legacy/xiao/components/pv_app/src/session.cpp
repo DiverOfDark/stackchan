@@ -460,6 +460,7 @@ void Session::captureTask()
                 domain::g722_init(g722_enc_);
                 r_head = r_count = 0;
                 bot_replied_ = false;   // awaiting this turn's first reply
+                chirp_pending_ = static_cast<int>(domain::Chirp::Wake);  // "online" blip
             }
             turn_deadline_ = now + pdMS_TO_TICKS(kAwaitResponseMs);
         }
@@ -471,6 +472,7 @@ void Session::captureTask()
         if (conversation_active_.load()) {
             if (now > turn_deadline_.load()) {
                 conversation_active_ = false;
+                chirp_pending_ = static_cast<int>(domain::Chirp::End);  // "offline" blip
                 ESP_LOGI(kTag, "conversation idle — wake word required again");
             }
         }
@@ -517,8 +519,28 @@ void Session::playbackTask()
 {
     static int16_t mono  [domain::kFramesPerPacket];
     static int32_t stereo[domain::kFramesPerPacket * hal::AudioIo::kChannels];
+    static int16_t chirp [domain::kChirpMaxSamples];
 
     while (running_.load()) {
+        // Local UI chirp (wake / end-of-session). Synthesised and played here,
+        // the sole I2S writer, so it can't race the TTS stream on the speaker.
+        // It briefly pre-empts playback — fine, since wake fires before any TTS
+        // and end fires after it has stopped.
+        const int ch = chirp_pending_.exchange(-1);
+        if (ch >= 0) {
+            const std::size_t cn =
+                domain::synth_chirp(static_cast<domain::Chirp>(ch), chirp, domain::kChirpMaxSamples);
+            for (std::size_t off = 0; off < cn; off += domain::kFramesPerPacket) {
+                const std::size_t f = std::min(domain::kFramesPerPacket, cn - off);
+                for (std::size_t i = 0; i < f; ++i) {
+                    const int32_t s = static_cast<int32_t>(chirp[off + i]) << 16;
+                    stereo[i * hal::AudioIo::kChannels + kAecRefTxChannel]       = s;
+                    stereo[i * hal::AudioIo::kChannels + (1 - kAecRefTxChannel)] = 0;
+                }
+                audio_.write(stereo, f);
+            }
+        }
+
         std::size_t got = playback_buf_
             ? xStreamBufferReceive(playback_buf_, mono, sizeof(mono),
                                    pdMS_TO_TICKS(50))

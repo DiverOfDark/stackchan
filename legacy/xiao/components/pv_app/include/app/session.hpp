@@ -20,6 +20,7 @@
 #include "freertos/task.h"
 
 #include "domain/audio_frame.hpp"
+#include "domain/chirp.hpp"
 #include "domain/g722.hpp"
 #include "domain/session_fsm.hpp"
 #include "hal/audio_io.hpp"
@@ -122,6 +123,12 @@ private:
     // once true, only the post-reply silence window governs, so ambient room
     // noise can't hold the session open indefinitely after the answer.
     std::atomic<bool>                      bot_replied_{false};
+    // A local UI chirp to play (domain::Chirp cast to int, -1 = none). Set by
+    // the capture task on wake / end-of-session; consumed and played by the
+    // playback task (the sole I2S writer), so there's no cross-task contention
+    // on the speaker path. Works even with no peer connection (wake/end happen
+    // off-session in the on-demand model).
+    std::atomic<int>                       chirp_pending_{-1};
     // Tick by which the turn ends unless pushed forward by user speech (await
     // regime) or a bot TTS frame (post-reply regime). See the capture task.
     std::atomic<TickType_t>                turn_deadline_{0};
