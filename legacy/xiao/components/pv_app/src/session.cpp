@@ -61,8 +61,15 @@ constexpr int  kEchoGuardMs           = 400;
 // after connect. Generous so we don't tear the turn down right before the
 // answer; reset when the peer reaches Completed (see onPeerState) so the clock
 // starts at connect, not at the user's speech during bring-up.
-constexpr int  kAwaitResponseMs       = 15000;   // user/bot still expected
-constexpr int  kPostResponseSilenceMs = 5000;    // follow-up window after a reply
+constexpr int  kAwaitResponseMs       = 20000;   // user/bot still expected
+// Gap tolerance after a bot TTS chunk. The reply is multi-part — narration →
+// tool call → answer sentences — with 4-5 s (sometimes much longer) silent gaps
+// while a tool runs. At 5 s the device tore the session down inside those gaps
+// and lost the rest of the answer (confirmed: hung up exactly 5 s after the last
+// loud frame). 15 s comfortably bridges inter-sentence + typical tool gaps and
+// doubles as a hands-free follow-up window. (A backend end-of-turn signal over a
+// data channel would let us shorten this — see CLAUDE.md open items.)
+constexpr int  kPostResponseSilenceMs = 15000;   // bridge tool/inter-sentence gaps + follow-up
 
 constexpr int  kMainStack             = 32 * 1024;
 constexpr int  kCapStack              = 32 * 1024;
