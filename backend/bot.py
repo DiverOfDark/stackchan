@@ -63,9 +63,13 @@ from pipecat.processors.aggregators.llm_response_universal import (
     LLMContextAggregatorPair,
     LLMUserAggregatorParams,
 )
+from pipecat.services.elevenlabs.stt import ElevenLabsSTTService
+from pipecat.services.elevenlabs.tts import ElevenLabsTTSService
 from pipecat.services.openai.llm import OpenAILLMService
 from pipecat.services.piper.tts import PiperTTSService
 from pipecat.services.whisper.stt import WhisperSTTService
+
+import aiohttp
 
 from whisper_fast import FastWhisperSTTService
 from pipecat.transcriptions.language import Language
@@ -96,6 +100,27 @@ WHISPER_BEST_OF = int(os.getenv("WHISPER_BEST_OF", "1"))
 PIPER_VOICE = os.getenv("PIPER_VOICE", "ru_RU-irina-medium")
 PIPER_DOWNLOAD_DIR = Path(os.getenv("PIPER_DOWNLOAD_DIR", "/models/piper"))
 
+# ── STT/TTS provider selection ───────────────────────────────────────────
+# ElevenLabs consolidates STT (Scribe) + TTS (the custom Agent Smith voice)
+# behind one key; whisper/piper stay the local, no-cloud fallback. Flip these
+# back to whisper/piper to run fully offline.
+STT_PROVIDER = os.getenv("STT_PROVIDER", "elevenlabs").lower()   # elevenlabs | whisper
+TTS_PROVIDER = os.getenv("TTS_PROVIDER", "elevenlabs").lower()   # elevenlabs | piper
+ELEVENLABS_API_KEY = os.getenv("ELEVENLABS_API_KEY", "")
+# No default — set per-deploy via the Helm chart values (ELEVENLABS_VOICE_ID).
+ELEVENLABS_VOICE_ID = os.getenv("ELEVENLABS_VOICE_ID", "")
+# Flash = lowest-latency multilingual model (incl. Russian) — best for a voice loop.
+ELEVENLABS_TTS_MODEL = os.getenv("ELEVENLABS_TTS_MODEL", "eleven_flash_v2_5")
+ELEVENLABS_STT_MODEL = os.getenv("ELEVENLABS_STT_MODEL", "scribe_v2")
+# Voice character: lower stability = more expressive/menacing; high similarity
+# keeps it on-timbre. Tunable per-deploy without re-designing the voice.
+ELEVENLABS_STABILITY = float(os.getenv("ELEVENLABS_STABILITY", "0.45"))
+ELEVENLABS_SIMILARITY = float(os.getenv("ELEVENLABS_SIMILARITY", "0.85"))
+
+# Shared aiohttp session for cloud services (ElevenLabs Scribe needs one).
+# Created in the FastAPI lifespan, reused across connections, closed on shutdown.
+_aiohttp_session: "aiohttp.ClientSession | None" = None
+
 HTTP_HOST = os.getenv("HTTP_HOST", "0.0.0.0")
 HTTP_PORT = int(os.getenv("HTTP_PORT", "7860"))
 
@@ -108,10 +133,15 @@ STUNNER_TURN_USERNAME = os.getenv("STUNNER_TURN_USERNAME", "")
 STUNNER_TURN_PASSWORD = os.getenv("STUNNER_TURN_PASSWORD", "")
 
 _DEFAULT_SYSTEM_PROMPT = (
-    "Ты — голосовой помощник. Всегда отвечай только на русском языке. "
-    "Говори кратко и естественно, как в живом разговоре. Не используй "
-    "разметку, списки, эмодзи или код — только обычные законченные "
-    "предложения, которые человек произнёс бы вслух."
+    "Ты — голосовой помощник по имени Фемто. Держись в манере агента Смита из "
+    "«Матрицы»: говори спокойно, размеренно и холодно, с лёгким превосходством "
+    "и отстранённой, чуть зловещей иронией; обращайся к собеседнику на «вы», "
+    "изредка веско и с расстановкой. При этом ты неизменно полезен и отвечаешь "
+    "строго по существу. Всегда отвечай только на русском языке. Говори кратко "
+    "и естественно, законченными предложениями, как в живом разговоре — без "
+    "разметки, списков, эмодзи и кода. Сохраняй невозмутимость и сдержанную "
+    "угрозу в тоне, но никогда не отказывай в помощи, не угрожай по-настоящему "
+    "и не оскорбляй собеседника."
 )
 
 # Tool-narration instruction: with Hermes-agent the assistant may run several
@@ -261,14 +291,24 @@ async def run_bot(webrtc_connection):
     # FastWhisperSTTService wraps the underlying WhisperModel.transcribe to
     # inject beam_size/best_of (pipecat's stock WhisperSTTService doesn't
     # expose them).
-    stt = FastWhisperSTTService(
-        model=WHISPER_MODEL,
-        device="cpu",
-        compute_type=WHISPER_COMPUTE_TYPE,
-        beam_size=WHISPER_BEAM_SIZE,
-        best_of=WHISPER_BEST_OF,
-        settings=WhisperSTTService.Settings(language=Language.RU),
-    )
+    if STT_PROVIDER == "elevenlabs":
+        # ElevenLabs Scribe (cloud, batch). Runs on VAD-segmented utterances —
+        # which we already wait for — and frees the local ~1.5 GB Whisper + CPU.
+        stt = ElevenLabsSTTService(
+            api_key=ELEVENLABS_API_KEY,
+            aiohttp_session=_aiohttp_session,
+            model=ELEVENLABS_STT_MODEL,
+            params=ElevenLabsSTTService.InputParams(language=Language.RU),
+        )
+    else:
+        stt = FastWhisperSTTService(
+            model=WHISPER_MODEL,
+            device="cpu",
+            compute_type=WHISPER_COMPUTE_TYPE,
+            beam_size=WHISPER_BEAM_SIZE,
+            best_of=WHISPER_BEST_OF,
+            settings=WhisperSTTService.Settings(language=Language.RU),
+        )
 
     # LLM — Hermes via its OpenAI-compatible API.
     # Streaming is hardcoded on by pipecat (BaseOpenAILLMService._build_chat_completion_params
@@ -286,10 +326,25 @@ async def run_bot(webrtc_connection):
 
     # TTS — Piper, Russian voice, in-process. Voice files cached on the PVC.
     # Pipecat chunks TTS at sentence boundaries automatically.
-    tts = PiperTTSService(
-        download_dir=PIPER_DOWNLOAD_DIR,
-        settings=PiperTTSService.Settings(voice=PIPER_VOICE),
-    )
+    if TTS_PROVIDER == "elevenlabs":
+        # ElevenLabs streaming TTS — the custom (Agent Smith-style) voice. Output
+        # format is derived from audio_out_sample_rate=16000 → pcm_16000, matching
+        # the G.722 wire path with no resample.
+        tts = ElevenLabsTTSService(
+            api_key=ELEVENLABS_API_KEY,
+            voice_id=ELEVENLABS_VOICE_ID,
+            model=ELEVENLABS_TTS_MODEL,
+            params=ElevenLabsTTSService.InputParams(
+                language=Language.RU,
+                stability=ELEVENLABS_STABILITY,
+                similarity_boost=ELEVENLABS_SIMILARITY,
+            ),
+        )
+    else:
+        tts = PiperTTSService(
+            download_dir=PIPER_DOWNLOAD_DIR,
+            settings=PiperTTSService.Settings(voice=PIPER_VOICE),
+        )
 
     context = LLMContext()
     # After 5 minutes with no speech, we'll wipe the dialogue history
@@ -538,29 +593,42 @@ def _prewarm_piper(app: FastAPI) -> None:
 async def lifespan(app: FastAPI):
     logger.info(
         f"Voice assistant starting on :{HTTP_PORT} "
-        f"(whisper={WHISPER_MODEL}/{WHISPER_COMPUTE_TYPE} "
+        f"(stt={STT_PROVIDER} tts={TTS_PROVIDER}, "
+        f"whisper={WHISPER_MODEL}/{WHISPER_COMPUTE_TYPE} "
         f"beam={WHISPER_BEAM_SIZE} best_of={WHISPER_BEST_OF}, "
-        f"piper={PIPER_VOICE}, esp32_compat={ESP32_COMPAT})"
+        f"piper={PIPER_VOICE}, el_voice={ELEVENLABS_VOICE_ID}/{ELEVENLABS_TTS_MODEL}, "
+        f"esp32_compat={ESP32_COMPAT})"
     )
     if not HERMES_MODEL:
         logger.warning("HERMES_MODEL is empty — set it in the ConfigMap.")
     if not HERMES_API_KEY:
         logger.warning("HERMES_API_KEY is empty — set it via the ExternalSecret.")
+    if (STT_PROVIDER == "elevenlabs" or TTS_PROVIDER == "elevenlabs") and not ELEVENLABS_API_KEY:
+        logger.warning("ELEVENLABS_API_KEY is empty — set it via the ExternalSecret.")
 
     # Warm up the heavy local models so the first WebRTC connection doesn't
     # pay the cold-load cost (Whisper mmap + CTranslate2 JIT, Piper ONNX init).
     # We hold the model handles on app.state for the process lifetime so the
     # OS page cache and library state stay warm across connections.
-    try:
-        _prewarm_whisper(app)
-    except Exception as exc:  # noqa: BLE001
-        logger.warning(f"warmup: whisper preload skipped ({exc!r})")
-    try:
-        _prewarm_piper(app)
-    except Exception as exc:  # noqa: BLE001
-        logger.warning(f"warmup: piper preload skipped ({exc!r})")
+    global _aiohttp_session
+    _aiohttp_session = aiohttp.ClientSession()
+
+    # Only warm the local models the selected providers actually use — skip the
+    # heavy Whisper/Piper loads (and their RAM) when ElevenLabs is handling them.
+    if STT_PROVIDER != "elevenlabs":
+        try:
+            _prewarm_whisper(app)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(f"warmup: whisper preload skipped ({exc!r})")
+    if TTS_PROVIDER != "elevenlabs":
+        try:
+            _prewarm_piper(app)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(f"warmup: piper preload skipped ({exc!r})")
 
     yield
+    if _aiohttp_session is not None:
+        await _aiohttp_session.close()
     await _handler.close()
 
 

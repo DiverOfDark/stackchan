@@ -1869,6 +1869,9 @@ wheels = [
 ]
 
 [package.optional-dependencies]
+elevenlabs = [
+    { name = "websockets" },
+]
 openai = [
     { name = "websockets" },
 ]
@@ -2975,7 +2978,7 @@ source = { virtual = "." }
 dependencies = [
     { name = "fastapi", extra = ["all"] },
     { name = "loguru" },
-    { name = "pipecat-ai", extra = ["openai", "piper", "webrtc", "whisper"] },
+    { name = "pipecat-ai", extra = ["elevenlabs", "openai", "piper", "webrtc", "whisper"] },
     { name = "uvicorn" },
 ]
 
@@ -2990,7 +2993,7 @@ dev = [
 requires-dist = [
     { name = "fastapi", extras = ["all"] },
     { name = "loguru" },
-    { name = "pipecat-ai", extras = ["webrtc", "whisper", "silero", "openai", "piper"], specifier = ">=1.0.0" },
+    { name = "pipecat-ai", extras = ["webrtc", "whisper", "silero", "openai", "piper", "elevenlabs"], specifier = ">=1.0.0" },
     { name = "uvicorn" },
 ]
 

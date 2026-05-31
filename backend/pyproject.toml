@@ -6,7 +6,9 @@ requires-python = ">=3.11"
 dependencies = [
     # Pipecat with the local-only stack: SmallWebRTC transport, faster-whisper
     # STT, Silero VAD, OpenAI-compatible LLM client, in-process Piper TTS.
-    "pipecat-ai[webrtc,whisper,silero,openai,piper]>=1.0.0",
+    # `elevenlabs` adds the cloud Scribe STT + custom-voice TTS path (just pulls
+    # websockets, already present) — selectable via STT_PROVIDER/TTS_PROVIDER.
+    "pipecat-ai[webrtc,whisper,silero,openai,piper,elevenlabs]>=1.0.0",
     "fastapi[all]",
     "uvicorn",
     "loguru",
