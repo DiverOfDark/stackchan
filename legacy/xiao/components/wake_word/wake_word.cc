@@ -62,16 +62,14 @@ static const char *TAG = "wake_word";
 // can move back to a higher threshold + mean detector.
 #define WAKE_WINDOW_LEN     5
 #define WAKE_MIN_HITS       2
-// The model's output is bimodal — it lands at ~0.0 or ~0.996 with almost
-// nothing in between, so the threshold is effectively an on/off switch. Real
-// wake words (p_max ≈ 0.996, verified on real recordings) clear any cutoff up
-// to 0.99 with full margin, so we set it HIGH to reject the handful of
-// mid-confidence false blips. 0.95 is the operating point the retrained
-// model's ROC favours (held-out test best FAPh at cutoff 0.95–0.98) and it
-// cuts false accepts ~3× vs 0.70 with no measured recall loss. The retrain
-// with real ambient negatives is what pushed most saturated false accepts
-// down; the threshold mops up the rest.
-#define WAKE_THRESHOLD      0.50f
+// Per-frame probability a frame must clear to count as a "hit". The model is
+// mostly bimodal (~0.0 vs ~0.996) but on-device acoustics produce some
+// mid-confidence frames; at 0.50 those marginal blips fired the wake too
+// easily. 0.70 rejects the weak/mid triggers while clear wake words (p_max
+// ≈ 0.99) still clear it with margin. If real wakes start getting missed,
+// lower this or raise WAKE_MIN_HITS instead (the ROC also supports up to
+// ~0.95 with the retrained model, at the cost of needing a clean utterance).
+#define WAKE_THRESHOLD      0.70f
 #define WAKE_COOLDOWN_MS    2000
 
 // Periodic diagnostic logs — confirm mic is alive and model is producing
