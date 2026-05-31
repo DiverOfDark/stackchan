@@ -81,7 +81,9 @@ inline std::size_t synth_chirp(Chirp kind, int16_t* out, std::size_t cap)
     // ms to zero so there's no click when playback stops.
     const std::size_t fade = std::min<std::size_t>(96, total);   // ~6 ms
     for (std::size_t i = 0; i < fade; ++i) {
-        const double g = 1.0 - static_cast<double>(i) / fade;    // 1 → 0
+        // i counts back from the end: the very last sample (i=0) → 0, ramping
+        // back up to ~1 at `fade` samples in.
+        const double g = static_cast<double>(i) / fade;
         out[total - 1 - i] = static_cast<int16_t>(out[total - 1 - i] * g);
     }
     return total;
