@@ -330,15 +330,19 @@ async def run_bot(webrtc_connection):
         # ElevenLabs streaming TTS — the custom (Agent Smith-style) voice. Output
         # format is derived from audio_out_sample_rate=16000 → pcm_16000, matching
         # the G.722 wire path with no resample.
+        # NOTE: do NOT pass stability/similarity_boost here. ElevenLabs' WS API
+        # requires `voice_settings` only in the FIRST message; pipecat re-sends
+        # it on every sentence when these are set, so ElevenLabs closes the
+        # socket with `1008 policy violation: voice_settings ... must ... not
+        # change` on the 2nd sentence — the socket reconnect-loops and only the
+        # first phrase ever plays (the rest is silence on the wire). The voice's
+        # character comes from its Voice Design defaults instead; tune those in
+        # the ElevenLabs dashboard, not per-request.
         tts = ElevenLabsTTSService(
             api_key=ELEVENLABS_API_KEY,
             voice_id=ELEVENLABS_VOICE_ID,
             model=ELEVENLABS_TTS_MODEL,
-            params=ElevenLabsTTSService.InputParams(
-                language=Language.RU,
-                stability=ELEVENLABS_STABILITY,
-                similarity_boost=ELEVENLABS_SIMILARITY,
-            ),
+            params=ElevenLabsTTSService.InputParams(language=Language.RU),
         )
     else:
         tts = PiperTTSService(
