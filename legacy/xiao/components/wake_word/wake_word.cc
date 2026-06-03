@@ -62,14 +62,23 @@ static const char *TAG = "wake_word";
 // can move back to a higher threshold + mean detector.
 #define WAKE_WINDOW_LEN     5
 #define WAKE_MIN_HITS       2
-// Per-frame probability a frame must clear to count as a "hit". The model is
-// mostly bimodal (~0.0 vs ~0.996) but on-device acoustics produce some
-// mid-confidence frames; at 0.50 those marginal blips fired the wake too
-// easily. 0.70 rejects the weak/mid triggers while clear wake words (p_max
-// ≈ 0.99) still clear it with margin. If real wakes start getting missed,
-// lower this or raise WAKE_MIN_HITS instead (the ROC also supports up to
-// ~0.95 with the retrained model, at the cost of needing a clean utterance).
-#define WAKE_THRESHOLD      0.70f
+// Two gates, tuned from real device captures:
+//   real wake : avg 0.61, win=[0.24 0.50 0.68 0.76 0.87] — a smooth rise,
+//               confidence sustained → high window mean.
+//   false pos : avg 0.45, win=[0.82 0.76 0.02 0.13 0.50] — a brief double-spike
+//               that collapses → low window mean.
+// Both clear "2 frames ≥ 0.70", so the per-frame threshold + hit-count alone
+// can't tell them apart — but the window MEAN does (a real wake's confidence is
+// sustained; a false blip's isn't). So:
+//   WAKE_THRESHOLD — per-frame bar to count as a hit. Dropped to 0.60 so real
+//                    wakes register a touch earlier (better recall).
+//   WAKE_MIN_HITS  — how many frames must clear it (catches the spike cluster).
+//   WAKE_AVG_MIN   — the window mean must also clear this. This is what rejects
+//                    the collapse-transient false positive (mean 0.45 < 0.55)
+//                    while passing the real wake (mean 0.61). Watch the avg=…
+//                    field in the "wake!" log on real vs false fires to refine.
+#define WAKE_THRESHOLD      0.60f
+#define WAKE_AVG_MIN        0.55f
 #define WAKE_COOLDOWN_MS    2000
 
 // Periodic diagnostic logs — confirm mic is alive and model is producing
@@ -323,7 +332,7 @@ static void update_window(float prob_float)
     const float avg = sum / WAKE_WINDOW_LEN;
 
     int64_t now_us = esp_timer_get_time();
-    if (hits >= WAKE_MIN_HITS &&
+    if (hits >= WAKE_MIN_HITS && avg >= WAKE_AVG_MIN &&
         (now_us - s_last_fire_us) > (int64_t)WAKE_COOLDOWN_MS * 1000) {
         // Snapshot the window probabilities for the log before we damp it.
         float w[WAKE_WINDOW_LEN];
