@@ -313,22 +313,33 @@ static void update_window(float prob_float)
     // note above. Count threshold crossings in the window (and track the
     // peak just for the log line).
     int   hits = 0;
-    float peak = 0.0f;
+    float peak = 0.0f, sum = 0.0f;
     for (int i = 0; i < WAKE_WINDOW_LEN; ++i) {
-        if (s_prob_window[i] >= WAKE_THRESHOLD) ++hits;
-        if (s_prob_window[i] > peak) peak = s_prob_window[i];
+        const float p = s_prob_window[i];
+        if (p >= WAKE_THRESHOLD) ++hits;
+        if (p > peak) peak = p;
+        sum += p;
     }
+    const float avg = sum / WAKE_WINDOW_LEN;
 
     int64_t now_us = esp_timer_get_time();
     if (hits >= WAKE_MIN_HITS &&
         (now_us - s_last_fire_us) > (int64_t)WAKE_COOLDOWN_MS * 1000) {
+        // Snapshot the window probabilities for the log before we damp it.
+        float w[WAKE_WINDOW_LEN];
+        for (int i = 0; i < WAKE_WINDOW_LEN; ++i) w[i] = s_prob_window[i];
         s_last_fire_us = now_us;
         atomic_store(&s_detected_latch, true);
         // Damp the window so we don't immediately re-trigger on the same
         // utterance; cooldown is belt-and-suspenders.
         for (int i = 0; i < WAKE_WINDOW_LEN; ++i) s_prob_window[i] = 0;
         s_prob_window_count = 0;
-        ESP_LOGI(TAG, "wake!  hits=%d/%d peak=%.2f", hits, WAKE_WINDOW_LEN, (double)peak);
+        // Always log the firing probabilities (peak + mean + threshold + the
+        // whole window) so the operating point can be judged from real fires.
+        // The %.2f count below matches WAKE_WINDOW_LEN (5).
+        ESP_LOGI(TAG, "wake!  hits=%d/%d peak=%.2f avg=%.2f thr=%.2f win=[%.2f %.2f %.2f %.2f %.2f]",
+                 hits, WAKE_WINDOW_LEN, (double)peak, (double)avg, (double)WAKE_THRESHOLD,
+                 (double)w[0], (double)w[1], (double)w[2], (double)w[3], (double)w[4]);
     }
 }
 
