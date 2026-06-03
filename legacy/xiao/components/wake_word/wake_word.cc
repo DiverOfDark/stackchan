@@ -62,24 +62,25 @@ static const char *TAG = "wake_word";
 // can move back to a higher threshold + mean detector.
 #define WAKE_WINDOW_LEN     5
 #define WAKE_MIN_HITS       2
-// Two gates, tuned from real device captures:
-//   real wakes: avg 0.61 win=[0.24 0.50 0.68 0.76 0.87]  (smooth rise)
-//               avg 0.57 win=[0.91 0.03 0.18 0.82 0.93]  (spiky, two clusters)
-//   false pos : avg 0.45 win=[0.82 0.76 0.02 0.13 0.50]  (spike then collapse)
-// Both real and false clear the per-frame hit-count, so threshold + hit-count
-// alone can't tell them apart — but the window MEAN does: a real wake keeps
-// confidence up across the window (mean ~0.57–0.61), a false blip spikes then
-// collapses (mean ~0.45). So:
-//   WAKE_THRESHOLD — per-frame bar to count as a hit. 0.60 so real wakes
-//                    register a touch earlier (better recall).
+// Gates tuned from real device captures (peak = best frame in the window,
+// avg = window mean):
+//   real wakes: peak 0.87 avg 0.61 | peak 0.93 avg 0.57 | peak 0.98 avg 0.69
+//   false pos : peak 0.82 avg 0.45 | peak 0.68 avg 0.54
+// Neither peak nor avg alone separates them — but a real wake clears BOTH: it
+// always lands a strongly-confident frame (peak ≥ 0.87) AND keeps the window
+// mean up (≥ 0.57). The false positives each miss one axis: #1 has a decent
+// peak (0.82) but collapses to a low mean (0.45); #2 holds a fair mean (0.54)
+// but never gets confident (peak 0.68). So require both (plus the hit-count for
+// the spike cluster):
+//   WAKE_THRESHOLD — per-frame bar to count as a hit (0.60).
 //   WAKE_MIN_HITS  — how many frames must clear it (catches the spike cluster).
-//   WAKE_AVG_MIN   — the window mean must also clear this. This rejects the
-//                    collapse-transient false positive while passing real
-//                    wakes. Set to 0.50 — midway in the observed real/false gap
-//                    (reals 0.57/0.61, false 0.45), giving reals ~0.07–0.11
-//                    margin and still cutting the false (0.45). Watch the avg=…
-//                    field in the "wake!" log on real vs false fires to refine.
+//   WAKE_PEAK_MIN  — the best frame must reach this (0.80). Cuts false #2
+//                    (peak 0.68); reals (≥0.87) clear it by ≥0.07.
+//   WAKE_AVG_MIN   — the window mean must reach this (0.50). Cuts false #1
+//                    (mean 0.45); reals (≥0.57) clear it by ≥0.07.
+// Watch peak=/avg= in the "wake!" log on real vs false fires to refine.
 #define WAKE_THRESHOLD      0.60f
+#define WAKE_PEAK_MIN       0.80f
 #define WAKE_AVG_MIN        0.50f
 #define WAKE_COOLDOWN_MS    2000
 
@@ -334,7 +335,7 @@ static void update_window(float prob_float)
     const float avg = sum / WAKE_WINDOW_LEN;
 
     int64_t now_us = esp_timer_get_time();
-    if (hits >= WAKE_MIN_HITS && avg >= WAKE_AVG_MIN &&
+    if (hits >= WAKE_MIN_HITS && peak >= WAKE_PEAK_MIN && avg >= WAKE_AVG_MIN &&
         (now_us - s_last_fire_us) > (int64_t)WAKE_COOLDOWN_MS * 1000) {
         // Snapshot the window probabilities for the log before we damp it.
         float w[WAKE_WINDOW_LEN];
