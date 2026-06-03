@@ -63,22 +63,24 @@ static const char *TAG = "wake_word";
 #define WAKE_WINDOW_LEN     5
 #define WAKE_MIN_HITS       2
 // Two gates, tuned from real device captures:
-//   real wake : avg 0.61, win=[0.24 0.50 0.68 0.76 0.87] — a smooth rise,
-//               confidence sustained → high window mean.
-//   false pos : avg 0.45, win=[0.82 0.76 0.02 0.13 0.50] — a brief double-spike
-//               that collapses → low window mean.
-// Both clear "2 frames ≥ 0.70", so the per-frame threshold + hit-count alone
-// can't tell them apart — but the window MEAN does (a real wake's confidence is
-// sustained; a false blip's isn't). So:
-//   WAKE_THRESHOLD — per-frame bar to count as a hit. Dropped to 0.60 so real
-//                    wakes register a touch earlier (better recall).
+//   real wakes: avg 0.61 win=[0.24 0.50 0.68 0.76 0.87]  (smooth rise)
+//               avg 0.57 win=[0.91 0.03 0.18 0.82 0.93]  (spiky, two clusters)
+//   false pos : avg 0.45 win=[0.82 0.76 0.02 0.13 0.50]  (spike then collapse)
+// Both real and false clear the per-frame hit-count, so threshold + hit-count
+// alone can't tell them apart — but the window MEAN does: a real wake keeps
+// confidence up across the window (mean ~0.57–0.61), a false blip spikes then
+// collapses (mean ~0.45). So:
+//   WAKE_THRESHOLD — per-frame bar to count as a hit. 0.60 so real wakes
+//                    register a touch earlier (better recall).
 //   WAKE_MIN_HITS  — how many frames must clear it (catches the spike cluster).
-//   WAKE_AVG_MIN   — the window mean must also clear this. This is what rejects
-//                    the collapse-transient false positive (mean 0.45 < 0.55)
-//                    while passing the real wake (mean 0.61). Watch the avg=…
+//   WAKE_AVG_MIN   — the window mean must also clear this. This rejects the
+//                    collapse-transient false positive while passing real
+//                    wakes. Set to 0.50 — midway in the observed real/false gap
+//                    (reals 0.57/0.61, false 0.45), giving reals ~0.07–0.11
+//                    margin and still cutting the false (0.45). Watch the avg=…
 //                    field in the "wake!" log on real vs false fires to refine.
 #define WAKE_THRESHOLD      0.60f
-#define WAKE_AVG_MIN        0.55f
+#define WAKE_AVG_MIN        0.50f
 #define WAKE_COOLDOWN_MS    2000
 
 // Periodic diagnostic logs — confirm mic is alive and model is producing
