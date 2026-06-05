@@ -76,10 +76,18 @@ private:
     static void mainLoopTaskEntry (void* arg);
     static void captureTaskEntry  (void* arg);
     static void playbackTaskEntry (void* arg);
+    static void uploadTaskEntry   (void* arg);
 
     void mainLoopTask();
     void captureTask();
     void playbackTask();
+    // Waits for a wake snapshot (notified by captureTask) and POSTs it to the
+    // backend /wake-sample. Fire-and-forget; failures are logged, not retried.
+    void uploadTask();
+
+    // Under wake_mtx_: copy the last wake sample's WAV bytes + a URL query
+    // string (peak/avg/hits/win/…) + seq, for the uploader. False if none yet.
+    bool getWakeSampleUpload(std::string& wav, std::string& query, uint32_t& seq);
 
     // libpeer callbacks (run on libpeer's internal thread).
     void onPeerState(transport::PeerState s);
@@ -127,6 +135,7 @@ private:
     TaskHandle_t                           t_main_       = nullptr;
     TaskHandle_t                           t_cap_        = nullptr;
     TaskHandle_t                           t_play_       = nullptr;
+    TaskHandle_t                           t_upload_     = nullptr;   // wake-sample uploader
 
     std::atomic<bool>                      running_{false};
     std::atomic<bool>                      connected_{false};

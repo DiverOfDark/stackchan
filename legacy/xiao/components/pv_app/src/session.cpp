@@ -13,6 +13,7 @@
 #include "domain/energy_gate.hpp"
 #include "domain/g722.hpp"
 #include "domain/gain.hpp"
+#include "hal/https_client.hpp"
 #include "transport/wake_engine.hpp"
 
 namespace {
@@ -112,6 +113,10 @@ constexpr int  kCapPrio               = 8;
 constexpr int  kPlayPrio              = 8;
 constexpr int  kMainCore              = 0;
 constexpr int  kAvCore                = 1;
+// Wake-sample uploader: low priority, off the AV core, with enough stack for an
+// mbedTLS POST. Best-effort background work — must never disturb audio.
+constexpr int  kUploadStack           = 8 * 1024;
+constexpr int  kUploadPrio            = 4;
 
 constexpr std::size_t kPlaybackBufBytes = domain::kSampleRateHz * 2 / 5;  // 200 ms @ 16 kHz mono
 // Trigger level = one full 20 ms packet (640 bytes of int16 PCM). Anything
@@ -167,6 +172,57 @@ bool Session::getWakeSample(std::string& wav, std::string& meta, uint32_t& seq)
     return true;
 }
 
+bool Session::getWakeSampleUpload(std::string& wav, std::string& query, uint32_t& seq)
+{
+    std::lock_guard<std::mutex> lk(wake_mtx_);
+    if (!wake_pcm_ || wake_pcm_len_ == 0) return false;
+    wav = makeWav(wake_pcm_, wake_pcm_len_, kWakeSampleRate);
+    const auto& m = wake_metrics_;
+    char buf[400];
+    int len = std::snprintf(buf, sizeof buf,
+        "seq=%u&peak=%.3f&avg=%.3f&hits=%d&win=%.3f,%.3f,%.3f,%.3f,%.3f"
+        "&sr=%d&samples=%u&uptime=%u",
+        (unsigned)m.fire_seq, (double)m.peak, (double)m.avg, m.hits,
+        (double)m.window[0], (double)m.window[1], (double)m.window[2],
+        (double)m.window[3], (double)m.window[4],
+        kWakeSampleRate, (unsigned)wake_pcm_len_, (unsigned)esp_log_timestamp());
+    query.assign(buf, len > 0 ? static_cast<std::size_t>(len) : 0);
+    seq = wake_capture_seq_.load();
+    return true;
+}
+
+void Session::uploadTaskEntry(void* arg) { static_cast<Session*>(arg)->uploadTask(); }
+
+void Session::uploadTask()
+{
+    // Backend base + "/wake-sample?" once; query is appended per upload.
+    std::string base = backend_url_;
+    while (!base.empty() && base.back() == '/') base.pop_back();
+    const std::string endpoint = base + "/wake-sample?";
+    hal::HttpsClient http{1024};   // ack body is tiny JSON
+
+    while (running_.load()) {
+        // Wake on a snapshot notification; a short timeout lets us re-check
+        // running_ for a prompt shutdown.
+        if (ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(200)) == 0) continue;
+
+        std::string wav, query; uint32_t seq = 0;
+        if (!getWakeSampleUpload(wav, query, seq)) continue;
+
+        const std::string url = endpoint + query;
+        hal::HttpResponse resp;
+        esp_err_t err = http.request(url.c_str(), HTTP_METHOD_POST, wav, "audio/wav", resp);
+        if (err != ESP_OK)
+            ESP_LOGW(kTag, "wake-sample upload transport err: %s", esp_err_to_name(err));
+        else if (resp.status / 100 != 2)
+            ESP_LOGW(kTag, "wake-sample upload status=%d", resp.status);
+        else
+            ESP_LOGI(kTag, "wake-sample uploaded seq=%u (%u B)",
+                     (unsigned)seq, (unsigned)wav.size());
+    }
+    vTaskDelete(nullptr);
+}
+
 void Session::start()
 {
     if (running_.exchange(true)) return;
@@ -216,6 +272,13 @@ void Session::start()
         ESP_LOGE(kTag, "task create failed (out of internal RAM?) — main=%d cap=%d play=%d",
                  (int)r_main, (int)r_cap, (int)r_play);
     }
+    // Wake-sample uploader is best-effort: if it can't start, capture + the
+    // local /wake.wav endpoint still work, we just don't push to the backend.
+    if (xTaskCreatePinnedToCore(uploadTaskEntry, "wake_up", kUploadStack, this,
+                                kUploadPrio, &t_upload_, kMainCore) != pdPASS) {
+        ESP_LOGW(kTag, "wake-sample uploader task create failed; uploads disabled");
+        t_upload_ = nullptr;
+    }
 }
 
 void Session::stop()
@@ -225,7 +288,7 @@ void Session::stop()
     // then null the handles. (vTaskDelete from another task races with
     // a self-exit; we prefer the self-exit path.)
     vTaskDelay(pdMS_TO_TICKS(50));
-    t_main_ = t_cap_ = t_play_ = nullptr;
+    t_main_ = t_cap_ = t_play_ = t_upload_ = nullptr;
     peer_.reset();
 }
 
@@ -590,6 +653,7 @@ void Session::captureTask()
                 wake_pcm_len_ = n;
                 wake_metrics_ = transport::WakeEngine::lastMetrics();
                 wake_capture_seq_.fetch_add(1);
+                if (t_upload_) xTaskNotifyGive(t_upload_);   // kick the uploader
             }
             // Arm a turn. On the idle→active edge, start this utterance fresh:
             // a clean encoder + empty backlog, and flash the wake ack. mainLoop
