@@ -326,6 +326,11 @@ std::optional<WebServer> WebServer::start(Session& session, const uint8_t* html,
     cfg.max_open_sockets   = 7;          // room for the WS log clients
     cfg.stack_size         = 8192;       // OTA streaming + esp_ota_write headroom
     cfg.recv_wait_timeout  = 15;         // tolerate slow firmware uploads
+    // We register 10 URIs; the default cap is 8, and exceeding it silently drops
+    // the *last*-registered handlers — which once knocked out /ota and made the
+    // device un-OTA-able. Give generous headroom and register recovery
+    // endpoints first (below) so this can't strand us again.
+    cfg.max_uri_handlers   = 16;
     httpd_handle_t h = nullptr;
     if (httpd_start(&h, &cfg) != ESP_OK) {
         ESP_LOGE(kTag, "httpd_start failed on port %u", (unsigned)port);
@@ -346,16 +351,24 @@ std::optional<WebServer> WebServer::start(Session& session, const uint8_t* html,
     httpd_uri_t u_ws{};
     u_ws.uri = "/ws/logs"; u_ws.method = HTTP_GET; u_ws.handler = ws_logs_handler;
     u_ws.is_websocket = true;
-    httpd_register_uri_handler(h, &u_root);
-    httpd_register_uri_handler(h, &u_eff);
-    httpd_register_uri_handler(h, &u_state);
-    httpd_register_uri_handler(h, &u_res);
-    httpd_register_uri_handler(h, &u_diag);
-    httpd_register_uri_handler(h, &u_wwav);
-    httpd_register_uri_handler(h, &u_wjson);
-    httpd_register_uri_handler(h, &u_host);
-    httpd_register_uri_handler(h, &u_ota);
-    httpd_register_uri_handler(h, &u_ws);
+    auto reg = [&](const httpd_uri_t& u) {
+        esp_err_t e = httpd_register_uri_handler(h, &u);
+        if (e != ESP_OK)
+            ESP_LOGE(kTag, "register %s failed: %s (handler table full?)",
+                     u.uri, esp_err_to_name(e));
+    };
+    // Recovery endpoints FIRST — if the table ever fills, OTA + live logs must
+    // survive so the device stays remotely flashable/debuggable.
+    reg(u_ota);
+    reg(u_ws);
+    reg(u_root);
+    reg(u_diag);
+    reg(u_eff);
+    reg(u_state);
+    reg(u_res);
+    reg(u_wwav);
+    reg(u_wjson);
+    reg(u_host);
 
     xTaskCreatePinnedToCore(log_broadcast_task, "ws_log", 4096, nullptr, 4, nullptr, 0);
 
