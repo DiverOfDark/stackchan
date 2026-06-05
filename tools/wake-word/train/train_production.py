@@ -41,6 +41,12 @@ ROOT          = Path(__file__).resolve().parent
 POS_DIR       = ROOT / "corpus" / "positive"
 POS_REAL_DIR  = ROOT / "corpus" / "positive_real"        # raw recordings (app.py /save)
 POS_AUG_DIR   = ROOT / "corpus" / "positive_real_aug"    # pitch/time/EQ-augmented copies
+# Hard negatives: the actual audio that made the DEVICE false-fire, pulled from
+# the backend by collect_hard_negatives.py. These are the highest-value
+# negatives — real misfires through the real XVF3800 path — so they get a heavy
+# sampling + penalty weight below. (Strong false positives are indistinguishable
+# from real wakes at the metric level; the only fix is training on them.)
+HARD_NEG_DIR  = ROOT / "corpus" / "hard_negatives"
 NEG_HF_DIR    = ROOT / "negative_datasets"
 RIR_DIR       = ROOT / "mit_rirs"
 FMA_DIR       = ROOT / "fma_16k"
@@ -211,6 +217,19 @@ def gen_positive_spectrograms() -> None:
         gen_positive_spectrograms_for(POS_AUG_DIR, "positive_real_aug", repeat_mul=2)
 
 
+def gen_hard_negative_spectrograms() -> None:
+    """Generate features for the device-captured false positives, if present.
+
+    Reuses the positive feature path (same augmentation makes the negatives
+    robust); truth=False is set in the config. Skipped silently when no hard
+    negatives have been collected yet, so the pipeline runs without them too.
+    """
+    if HARD_NEG_DIR.exists() and any(HARD_NEG_DIR.glob("*.wav")):
+        n = len(list(HARD_NEG_DIR.glob("*.wav")))
+        print(f"\n--- hard negatives ({n} device-captured false fires) ---")
+        gen_positive_spectrograms_for(HARD_NEG_DIR, "hard_negatives", repeat_mul=4)
+
+
 # ---------- Step 3: Config + train ---------------------------------------
 
 def write_config() -> Path:
@@ -243,10 +262,24 @@ def write_config() -> Path:
             "type":                "mmap",
         })
 
+    # Device-captured false fires — heaviest weight of any negative: these are
+    # the exact misfires we need the model to stop making, recorded through the
+    # real device path. High penalty_weight makes firing on them very costly.
+    hard_negative_features = []
+    if (FEAT_ROOT / "hard_negatives").exists():
+        hard_negative_features.append({
+            "features_dir":        str(FEAT_ROOT / "hard_negatives"),
+            "sampling_weight":     20.0,
+            "penalty_weight":      4.0,
+            "truth":               False,
+            "truncation_strategy": "truncate_start",
+            "type":                "mmap",
+        })
+
     config = {
         "window_step_ms":      10,
         "train_dir":           str(MODEL_DIR),
-        "features": positive_features + [
+        "features": positive_features + hard_negative_features + [
             {
                 "features_dir":        str(NEG_HF_DIR / "speech"),
                 "sampling_weight":     10.0,
@@ -345,6 +378,7 @@ def main():
 
     print("\n== Step 4: spectrogram generation for positive clips (augmented)")
     gen_positive_spectrograms()
+    gen_hard_negative_spectrograms()   # device-captured false fires, if collected
 
     print("\n== Step 5: write training config")
     cfg = write_config()

@@ -67,6 +67,41 @@ phrase. Two options:
 
 Both work; mix is fine.
 
+## Hard negatives from the field (device-captured false fires)
+
+The single most effective way to kill false positives is to train on the audio
+that *actually* triggered them. The device uploads every wake fire (real and
+false) to the backend (`/wake-sample` → a PVC); `collect_hard_negatives.py`
+pulls them down and sorts them into the corpus:
+
+```bash
+# 1. Download new captured samples
+python collect_hard_negatives.py fetch \
+    --backend https://voice-assistant.kirillorlov.pro
+
+# 2. Listen + label each as a false fire or a real wake
+python collect_hard_negatives.py label        # interactive f/r/s
+#    (browse the corpus in the backend's /wake-samples first if you like)
+
+# 3. Stage into the training corpus
+python collect_hard_negatives.py stage
+#    false fires → corpus/hard_negatives/   (weighted heavily as negatives)
+#    real wakes  → corpus/positive_real/    (more real positive data)
+```
+
+`train_production.py` then picks `corpus/hard_negatives/` up automatically and
+weights it the heaviest of any negative source (`sampling_weight 20`,
+`penalty_weight 4`) — so firing on a known misfire is very costly during
+training. Real captures also flow into `positive_real`, sharpening recall on
+your actual voice through the XVF3800 path.
+
+Why this matters: at the detection layer the strong false positives are
+**indistinguishable** from real wakes (same peak/avg/hits), so no threshold or
+gate can separate them. The decision boundary can only be fixed in the model,
+and only by showing it these exact sounds. Collect a few dozen false fires +
+more real wakes, retrain, and re-check the operating point with
+`verify_model.py --roc`.
+
 ## Train
 
 ```bash
