@@ -137,6 +137,9 @@ static int                         s_prob_window_idx = 0;
 static int                         s_prob_window_count = 0;
 static atomic_bool                 s_detected_latch = ATOMIC_VAR_INIT(false);
 static atomic_int                  s_last_prob_x1000 = ATOMIC_VAR_INIT(0);
+// Most recent fire's decision metrics (published in the fire block, read by the
+// app for hard-negative capture). fire_seq increments on every fire.
+static wake_word_metrics_t         s_metrics = {0};
 
 // Diagnostic accumulators (reset every WAKE_DIAG_PERIOD_FRAMES).
 static float                       s_diag_max_prob = 0.0f;
@@ -340,6 +343,13 @@ static void update_window(float prob_float)
         // Snapshot the window probabilities for the log before we damp it.
         float w[WAKE_WINDOW_LEN];
         for (int i = 0; i < WAKE_WINDOW_LEN; ++i) w[i] = s_prob_window[i];
+        // Publish the decision metrics for diagnostics / hard-negative capture
+        // (the app snapshots the triggering audio alongside these numbers).
+        s_metrics.peak = peak;
+        s_metrics.avg  = avg;
+        s_metrics.hits = hits;
+        for (int i = 0; i < WAKE_WINDOW_LEN; ++i) s_metrics.window[i] = w[i];
+        s_metrics.fire_seq++;   // last write — signals "metrics ready" to readers
         s_last_fire_us = now_us;
         atomic_store(&s_detected_latch, true);
         // Damp the window so we don't immediately re-trigger on the same
@@ -485,4 +495,9 @@ extern "C" bool wake_word_detected(void)
 extern "C" float wake_word_last_probability(void)
 {
     return (float)atomic_load(&s_last_prob_x1000) / 1000.0f;
+}
+
+extern "C" void wake_word_get_metrics(wake_word_metrics_t *out)
+{
+    if (out) *out = s_metrics;   // plain struct copy; fire_seq tells the caller if it changed
 }

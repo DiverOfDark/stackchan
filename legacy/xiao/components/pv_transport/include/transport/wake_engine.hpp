@@ -13,6 +13,16 @@
 
 namespace transport {
 
+// Decision metrics for one wake fire — a C++ mirror of the C component's
+// wake_word_metrics_t, so callers in pv_app don't pull in the C header.
+struct WakeMetrics {
+    uint32_t fire_seq = 0;          // increments per fire; 0 = none since boot
+    float    peak     = 0.0f;       // max frame prob in the window
+    float    avg      = 0.0f;       // mean frame prob over the window
+    int      hits     = 0;          // frames over the per-frame threshold
+    float    window[5] = {0};       // the window probabilities at fire
+};
+
 class WakeEngine {
 public:
     // One-shot model load + arena allocation. Idempotent (the underlying
@@ -28,6 +38,11 @@ public:
 
     // Most recent inference probability — useful for diagnostics only.
     static float lastProbability();
+
+    // Snapshot of the most recent wake fire's decision metrics (peak/avg/hits/
+    // window + a fire_seq that increments per fire). For diagnostics and
+    // hard-negative capture.
+    static WakeMetrics lastMetrics();
 };
 
 } // namespace transport

@@ -46,6 +46,28 @@ constexpr int  kMicActiveRmsThreshold = 4000;     // ~ -18 dBFS (post boost)
 constexpr float kUplinkGain           = 4.0f;     // +12 dB — healthy STT level
 constexpr float kWakeGain             = 8.0f;     // +18 dB — what the model trained on
 
+// Wake-trigger capture: how much mic audio (mono_uplink, 16 kHz int16) to keep
+// rolling so a fire can be snapshotted with the audio that caused it. 2 s
+// comfortably spans "Эй, Фемто!" plus lead-in.
+constexpr int          kWakeSampleRate      = 16000;
+constexpr std::size_t  kWakeCaptureSamples  = kWakeSampleRate * 2;   // 2 s = 64 KB PSRAM
+
+// Wrap mono 16-bit PCM in a minimal 44-byte WAV container, so the captured
+// wake audio downloads/uploads as a self-contained .wav.
+std::string makeWav(const int16_t* pcm, std::size_t n, uint32_t sr)
+{
+    const uint32_t data_bytes = static_cast<uint32_t>(n * 2);
+    std::string w;
+    w.reserve(44 + data_bytes);
+    auto u32 = [&](uint32_t v) { for (int i = 0; i < 4; ++i) w.push_back(char((v >> (8 * i)) & 0xff)); };
+    auto u16 = [&](uint16_t v) { for (int i = 0; i < 2; ++i) w.push_back(char((v >> (8 * i)) & 0xff)); };
+    w += "RIFF"; u32(36 + data_bytes); w += "WAVE";
+    w += "fmt "; u32(16); u16(1); u16(1); u32(sr); u32(sr * 2); u16(2); u16(16);
+    w += "data"; u32(data_bytes);
+    w.append(reinterpret_cast<const char*>(pcm), data_bytes);
+    return w;
+}
+
 constexpr int  kAecRefTxChannel       = 0;        // L channel of XVF3800 input
 
 // Half-duplex echo guard: how long after the last inbound TTS frame to keep
@@ -122,6 +144,27 @@ Session::~Session()
 {
     stop();
     if (playback_buf_) vStreamBufferDelete(playback_buf_);
+    if (wake_pcm_)     heap_caps_free(wake_pcm_);
+}
+
+bool Session::getWakeSample(std::string& wav, std::string& meta, uint32_t& seq)
+{
+    std::lock_guard<std::mutex> lk(wake_mtx_);
+    if (!wake_pcm_ || wake_pcm_len_ == 0) return false;
+    wav = makeWav(wake_pcm_, wake_pcm_len_, kWakeSampleRate);
+    const auto& m = wake_metrics_;
+    char buf[480];
+    int len = std::snprintf(buf, sizeof buf,
+        "{\"fire_seq\":%u,\"peak\":%.3f,\"avg\":%.3f,\"hits\":%d,"
+        "\"window\":[%.3f,%.3f,%.3f,%.3f,%.3f],"
+        "\"sample_rate\":%d,\"gain_db\":12,\"samples\":%u,\"uptime_ms\":%u}",
+        (unsigned)m.fire_seq, (double)m.peak, (double)m.avg, m.hits,
+        (double)m.window[0], (double)m.window[1], (double)m.window[2],
+        (double)m.window[3], (double)m.window[4],
+        kWakeSampleRate, (unsigned)wake_pcm_len_, (unsigned)esp_log_timestamp());
+    meta.assign(buf, len > 0 ? static_cast<std::size_t>(len) : 0);
+    seq = wake_capture_seq_.load();
+    return true;
 }
 
 void Session::start()
@@ -143,6 +186,12 @@ void Session::start()
         running_ = false;
         return;
     }
+
+    // PSRAM snapshot buffer for the audio that triggers a wake (filled by
+    // captureTask on each fire). Non-fatal if it fails — just disables capture.
+    wake_pcm_ = static_cast<int16_t*>(
+        heap_caps_malloc(kWakeCaptureSamples * sizeof(int16_t), MALLOC_CAP_SPIRAM));
+    if (!wake_pcm_) ESP_LOGW(kTag, "wake-capture buffer alloc failed; /wake.wav disabled");
     // G.722 codec state (g722_enc_/g722_dec_) is reset per connection in
     // buildAndOffer(); nothing to allocate here.
 
@@ -465,6 +514,22 @@ void Session::captureTask()
         return true;
     };
 
+    // Rolling buffer of recent mic audio (mono_uplink — undistorted +12 dB) so
+    // that when the wake word fires we can snapshot the ~2 s that triggered it.
+    // A sample ring (not packet ring) so the snapshot is a contiguous WAV.
+    int16_t* cap_ring = static_cast<int16_t*>(
+        heap_caps_malloc(kWakeCaptureSamples * sizeof(int16_t), MALLOC_CAP_SPIRAM));
+    if (!cap_ring) ESP_LOGW(kTag, "wake-capture ring alloc failed; samples won't be recorded");
+    std::size_t c_head = 0, c_count = 0;
+    auto cap_push = [&](const int16_t* p, std::size_t n) {
+        if (!cap_ring) return;
+        for (std::size_t i = 0; i < n; ++i) {
+            cap_ring[(c_head + c_count) % kWakeCaptureSamples] = p[i];
+            if (c_count < kWakeCaptureSamples) c_count++;
+            else c_head = (c_head + 1) % kWakeCaptureSamples;
+        }
+    };
+
     while (running_.load()) {
         if (audio_.read(stereo, domain::kFramesPerPacket) != ESP_OK) {
             vTaskDelay(pdMS_TO_TICKS(20));
@@ -478,6 +543,7 @@ void Session::captureTask()
             mono_uplink[i] = domain::scale_to_i16(raw, kUplinkGain);
             mono_wake[i]   = domain::scale_to_i16(raw, kWakeGain);
         }
+        cap_push(mono_uplink, domain::kFramesPerPacket);   // roll the wake-capture buffer
 
         const TickType_t now = xTaskGetTickCount();
 
@@ -511,6 +577,20 @@ void Session::captureTask()
         // read "Talking" right after the flash; we want "Listening" (go ahead).
         transport::WakeEngine::process(mono_wake, domain::kFramesPerPacket);
         if (transport::WakeEngine::detected()) {
+            // Snapshot the audio that triggered this fire + the metrics that
+            // fired it, for hard-negative collection. Two memcpys (the ring may
+            // wrap) under the lock; cheap and infrequent (≥2 s cooldown).
+            if (cap_ring && wake_pcm_) {
+                std::lock_guard<std::mutex> lk(wake_mtx_);
+                const std::size_t n     = c_count;
+                const std::size_t first = std::min(n, kWakeCaptureSamples - c_head);
+                std::memcpy(wake_pcm_, cap_ring + c_head, first * sizeof(int16_t));
+                if (n > first)
+                    std::memcpy(wake_pcm_ + first, cap_ring, (n - first) * sizeof(int16_t));
+                wake_pcm_len_ = n;
+                wake_metrics_ = transport::WakeEngine::lastMetrics();
+                wake_capture_seq_.fetch_add(1);
+            }
             // Arm a turn. On the idle→active edge, start this utterance fresh:
             // a clean encoder + empty backlog, and flash the wake ack. mainLoop
             // sees conversation_active_ and brings the session up.
@@ -569,6 +649,7 @@ void Session::captureTask()
         // else: still negotiating — leave it buffered; mainLoop is connecting.
     }
     if (ring) heap_caps_free(ring);
+    if (cap_ring) heap_caps_free(cap_ring);
     vTaskDelete(nullptr);
 }
 

@@ -40,6 +40,22 @@ bool wake_word_detected(void);
 // logging/tuning the threshold during M6b verification.
 float wake_word_last_probability(void);
 
+#define WAKE_WORD_WINDOW_LEN 5   // must match WAKE_WINDOW_LEN in wake_word.cc
+
+// Snapshot of the most recent wake fire's decision metrics — for diagnostics
+// and hard-negative capture (so the audio that triggered a fire can be stored
+// with the numbers that fired it). fire_seq increments on every fire (0 = none
+// since boot), so a caller can detect a new fire by watching it change.
+typedef struct {
+    uint32_t fire_seq;
+    float    peak;                            // max frame prob in the window
+    float    avg;                             // mean frame prob over the window
+    int      hits;                            // frames over the per-frame threshold
+    float    window[WAKE_WORD_WINDOW_LEN];    // the window probabilities at fire
+} wake_word_metrics_t;
+
+void wake_word_get_metrics(wake_word_metrics_t *out);
+
 #ifdef __cplusplus
 }
 #endif

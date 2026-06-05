@@ -28,6 +28,7 @@
 #include "hal/xvf3800.hpp"
 #include "transport/peer.hpp"
 #include "transport/signaling.hpp"
+#include "transport/wake_engine.hpp"
 #include "app/ui.hpp"
 
 namespace app {
@@ -58,6 +59,13 @@ public:
     // Snapshot of internal state as a JSON object, for the /diag web endpoint.
     // Lets us inspect a misbehaving device over the network (no serial / reset).
     std::string diagJson();
+
+    // Copy the most recent wake-trigger sample as a WAV (header + PCM) plus a
+    // metadata JSON and its sequence number, under wake_mtx_. Returns false if
+    // nothing has been captured since boot. Used by the /wake.wav + /wake.json
+    // web endpoints and by the backend uploader task.
+    bool getWakeSample(std::string& wav, std::string& meta, uint32_t& seq);
+    uint32_t wakeCaptureSeq() const { return wake_capture_seq_.load(); }
 
 private:
     // Build a fresh Peer + push the local offer. Called once at
@@ -102,6 +110,19 @@ private:
     // Jitter buffer for inbound TTS (filled by onInboundAudio, drained
     // by playback task).
     StreamBufferHandle_t                   playback_buf_ = nullptr;
+
+    // --- Wake-trigger audio capture (hard-negative collection) ------------
+    // A snapshot of the mic audio (mono_uplink, 16 kHz int16) leading up to the
+    // most recent wake fire, plus the decision metrics that fired it. captureTask
+    // fills it on each fire from its rolling ring; the web server serves it
+    // (/wake.wav, /wake.json) and the uploader pushes it to the backend. The
+    // strong false positives are indistinguishable from real wakes at the metric
+    // level, so the only way to improve the model is to collect the actual audio.
+    std::mutex                             wake_mtx_;
+    int16_t*                               wake_pcm_     = nullptr;   // PSRAM snapshot
+    std::size_t                            wake_pcm_len_ = 0;         // valid samples
+    transport::WakeMetrics                 wake_metrics_ = {};
+    std::atomic<uint32_t>                  wake_capture_seq_{0};      // bumped per snapshot
 
     TaskHandle_t                           t_main_       = nullptr;
     TaskHandle_t                           t_cap_        = nullptr;

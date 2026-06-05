@@ -191,6 +191,32 @@ esp_err_t handleDiag(httpd_req_t* req)
     return httpd_resp_send(req, j.c_str(), j.size());
 }
 
+// GET /wake.wav — the mic audio that triggered the most recent wake fire, as a
+// downloadable WAV. GET /wake.json — its decision metrics. Together they let us
+// collect the actual audio behind a (false or real) fire for model retraining.
+esp_err_t handleWakeWav(httpd_req_t* req)
+{
+    if (!g_ctx.session) return ESP_FAIL;
+    std::string wav, meta; uint32_t seq;
+    if (!g_ctx.session->getWakeSample(wav, meta, seq)) {
+        httpd_resp_set_status(req, "404 Not Found");
+        return httpd_resp_sendstr(req, "no wake sample captured yet");
+    }
+    httpd_resp_set_type(req, "audio/wav");
+    httpd_resp_set_hdr(req, "Content-Disposition", "attachment; filename=\"wake.wav\"");
+    return httpd_resp_send(req, wav.data(), wav.size());
+}
+
+esp_err_t handleWakeJson(httpd_req_t* req)
+{
+    if (!g_ctx.session) return ESP_FAIL;
+    std::string wav, meta; uint32_t seq;
+    httpd_resp_set_type(req, "application/json");
+    if (!g_ctx.session->getWakeSample(wav, meta, seq))
+        return httpd_resp_sendstr(req, "{\"error\":\"no wake sample captured yet\"}");
+    return httpd_resp_send(req, meta.c_str(), meta.size());
+}
+
 // /hostname?name=foo — set the mDNS hostname live + persist to NVS.
 esp_err_t handleHostname(httpd_req_t* req)
 {
@@ -313,6 +339,8 @@ std::optional<WebServer> WebServer::start(Session& session, const uint8_t* html,
     httpd_uri_t u_state { "/state",   HTTP_GET, handleState,    nullptr };
     httpd_uri_t u_res   { "/resume",  HTTP_GET, handleResume,   nullptr };
     httpd_uri_t u_diag  { "/diag",    HTTP_GET, handleDiag,     nullptr };
+    httpd_uri_t u_wwav  { "/wake.wav", HTTP_GET, handleWakeWav,  nullptr };
+    httpd_uri_t u_wjson { "/wake.json",HTTP_GET, handleWakeJson, nullptr };
     httpd_uri_t u_host  { "/hostname",HTTP_GET, handleHostname, nullptr };
     httpd_uri_t u_ota   { "/ota",     HTTP_POST,handleOta,      nullptr };
     httpd_uri_t u_ws{};
@@ -323,6 +351,8 @@ std::optional<WebServer> WebServer::start(Session& session, const uint8_t* html,
     httpd_register_uri_handler(h, &u_state);
     httpd_register_uri_handler(h, &u_res);
     httpd_register_uri_handler(h, &u_diag);
+    httpd_register_uri_handler(h, &u_wwav);
+    httpd_register_uri_handler(h, &u_wjson);
     httpd_register_uri_handler(h, &u_host);
     httpd_register_uri_handler(h, &u_ota);
     httpd_register_uri_handler(h, &u_ws);
