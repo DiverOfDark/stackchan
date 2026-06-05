@@ -48,10 +48,12 @@ constexpr float kUplinkGain           = 4.0f;     // +12 dB — healthy STT leve
 constexpr float kWakeGain             = 8.0f;     // +18 dB — what the model trained on
 
 // Wake-trigger capture: how much mic audio (mono_uplink, 16 kHz int16) to keep
-// rolling so a fire can be snapshotted with the audio that caused it. 2 s
-// comfortably spans "Эй, Фемто!" plus lead-in.
+// rolling so a fire can be snapshotted with the audio that caused it. The fire
+// lands at the END of this buffer, so it holds the triggering phrase (positive
+// clips are a 1.5 s window) plus ~1.5 s of lead-in context — useful for both
+// labelling and the training slide-window (clip 1.5 s / aug 3.2 s).
 constexpr int          kWakeSampleRate      = 16000;
-constexpr std::size_t  kWakeCaptureSamples  = kWakeSampleRate * 2;   // 2 s = 64 KB PSRAM
+constexpr std::size_t  kWakeCaptureSamples  = kWakeSampleRate * 3;   // 3 s = 96 KB PSRAM
 
 // Wrap mono 16-bit PCM in a minimal 44-byte WAV container, so the captured
 // wake audio downloads/uploads as a self-contained .wav.

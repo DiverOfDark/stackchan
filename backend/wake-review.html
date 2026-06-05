@@ -1,0 +1,136 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Wake-sample review</title>
+<style>
+  :root { color-scheme: dark; }
+  body { font-family: system-ui, sans-serif; margin: 0; background:#111; color:#ddd; }
+  header { position:sticky; top:0; background:#1b1b1b; padding:12px 16px; border-bottom:1px solid #333;
+           display:flex; gap:14px; align-items:center; flex-wrap:wrap; }
+  h1 { font-size:16px; margin:0 12px 0 0; }
+  .counts span { margin-right:12px; font-size:13px; color:#9ab; }
+  .counts b { color:#fff; }
+  select, button { background:#222; color:#ddd; border:1px solid #444; border-radius:6px;
+                   padding:6px 10px; font-size:13px; cursor:pointer; }
+  button:hover { background:#2c2c2c; }
+  main { padding:12px 16px; display:grid; gap:10px; }
+  .card { background:#1a1a1a; border:1px solid #333; border-radius:8px; padding:10px 12px;
+          display:grid; grid-template-columns: 1fr auto; gap:6px 16px; align-items:center; }
+  .card.positive { border-left:4px solid #3a7; }
+  .card.negative { border-left:4px solid #c55; }
+  .meta { font-size:12px; color:#9ab; font-family:ui-monospace,monospace; }
+  .meta b { color:#fff; }
+  .name { font-size:12px; color:#778; word-break:break-all; }
+  audio { height:34px; vertical-align:middle; }
+  .actions { display:flex; gap:6px; }
+  .btn-pos { border-color:#3a7; } .btn-pos:hover { background:#1d3a2c; }
+  .btn-neg { border-color:#c55; } .btn-neg:hover { background:#3a1d1d; }
+  .tag { font-size:11px; padding:2px 8px; border-radius:10px; }
+  .tag.positive { background:#1d3a2c; color:#6e9; } .tag.negative { background:#3a1d1d; color:#e88; }
+  .tag.unlabeled { background:#333; color:#aaa; }
+  .hint { color:#778; font-size:12px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Wake-sample review</h1>
+  <label class="hint">Filter
+    <select id="filter">
+      <option value="all">all</option>
+      <option value="unlabeled" selected>unlabeled</option>
+      <option value="positive">positive (real)</option>
+      <option value="negative">negative (false)</option>
+    </select>
+  </label>
+  <span class="counts" id="counts"></span>
+  <button id="refresh">↻ refresh</button>
+  <span class="hint">keys: <b>p</b>=positive · <b>n</b>=negative · <b>u</b>=clear · <b>space</b>=play (per card on hover)</span>
+</header>
+<main id="list"></main>
+
+<script>
+const listEl = document.getElementById('list');
+const filterEl = document.getElementById('filter');
+const countsEl = document.getElementById('counts');
+let samples = [];
+
+async function load() {
+  const r = await fetch('/wake-samples');
+  const j = await r.json();
+  samples = j.samples || [];
+  render();
+}
+
+function counts() {
+  const c = { positive:0, negative:0, unlabeled:0 };
+  for (const s of samples) { c[(s.meta && s.meta.label) || 'unlabeled']++; }
+  countsEl.innerHTML =
+    `total <b>${samples.length}</b>` +
+    ` · positive <b>${c.positive}</b> · negative <b>${c.negative}</b> · unlabeled <b>${c.unlabeled}</b>`;
+}
+
+function render() {
+  counts();
+  const f = filterEl.value;
+  listEl.innerHTML = '';
+  for (const s of samples) {
+    const label = (s.meta && s.meta.label) || 'unlabeled';
+    if (f !== 'all' && label !== f) continue;
+    const m = s.meta || {};
+    const card = document.createElement('div');
+    card.className = 'card ' + label;
+    card.dataset.name = s.wav;
+    card.innerHTML = `
+      <div>
+        <div class="meta">peak <b>${m.peak ?? '?'}</b> · avg <b>${m.avg ?? '?'}</b> · hits <b>${m.hits ?? '?'}</b>
+          · win [${m.win ?? ''}] · ${(s.bytes/1024|0)} KB</div>
+        <div class="name">${s.wav} <span class="tag ${label}">${label}</span></div>
+        <audio controls preload="none" src="/wake-samples/${encodeURIComponent(s.wav)}"></audio>
+      </div>
+      <div class="actions">
+        <button class="btn-pos" data-l="positive">positive</button>
+        <button class="btn-neg" data-l="negative">negative</button>
+        <button data-l="unlabeled">clear</button>
+      </div>`;
+    card.querySelectorAll('button').forEach(b =>
+      b.onclick = () => setLabel(s, b.dataset.l));
+    listEl.appendChild(card);
+  }
+}
+
+async function setLabel(sample, label) {
+  const r = await fetch(`/wake-samples/${encodeURIComponent(sample.wav)}/label`, {
+    method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({ label })
+  });
+  if (!r.ok) { alert('label failed: ' + r.status); return; }
+  sample.meta = sample.meta || {};
+  sample.meta.label = label;
+  render();
+}
+
+// Keyboard shortcuts act on the card under the mouse.
+let hovered = null;
+listEl.addEventListener('mouseover', e => {
+  const c = e.target.closest('.card'); if (c) hovered = c.dataset.name;
+});
+document.addEventListener('keydown', e => {
+  if (!hovered) return;
+  const s = samples.find(x => x.wav === hovered); if (!s) return;
+  if (e.key === 'p') setLabel(s, 'positive');
+  else if (e.key === 'n') setLabel(s, 'negative');
+  else if (e.key === 'u') setLabel(s, 'unlabeled');
+  else if (e.key === ' ') {
+    const a = document.querySelector(`.card[data-name="${CSS.escape(hovered)}"] audio`);
+    if (a) { e.preventDefault(); a.paused ? a.play() : a.pause(); }
+  }
+});
+
+filterEl.onchange = render;
+document.getElementById('refresh').onclick = load;
+load();
+</script>
+</body>
+</html>

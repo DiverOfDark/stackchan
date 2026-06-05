@@ -26,7 +26,7 @@ RUN uv sync --no-dev --no-install-project
 
 # Application code. Glob *.py so adding new modules doesn't silently break
 # the image (tests/ is a subdir and is not matched by *.py at the top level).
-COPY *.py test-client.html ./
+COPY *.py *.html ./
 
 EXPOSE 7860
 

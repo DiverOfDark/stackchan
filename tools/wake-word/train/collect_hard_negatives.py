@@ -15,19 +15,22 @@ metric level (peak/avg/hits all in the real-wake range), so the only way to
 make the model stop firing on them is to train on the actual audio. This is
 that collection loop.
 
-Typical use:
+Two workflows:
 
-    # 1. Download new samples into captured_wakes/inbox/
-    python collect_hard_negatives.py fetch \\
+  A) Label in the browser (recommended), then one-shot sync into the corpus:
+
+    # Open the backend's review UI, play clips, mark positive/negative:
+    #     https://voice-assistant.kirillorlov.pro/wake-review
+    # Then pull every *labelled* sample straight into the training corpus:
+    python collect_hard_negatives.py sync \\
         --backend https://voice-assistant.kirillorlov.pro
+    python train_production.py
 
-    # 2. Label them — plays each clip (if a player is available), shows its
-    #    metrics, and asks real / false / skip:
-    python collect_hard_negatives.py label
-    #    (or just move files by hand: inbox/*.wav -> false/ or real/)
+  B) Label here on the CLI:
 
-    # 3. Stage the labelled clips into the training corpus, then retrain:
-    python collect_hard_negatives.py stage
+    python collect_hard_negatives.py fetch --backend https://…   # → captured_wakes/inbox/
+    python collect_hard_negatives.py label                       # interactive f/r/s
+    python collect_hard_negatives.py stage                       # → corpus/
     python train_production.py
 
 Only the standard library is used (urllib/json/wave) so it runs in the training
@@ -76,6 +79,37 @@ def cmd_fetch(args: argparse.Namespace) -> None:
         new += 1
         print(f"  ↓ {name}  peak={meta.get('peak')} avg={meta.get('avg')} hits={meta.get('hits')}")
     print(f"downloaded {new} new sample(s) into {INBOX}")
+
+
+def cmd_sync(args: argparse.Namespace) -> None:
+    """Download every sample labelled in the web UI straight into the corpus.
+
+    positive → corpus/positive_real/ , negative → corpus/hard_negatives/.
+    Unlabelled samples are skipped (label them at /wake-review first). Idempotent
+    — re-running just adds newly-labelled clips.
+    """
+    base = args.backend.rstrip("/")
+    CORPUS_POS_REAL.mkdir(parents=True, exist_ok=True)
+    CORPUS_HARD_NEG.mkdir(parents=True, exist_ok=True)
+    listing = json.loads(_get(f"{base}/wake-samples"))
+    samples = listing.get("samples", [])
+    dest_for = {"positive": CORPUS_POS_REAL, "negative": CORPUS_HARD_NEG}
+    counts = {"positive": 0, "negative": 0, "skipped": 0}
+    for s in samples:
+        name = s["wav"]
+        label = (s.get("meta") or {}).get("label", "unlabeled")
+        dest = dest_for.get(label)
+        if dest is None:
+            counts["skipped"] += 1
+            continue
+        out = dest / name
+        if not out.exists():
+            out.write_bytes(_get(f"{base}/wake-samples/{name}"))
+        counts[label] += 1
+    print(f"synced: {counts['positive']} positive → {CORPUS_POS_REAL}")
+    print(f"        {counts['negative']} negative → {CORPUS_HARD_NEG}")
+    print(f"        {counts['skipped']} unlabelled skipped (label them at {base}/wake-review)")
+    print("\nnow run:  python train_production.py")
 
 
 def _play(wav: Path) -> None:
@@ -149,6 +183,11 @@ def main() -> None:
     p = argparse.ArgumentParser(description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = p.add_subparsers(dest="cmd", required=True)
+
+    py = sub.add_parser("sync", help="pull samples labelled in the web UI into the corpus")
+    py.add_argument("--backend", required=True,
+                    help="backend base URL, e.g. https://voice-assistant.kirillorlov.pro")
+    py.set_defaults(func=cmd_sync)
 
     pf = sub.add_parser("fetch", help="download new wake samples from the backend")
     pf.add_argument("--backend", required=True,

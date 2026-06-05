@@ -813,6 +813,47 @@ async def wake_sample_get(name: str):
     return FileResponse(path, media_type=media, filename=safe)
 
 
+class WakeLabelRequest(BaseModel):
+    """Body for POST /wake-samples/{name}/label."""
+
+    label: str  # "positive" | "negative" | "unlabeled"
+
+
+@app.post("/wake-samples/{name}/label")
+async def wake_sample_label(name: str, req: WakeLabelRequest):
+    """Mark a sample positive (real wake) / negative (false fire) / unlabeled.
+
+    The label is stored in the sample's .json so the training-prep sync
+    (collect_hard_negatives.py) can sort clips into the corpus automatically.
+    """
+    if not WAKE_SAMPLE_DIR:
+        return JSONResponse({"error": "disabled"}, status_code=503)
+    label = req.label.strip().lower()
+    if label not in ("positive", "negative", "unlabeled"):
+        return JSONResponse(
+            {"error": "label must be positive|negative|unlabeled"}, status_code=400)
+    # Resolve to the sample's .json (basename only — no traversal).
+    stem = Path(name).name
+    stem = stem[:-4] if stem.endswith(".wav") else (
+        stem[:-5] if stem.endswith(".json") else stem)
+    j = Path(WAKE_SAMPLE_DIR) / f"{stem}.json"
+    if not j.is_file():
+        return JSONResponse({"error": "not found"}, status_code=404)
+    try:
+        meta = json.loads(j.read_text())
+    except (OSError, ValueError):
+        meta = {}
+    meta["label"] = label
+    j.write_text(json.dumps(meta))
+    return JSONResponse({"name": f"{stem}.wav", "label": label})
+
+
+@app.get("/wake-review")
+async def wake_review():
+    """Browser UI to play wake samples and label them positive/negative."""
+    return FileResponse(APP_DIR / "wake-review.html")
+
+
 @app.get("/api/transcripts/stream")
 async def transcripts_stream(request: Request):
     """Server-Sent Events feed of every user / assistant transcript.
