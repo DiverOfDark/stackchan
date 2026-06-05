@@ -29,6 +29,11 @@ spec:
         - name: models
           persistentVolumeClaim:
             claimName: {{ include "voice-assistant.fullname" . }}-models
+        {{- if .Values.wakeSamples.enabled }}
+        - name: wake-samples
+          persistentVolumeClaim:
+            claimName: {{ include "voice-assistant.fullname" . }}-wake-samples
+        {{- end }}
       # Pre-fetch the Whisper model + Piper voice onto the PVC. Idempotent:
       # a pod restart finds them present and skips the download.
       initContainers:
@@ -84,6 +89,10 @@ spec:
           volumeMounts:
             - name: models
               mountPath: /models
+            {{- if .Values.wakeSamples.enabled }}
+            - name: wake-samples
+              mountPath: /data
+            {{- end }}
           readinessProbe:
             httpGet:
               path: /health

@@ -133,6 +133,18 @@ persistence:
   storageClassName: ""       # empty -> cluster default
   accessModes: [ReadWriteOnce]
 
+# ── Wake-sample collection ───────────────────────────────────────────────
+# The device uploads the audio that triggered each wake fire (+ metrics) to
+# /wake-sample; we persist it here to build a labelled real/false corpus for
+# retraining the wake-word model. Disable to turn the whole feature off.
+wakeSamples:
+  enabled: true
+  dir: /data/wake-samples    # WAKE_SAMPLE_DIR (under the mounted PVC)
+  maxFiles: 1000             # WAKE_SAMPLE_MAX — rotate oldest beyond this
+  size: 2Gi
+  storageClassName: ""       # empty -> cluster default
+  accessModes: [ReadWriteOnce]
+
 # ── HTTP signaling / web client service ──────────────────────────────────
 service:
   type: ClusterIP

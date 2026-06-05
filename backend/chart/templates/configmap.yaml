@@ -26,5 +26,9 @@ data:
   HTTP_PORT: "7860"
   ESP32_COMPAT: {{ .Values.esp32Compat | quote }}
   STUNNER_TURN_URI: {{ .Values.stunner.turnUri | quote }}
+  {{- if .Values.wakeSamples.enabled }}
+  WAKE_SAMPLE_DIR: {{ .Values.wakeSamples.dir | quote }}
+  WAKE_SAMPLE_MAX: {{ .Values.wakeSamples.maxFiles | quote }}
+  {{- end }}
   SYSTEM_PROMPT: |-
 {{ .Values.systemPrompt | indent 4 }}
