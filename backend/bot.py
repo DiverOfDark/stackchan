@@ -132,6 +132,14 @@ STUNNER_TURN_URI = os.getenv("STUNNER_TURN_URI", "")
 STUNNER_TURN_USERNAME = os.getenv("STUNNER_TURN_USERNAME", "")
 STUNNER_TURN_PASSWORD = os.getenv("STUNNER_TURN_PASSWORD", "")
 
+# Wake-sample collection: the device POSTs the audio (WAV) that triggered each
+# wake fire plus its decision metrics here, so we can build a labelled corpus of
+# real wakes + (especially) false positives to retrain the wake-word model. The
+# strong false positives are indistinguishable from real wakes at the metric
+# level, so the only fix is collecting the actual audio. Empty dir = disabled.
+WAKE_SAMPLE_DIR = os.getenv("WAKE_SAMPLE_DIR", "")
+WAKE_SAMPLE_MAX = int(os.getenv("WAKE_SAMPLE_MAX", "1000"))   # keep newest N, rotate older
+
 _DEFAULT_SYSTEM_PROMPT = (
     "Ты — голосовой помощник по имени Фемто. Держись в манере агента Смита из "
     "«Матрицы»: говори спокойно, размеренно и холодно, с лёгким превосходством "
@@ -712,6 +720,97 @@ async def ice_servers():
             }
         )
     return JSONResponse({"iceServers": servers})
+
+
+def _rotate_wake_samples(directory: str, keep: int) -> None:
+    """Keep only the newest `keep` .wav files (and their .json siblings)."""
+    try:
+        wavs = sorted(
+            (p for p in Path(directory).glob("*.wav")),
+            key=lambda p: p.stat().st_mtime,
+        )
+    except OSError:
+        return
+    for p in wavs[:-keep] if keep > 0 else []:
+        for f in (p, p.with_suffix(".json")):
+            try:
+                f.unlink()
+            except OSError:
+                pass
+
+
+@app.post("/wake-sample")
+async def wake_sample(request: Request):
+    """Store a wake-trigger sample uploaded by the device.
+
+    Body = WAV (16 kHz mono int16); query string = the decision metrics
+    (seq/peak/avg/hits/win/sr/samples/uptime). Writes <base>.wav + <base>.json
+    into WAKE_SAMPLE_DIR (a mounted PVC), rotating the oldest beyond the cap.
+    """
+    if not WAKE_SAMPLE_DIR:
+        return JSONResponse({"error": "wake-sample storage disabled"}, status_code=503)
+
+    body = await request.body()
+    if not body:
+        return JSONResponse({"error": "empty body"}, status_code=400)
+
+    qp = dict(request.query_params)
+    meta = {
+        "received_at": time.time(),
+        "client": request.client.host if request.client else None,
+        "wav_bytes": len(body),
+        **qp,
+    }
+
+    Path(WAKE_SAMPLE_DIR).mkdir(parents=True, exist_ok=True)
+    # Filename: server-receive time (sortable) + the device's seq + uptime, so
+    # samples from the same boot stay grouped and nothing collides.
+    base = f"{int(time.time())}_seq{qp.get('seq', '0')}_up{qp.get('uptime', '0')}"
+    base = "".join(c for c in base if c.isalnum() or c in "._-")
+    wav_path = Path(WAKE_SAMPLE_DIR) / f"{base}.wav"
+    wav_path.write_bytes(body)
+    (Path(WAKE_SAMPLE_DIR) / f"{base}.json").write_text(json.dumps(meta))
+    _rotate_wake_samples(WAKE_SAMPLE_DIR, WAKE_SAMPLE_MAX)
+
+    logger.info(
+        f"wake-sample stored: {base}.wav ({len(body)} B) "
+        f"peak={qp.get('peak')} avg={qp.get('avg')} hits={qp.get('hits')}"
+    )
+    return JSONResponse({"stored": f"{base}.wav", "bytes": len(body)})
+
+
+@app.get("/wake-samples")
+async def wake_samples_list():
+    """List collected wake samples (newest first) with their metrics — so you
+    can browse what's been captured without kubectl-ing into the PVC."""
+    if not WAKE_SAMPLE_DIR or not Path(WAKE_SAMPLE_DIR).is_dir():
+        return JSONResponse({"dir": WAKE_SAMPLE_DIR, "count": 0, "samples": []})
+    items = []
+    for p in sorted(Path(WAKE_SAMPLE_DIR).glob("*.wav"),
+                    key=lambda p: p.stat().st_mtime, reverse=True):
+        meta = {}
+        j = p.with_suffix(".json")
+        if j.exists():
+            try:
+                meta = json.loads(j.read_text())
+            except (OSError, ValueError):
+                pass
+        items.append({"wav": p.name, "bytes": p.stat().st_size, "meta": meta})
+    return JSONResponse({"dir": WAKE_SAMPLE_DIR, "count": len(items), "samples": items})
+
+
+@app.get("/wake-samples/{name}")
+async def wake_sample_get(name: str):
+    """Download one collected wake sample (.wav or .json)."""
+    if not WAKE_SAMPLE_DIR:
+        return JSONResponse({"error": "disabled"}, status_code=503)
+    # Defend against path traversal — basename only, must live in the dir.
+    safe = Path(name).name
+    path = Path(WAKE_SAMPLE_DIR) / safe
+    if not path.is_file():
+        return JSONResponse({"error": "not found"}, status_code=404)
+    media = "audio/wav" if safe.endswith(".wav") else "application/json"
+    return FileResponse(path, media_type=media, filename=safe)
 
 
 @app.get("/api/transcripts/stream")
