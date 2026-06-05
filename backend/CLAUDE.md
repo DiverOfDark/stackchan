@@ -120,6 +120,20 @@ and around teardown. `peer_->tick()` stays lock-free (same task as teardown).
 - microWakeWord TFLM model ("Эй, Фемто!"), runs locally on the +18 dB mic path
   (`pv_transport/src/wake_engine.*`). Threshold/model tooling in
   `firmware/tools/train_wake_word/`. Detection is independent of any connection.
+- **Burst detector + two-gate fire** (`wake_word.cc`): fire when ≥`WAKE_MIN_HITS`
+  of the last `WAKE_WINDOW_LEN` frames clear `WAKE_THRESHOLD` (0.60) **AND** the
+  window peak ≥`WAKE_PEAK_MIN` (0.80) **AND** the window mean ≥`WAKE_AVG_MIN`
+  (0.50). The peak+mean gates were added from real captures to reject *weak*
+  false positives (one fails peak, one fails mean). **Strong** false positives
+  are metric-identical to real wakes (peak ~0.9+, mean ~0.6), so no gate can
+  reject them — that's a model-quality problem, fixed only by retraining.
+- **Wake-sample collection loop** (for that retraining): every fire snapshots the
+  ~2 s of mic audio that triggered it + its metrics; the device serves it locally
+  (`/wake.wav`, `/wake.json`) and uploads it to the backend `/wake-sample`, which
+  stores `<base>.wav`+`.json` on a PVC (`WAKE_SAMPLE_DIR`, chart `wakeSamples`).
+  `tools/train_wake_word/collect_hard_negatives.py` pulls them, you label
+  real/false, and `train_production.py` weights the false ones as the heaviest
+  hard negatives. See `firmware/tools/train_wake_word/README.md`.
 
 ## LED ring (`pv_domain/src/led_fsm.cpp` + `pv_app/src/ui.cpp`)
 - Driven each playback tick by `resolveLedState(connected, muted, since_rx,
@@ -209,8 +223,14 @@ deploy together.
   Poll it ~1 Hz to reconstruct a turn (LED, audio, wake) without serial.
 - `GET /ws/logs` — WebSocket live console (the device keeps **no** history; attach
   **before** the event you want). No auto-replay. A tiny raw-WS client is enough.
+- `GET /wake.wav` / `GET /wake.json` — the audio + metrics of the most recent
+  wake fire (for inspecting false positives locally; also auto-uploaded).
 - `GET /effect|/state|/resume`, `POST /ota`, `GET /hostname` — LED test, OTA, mDNS
   name. UI in `firmware/main/led_test.html` (LED test + diag + OTA + live console).
+- **httpd handler cap:** the server registers ~12 URIs; `max_uri_handlers` is
+  raised to 16 and `/ota`+`/ws/logs` are registered **first** — exceeding the cap
+  silently drops the *last*-registered handlers (this once knocked out `/ota` and
+  made the device un-OTA-able, needing a USB reflash). Keep recovery URIs first.
 
 ## Debugging a turn (the reliable recipe)
 1. Confirm device idle: `/diag` → `connected:false`.
