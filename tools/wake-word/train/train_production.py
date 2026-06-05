@@ -224,10 +224,21 @@ def gen_hard_negative_spectrograms() -> None:
     robust); truth=False is set in the config. Skipped silently when no hard
     negatives have been collected yet, so the pipeline runs without them too.
     """
-    if HARD_NEG_DIR.exists() and any(HARD_NEG_DIR.glob("*.wav")):
-        n = len(list(HARD_NEG_DIR.glob("*.wav")))
-        print(f"\n--- hard negatives ({n} device-captured false fires) ---")
-        gen_positive_spectrograms_for(HARD_NEG_DIR, "hard_negatives", repeat_mul=4)
+    if not (HARD_NEG_DIR.exists() and any(HARD_NEG_DIR.glob("*.wav"))):
+        return
+    n = len(list(HARD_NEG_DIR.glob("*.wav")))
+    # microWakeWord's Clips does a train/val/test split (test_size=0.2, then
+    # that half split again) — it needs ~10 clips minimum or the split yields an
+    # empty set and crashes. Below that, skip rather than crash: train without
+    # hard negatives and tell the user to collect more.
+    MIN_HARD_NEG = 10
+    if n < MIN_HARD_NEG:
+        print(f"\n--- hard negatives: only {n} clip(s); need ≥{MIN_HARD_NEG} for a "
+              f"train/val/test split — SKIPPING. Label more false fires at "
+              f"/wake-review, then rerun. ---")
+        return
+    print(f"\n--- hard negatives ({n} device-captured false fires) ---")
+    gen_positive_spectrograms_for(HARD_NEG_DIR, "hard_negatives", repeat_mul=4)
 
 
 # ---------- Step 3: Config + train ---------------------------------------
