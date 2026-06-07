@@ -1,9 +1,11 @@
 # CLAUDE.md — how this project works
 
-Self-hosted streaming **Russian** voice assistant: a hardware device (ESP32-S3 +
-Seeed ReSpeaker XVF3800) talks over WebRTC to an in-cluster **pipecat** backend
-(Whisper STT → local LLM → Piper TTS). Everything in the hot path is self-hosted;
-no cloud STT/TTS/LLM.
+Streaming **Russian** voice assistant: a hardware device (ESP32-S3 + Seeed
+ReSpeaker XVF3800) talks over WebRTC to an in-cluster **pipecat** backend
+(STT → local LLM → TTS). STT/TTS are **provider-switchable**: the default is
+ElevenLabs (cloud Scribe STT + custom Agent-Smith voice), with a fully local
+no-cloud fallback (FastWhisper STT + Piper TTS). The LLM + signaling + media
+relay are always self-hosted in-cluster. See **Backend** below.
 
 > `README.md` (root) and `firmware/README.md` cover setup/quickstart but predate
 > recent work and are **stale in places** (they still describe G.711, a
@@ -80,6 +82,11 @@ Lifecycle (in `firmware/components/pv_app/src/session.cpp`):
 5. **End of turn**: `conversation_active_=false` → `mainLoopTask` tears the peer
    down → back to idle. A follow-up needs another wake word.
 
+**Mid-turn reconnect:** if the path dies while connected — `peer_dead_` (libpeer
+reported Failed/Disconnected/Closed) or `media_dead` (no inbound packet for
+`kMediaDeadMs`, tracked via `last_rx_pkt_tick_`) — `mainLoopTask` rebuilds the
+peer up to `kMaxReconnectsPerTurn` times before giving up the turn.
+
 **Concurrency hazard:** `captureTask` sends on `peer_` (AV core) while
 `mainLoopTask` builds/tears it down (main core). `peer_mtx_` guards `peer_`
 lifetime — held briefly around `sendAudio` (re-checking `peer_` under the lock)
@@ -109,12 +116,20 @@ and around teardown. `peer_->tick()` stays lock-free (same task as teardown).
   cached nonce in `agent_recv`). Without this, STUNner expires the permission
   (~5 min) / allocation (~10 min) and media silently dies mid-session. (Relevant
   for long single turns; on-demand turns are usually short.)
-- **Signaling latency is the on-demand weak point.** A normal LAN client does the
-  full TLS handshake to Traefik in ~14 ms, but the device occasionally takes ~20 s
-  cold — blowing `kConnectTimeoutMs` and dropping the turn. **Under investigation**:
-  `HttpsClient::request` now logs a per-request `dns / tcp+tls / total` breakdown
-  (search log tag `https_client: timing`) to tell DNS-retry from Wi-Fi/TLS
-  handshake. Likely fix: keep the signaling DNS/TLS connection warm while idle.
+- **ICE servers are fetched at boot AND re-fetched lazily.** `main.cpp` fetches
+  `/ice-servers` (STUNner TURN creds) once at boot. If that fetch came back empty
+  — e.g. the device rebooted *while the backend was restarting* — the device has
+  no relay candidate, and since the backend's pod IP isn't LAN-routable, ICE only
+  succeeds one way (backend→device) and the connect **times out**. `buildAndOffer()`
+  now re-fetches `/ice-servers` whenever the cache is empty, so a bad boot fetch /
+  backend restart self-heals on the next wake instead of stranding the device.
+  (This was a real connect-timeout: no STUNner allocation, ICE pair was a direct
+  pod→LAN pair that only worked one direction.)
+- **Cold TLS handshake variance.** A normal LAN client does the full TLS handshake
+  to Traefik in ~14 ms, but the device occasionally takes ~20 s cold.
+  `HttpsClient::request` logs a per-request `dns / tcp+tls / total` breakdown (log
+  tag `https_client: timing`). Possible future fix: keep the signaling DNS/TLS
+  connection warm while idle.
 
 ## Wake word
 - microWakeWord TFLM model ("Эй, Фемто!"), runs locally on the +18 dB mic path
@@ -128,12 +143,22 @@ and around teardown. `peer_->tick()` stays lock-free (same task as teardown).
   are metric-identical to real wakes (peak ~0.9+, mean ~0.6), so no gate can
   reject them — that's a model-quality problem, fixed only by retraining.
 - **Wake-sample collection loop** (for that retraining): every fire snapshots the
-  ~2 s of mic audio that triggered it + its metrics; the device serves it locally
-  (`/wake.wav`, `/wake.json`) and uploads it to the backend `/wake-sample`, which
-  stores `<base>.wav`+`.json` on a PVC (`WAKE_SAMPLE_DIR`, chart `wakeSamples`).
-  `tools/train_wake_word/collect_hard_negatives.py` pulls them, you label
-  real/false, and `train_production.py` weights the false ones as the heaviest
-  hard negatives. See `firmware/tools/train_wake_word/README.md`.
+  rolling **3 s** of mic audio that triggered it + its metrics (`session.cpp`
+  `kWakeCaptureSamples`); the device serves it locally (`/wake.wav`, `/wake.json`)
+  and a low-prio uploader task POSTs it to the backend `/wake-sample`, stored as
+  `<base>.wav`+`.json` on a PVC (`WAKE_SAMPLE_DIR`, chart `wakeSamples`).
+- **Labeling + retrain loop:** label samples in the browser at backend
+  **`/wake-review`** (play + mark positive/negative; stored in each `.json`), then
+  `tools/train_wake_word/collect_hard_negatives.py sync --backend <url>` pulls the
+  labeled clips into the corpus (negative→`hard_negatives/`, positive→
+  `positive_real/`) and `train_production.py` weights the false ones the heaviest
+  (`sampling 20 / penalty 4`; needs ≥10 hard negatives or they're skipped). The
+  **shipped `wake_word_ru.tflite` is now trained on field hard negatives.** Embed a
+  new model with `firmware/tools/embed_tflite.py` → `wake_word_model_data.c`.
+  Full recipe in `firmware/tools/train_wake_word/README.md`.
+- **Gates are tuned to the model's probability distribution** — after a retrain,
+  re-check `WAKE_THRESHOLD`/`WAKE_PEAK_MIN`/`WAKE_AVG_MIN` against real `wake!`
+  logs (`verify_model.py --roc`), since a new model scores wakes differently.
 
 ## LED ring (`pv_domain/src/led_fsm.cpp` + `pv_app/src/ui.cpp`)
 - Driven each playback tick by `resolveLedState(connected, muted, since_rx,
@@ -147,6 +172,15 @@ and around teardown. `peer_->tick()` stays lock-free (same task as teardown).
   (bridge inter-sentence gaps → steady pink), `TALKING_HOLD=1500ms` (bridge speech
   pauses → steady cyan), `THINKING_MAX=15000ms` (stay amber through the whole
   backend round-trip instead of dropping to green mid-wait).
+
+## UI chirps (`pv_domain/include/domain/chirp.hpp`)
+- Short synthesized sound effects on the speaker: **Wake** ("online" blip on wake)
+  and **End** (on session end). Style is "evil cyberpunk corporate" — a low drone
+  bed + a glassy FM-bell **tritone**, click-free (end-fade). Pure header, host-
+  testable. Triggered via `chirp_pending_` (set by `captureTask`, played by the
+  playback task — the sole I2S writer — so there's no cross-task speaker
+  contention). Works off-session (wake/end happen with no peer). Synthesized
+  from scratch — **do not** embed copyrighted game audio.
 
 ## Backend (`app/bot.py`, pipecat)
 - Pipeline: SmallWebRTC in → STT → LLMUserAggregator → OpenAI-compatible LLM →
@@ -172,6 +206,14 @@ and around teardown. `peer_->tick()` stays lock-free (same task as teardown).
   candidates. Does **not** touch codec/rtpmap lines.
 - Note: Piper model currently loads **per connection** (~1.4 s) — minor latency,
   candidate for a future optimization (load once / share).
+- **Wake-sample collection endpoints** (gated on `WAKE_SAMPLE_DIR`, a mounted PVC
+  via chart `wakeSamples`): `POST /wake-sample` (device uploads WAV body + metrics
+  query → `<base>.wav`+`.json`, rotates beyond `WAKE_SAMPLE_MAX`); `GET
+  /wake-samples` (list + metrics, incl. each clip's `label`); `GET
+  /wake-samples/{name}` (download); `POST /wake-samples/{name}/label`
+  (positive/negative/unlabeled → stored in the `.json`); `GET /wake-review`
+  (browser UI to play + label). `/` (test-client) links to it. The page ships in
+  the image — Dockerfile copies `*.html`.
 
 ## Firmware layering (strict, bottom-up; depend only downward)
 - `pv_domain` — pure C++17, **zero ESP-IDF deps**, host-testable with Catch2
@@ -197,6 +239,10 @@ curl -sS -X POST --data-binary @.pio/build/seeed_xiao_esp32s3/firmware.bin \
 ```
 - On-demand firmware boots to **idle/disconnected** — that's correct, not a fault.
   Don't wait for `connected:true` at idle.
+- **USB recovery flash** (when OTA is dead — e.g. handler-cap regression): the XIAO
+  is native-USB → `/dev/ttyACM*` (VID `303A`), *not* `/dev/ttyUSB*` (a CH340 is a
+  different device — don't flash it). `~/.platformio/penv/bin/pio run -t upload
+  --upload-port /dev/ttyACM0` (hold BOOT while plugging if auto-reset fails).
 
 **Host unit tests** (`firmware/host_test/`): designed for CMake + Catch2, but
 `cmake` is **not available** in this environment. Validate domain code by
@@ -241,8 +287,13 @@ deploy together.
    and connect/disconnect/ICE.
 
 ## Known open items
-- **Cold signaling connect latency** (~20 s outlier) — instrumented (`https_client:
+- **Cold TLS handshake variance** (~20 s outlier) — instrumented (`https_client:
   timing`), root cause TBD (DNS-retry vs Wi-Fi/TLS). Fix likely = warm signaling.
+  (The *empty-ICE-servers* connect-timeout cause is fixed — see TURN/ICE.)
+- **Wake-word false positives:** strong ones are metric-identical to real wakes
+  (gates can't help) — the fix is collecting field hard negatives via `/wake-review`
+  and retraining. First hard-negative-trained model is shipped; keep labeling +
+  retraining to drive the rate down, and re-tune the gates per new model.
 - Piper loads per connection on the backend (latency).
 - XVF3800 AEC config still uses a half-duplex echo guard (`kEchoGuardMs`) rather
   than full AEC reference tuning.
