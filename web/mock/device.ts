@@ -34,6 +34,30 @@ export function mockDevice(opts: { setup?: boolean } = {}): Plugin {
     voice_url: '',
   };
   let screen = 'face';
+  let motion = { yaw: 0, pitch: 25, zero: { yaw: 478, pitch: 544 }, torque: true, limits: { yaw: 60, pitch_min: 0, pitch_max: 60 } };
+
+  // A small gradient BMP standing in for camera/screen frames.
+  const bmp = (w: number, h: number, hue: number) => {
+    const row = (w * 3 + 3) & ~3;
+    const b = Buffer.alloc(54 + row * h);
+    b.write('BM');
+    b.writeUInt32LE(b.length, 2);
+    b.writeUInt32LE(54, 10);
+    b.writeUInt32LE(40, 14);
+    b.writeInt32LE(w, 18);
+    b.writeInt32LE(-h, 22);
+    b.writeUInt16LE(1, 26);
+    b.writeUInt16LE(24, 28);
+    const t = Date.now() / 1000;
+    for (let y = 0; y < h; y++)
+      for (let x = 0; x < w; x++) {
+        const o = 54 + y * row + x * 3;
+        b[o] = (x * 255) / w;
+        b[o + 1] = (y * 255) / h;
+        b[o + 2] = 128 + 127 * Math.sin(t + hue);
+      }
+    return b;
+  };
   let mood = 'Contempt';
 
   const networks: Network[] = [
@@ -54,6 +78,8 @@ export function mockDevice(opts: { setup?: boolean } = {}): Plugin {
     usage: { signed_in: true, session_pct: 38, week_pct: 61, session_reset_min: 134, stale: false, error: null },
     heap: { internal_kb: 196, psram_kb: 5214 },
     fps: 12.1,
+    vision: { face: { x: Math.sin(Date.now() / 2000) * 0.5, y: -0.2 }, seen_s_ago: 0.3 },
+    voice: { state: 'idle', mic: Math.abs(Math.sin(Date.now() / 700)) * 0.4 },
     dirty: JSON.stringify(saved) !== JSON.stringify(live),
   });
 
@@ -154,6 +180,25 @@ export function mockDevice(opts: { setup?: boolean } = {}): Plugin {
             return send(res, 204);
           case 'POST /reboot':
           case 'POST /factory-reset':
+            return send(res, 204);
+          case 'GET /camera.bmp':
+            res.writeHead(200, { 'Content-Type': 'image/bmp' });
+            return res.end(bmp(160, 120, 0));
+          case 'GET /screen.bmp':
+            res.writeHead(200, { 'Content-Type': 'image/bmp' });
+            return res.end(bmp(320, 240, 2));
+          case 'GET /motion':
+            return send(res, 200, motion);
+          case 'PUT /motion': {
+            const b = await body(req);
+            if (b.jog) [motion.yaw, motion.pitch] = b.jog;
+            if (b.torque !== undefined) motion.torque = b.torque;
+            return send(res, 204);
+          }
+          case 'POST /motion/zero':
+            motion = { ...motion, yaw: 0, pitch: 0, zero: { yaw: 470, pitch: 560 } };
+            return send(res, 200, motion.zero);
+          case 'POST /voice/talk':
             return send(res, 204);
           case 'POST /ota':
             req.resume();

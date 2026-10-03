@@ -20,9 +20,9 @@ const DT: f32 = 0.02;
 /// Neutral pitch: slightly up, so following can look down a little.
 /// Neutral pitch: the camera sits in the head, so look up at a seated face.
 pub const PITCH_NEUTRAL: f32 = 25.0;
-const YAW_LIMIT: f32 = 60.0;
-const PITCH_MIN: f32 = 0.0;
-const PITCH_MAX: f32 = 60.0;
+pub const YAW_LIMIT: f32 = 60.0;
+pub const PITCH_MIN: f32 = 0.0;
+pub const PITCH_MAX: f32 = 60.0;
 /// Torque off after resting this long (no buzz, less power).
 const REST_TORQUE_OFF: Duration = Duration::from_secs(10);
 
@@ -34,6 +34,25 @@ pub struct Target {
     /// Allowed to rest (Standby): torque may switch off once settled.
     pub may_rest: bool,
 }
+
+/// Shared between the UI loop, the web UI and the motion task.
+#[derive(Debug)]
+pub struct Motion {
+    pub target: Target,
+    /// Web UI jog: absolute pose held until the instant.
+    pub manual: Option<(f32, f32, Instant)>,
+    /// Web UI nod test until the instant.
+    pub nod_until: Option<Instant>,
+    /// Torque allowed at all (web UI switch).
+    pub torque_allowed: bool,
+    /// Current pose (degrees) and calibration (raw zero positions).
+    pub pos: (f32, f32),
+    pub zero: (u16, u16),
+    /// Set by the web UI: re-zero both axes at the current pose.
+    pub rezero: bool,
+}
+
+pub type MotionRef = Arc<Mutex<Motion>>;
 
 struct Uart(UartDriver<'static>);
 
@@ -90,7 +109,7 @@ impl Axis {
 }
 
 /// Start the motion task. Servo power must already be on.
-pub fn start(uart: UART1<'static>, tx: Gpio6<'static>, rx: Gpio7<'static>, nvs: EspDefaultNvsPartition) -> Result<Arc<Mutex<Target>>> {
+pub fn start(uart: UART1<'static>, tx: Gpio6<'static>, rx: Gpio7<'static>, nvs: EspDefaultNvsPartition) -> Result<MotionRef> {
     let driver = UartDriver::new(uart, tx, rx, Option::<esp_idf_svc::hal::gpio::AnyIOPin>::None, Option::<esp_idf_svc::hal::gpio::AnyIOPin>::None, &Config::new().baudrate(Hertz(scs::BAUD)))?;
     let mut bus = ScsBus::new(Uart(driver));
 
@@ -116,7 +135,15 @@ pub fn start(uart: UART1<'static>, tx: Gpio6<'static>, rx: Gpio7<'static>, nvs: 
     }
     info!("head at yaw {:.1}° pitch {:.1}°", yaw.pos, pitch.pos);
 
-    let target = Arc::new(Mutex::new(Target { yaw: 0.0, pitch: PITCH_NEUTRAL, may_rest: false }));
+    let target = Arc::new(Mutex::new(Motion {
+        target: Target { yaw: 0.0, pitch: PITCH_NEUTRAL, may_rest: false },
+        manual: None,
+        nod_until: None,
+        torque_allowed: true,
+        pos: (yaw.pos, pitch.pos),
+        zero: (yaw.zero, pitch.zero),
+        rezero: false,
+    }));
     let shared = target.clone();
     crate::psram_stack_thread("motion", 6144, move || {
         let mut torque = false;
@@ -124,7 +151,42 @@ pub fn start(uart: UART1<'static>, tx: Gpio6<'static>, rx: Gpio7<'static>, nvs: 
         let mut errors = 0u32;
         let started = Instant::now();
         loop {
-            let mut t = *shared.lock().unwrap();
+            let (mut t, allowed) = {
+                let mut m = shared.lock().unwrap();
+                if std::mem::take(&mut m.rezero) {
+                    // Current pose becomes the new centre (raw zero), so the
+                    // head doesn't move; the web handler persists it.
+                    yaw.zero = yaw.raw();
+                    pitch.zero = pitch.raw();
+                    yaw.pos = 0.0;
+                    pitch.pos = 0.0;
+                    yaw.vel = 0.0;
+                    pitch.vel = 0.0;
+                    m.zero = (yaw.zero, pitch.zero);
+                    info!("servo zero now yaw {} pitch {}", yaw.zero, pitch.zero);
+                }
+                let mut t = m.target;
+                let now = Instant::now();
+                if let Some((y, p, until)) = m.manual {
+                    if now < until {
+                        t = Target { yaw: y, pitch: p, may_rest: false };
+                    } else {
+                        m.manual = None;
+                    }
+                }
+                if let Some(until) = m.nod_until {
+                    if now < until {
+                        let ph = (until - now).as_secs_f32() * std::f32::consts::TAU * 1.2;
+                        t.pitch = PITCH_NEUTRAL + 12.0 * ph.sin();
+                        t.yaw = 0.0;
+                        t.may_rest = false;
+                    } else {
+                        m.nod_until = None;
+                    }
+                }
+                m.pos = (yaw.pos, pitch.pos);
+                (t, m.torque_allowed)
+            };
             // Boot stretch: glance left, right, then hand over to the engine.
             match started.elapsed().as_millis() {
                 0..700 => t = Target { yaw: -20.0, pitch: PITCH_NEUTRAL + 8.0, may_rest: false },
@@ -141,7 +203,7 @@ pub fn start(uart: UART1<'static>, tx: Gpio6<'static>, rx: Gpio7<'static>, nvs: 
                 (true, s) => s,
                 (false, _) => None,
             };
-            let rest = resting_since.is_some_and(|s| s.elapsed() > REST_TORQUE_OFF);
+            let rest = !allowed || resting_since.is_some_and(|s| s.elapsed() > REST_TORQUE_OFF);
             if rest == torque {
                 for axis in [&yaw, &pitch] {
                     if let Err(e) = bus.torque(axis.id, !rest) {
@@ -152,6 +214,11 @@ pub fn start(uart: UART1<'static>, tx: Gpio6<'static>, rx: Gpio7<'static>, nvs: 
                     }
                 }
                 torque = !rest;
+            }
+            if !allowed {
+                // Limp: follow the target in software so re-enabling is smooth.
+                yaw.pos = ty;
+                pitch.pos = tp;
             }
             if torque && !settled {
                 for axis in [&yaw, &pitch] {

@@ -8,6 +8,9 @@
   import Test from './pages/Test.svelte';
   import System from './pages/System.svelte';
   import Setup from './pages/Setup.svelte';
+  import Camera from './pages/Camera.svelte';
+  import Motion from './pages/Motion.svelte';
+  import Logs from './pages/Logs.svelte';
 
   let status = $state<Status | null>(null);
   let needLogin = $state(false);
@@ -41,14 +44,17 @@
     ['/', 'Status'],
     ['/settings', 'Settings'],
     ['/connections', 'Connections'],
+    ['/camera', 'Camera'],
+    ['/motion', 'Motion'],
     ['/test', 'Test'],
+    ['/logs', 'Logs'],
     ['/system', 'System'],
   ] as const;
 </script>
 
 <header class="top">
   <div class="bar">
-    <span class="brand">{status?.setup ? 'FEMTO' : 'FEMTO'}</span>
+    <span class="brand">FEMTO</span>
     <span class="jp">フェムト · 監視</span>
     <span class="unit">{offline ? 'link lost' : status ? `unit 07 · ${status.version}` : '…'}</span>
   </div>
@@ -72,6 +78,12 @@
     <SettingsPage {status} />
   {:else if ui.route === '/connections'}
     <Connections {status} />
+  {:else if ui.route === '/camera'}
+    <Camera {status} />
+  {:else if ui.route === '/motion'}
+    <Motion />
+  {:else if ui.route === '/logs'}
+    <Logs />
   {:else if ui.route === '/test'}
     <Test />
   {:else if ui.route === '/system'}

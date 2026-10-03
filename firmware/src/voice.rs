@@ -48,6 +48,20 @@ impl Voice {
         engine.set_mouth_level(speaking.then_some(level));
     }
 
+    /// (state name, mic level 0..1) for the web UI.
+    pub fn status(&self) -> (&'static str, f32) {
+        // SAFETY: plain getters.
+        let (st, mic) = unsafe { (voice::femto_voice_state(), voice::femto_voice_mic_level()) };
+        let name = match st {
+            voice::femto_voice_state_t_FEMTO_VOICE_CONNECTING => "connecting",
+            voice::femto_voice_state_t_FEMTO_VOICE_LISTENING => "listening",
+            voice::femto_voice_state_t_FEMTO_VOICE_THINKING => "thinking",
+            voice::femto_voice_state_t_FEMTO_VOICE_SPEAKING => "speaking",
+            _ => "idle",
+        };
+        (name, mic)
+    }
+
     pub fn push_to_talk(&self) {
         // SAFETY: plain call.
         unsafe { voice::femto_voice_wake() };

@@ -7,6 +7,7 @@
 mod board;
 mod dns;
 mod hub;
+mod logtap;
 mod store;
 mod tz;
 mod vision;
@@ -30,7 +31,9 @@ const WIPE_WINDOW_S: u8 = 5;
 
 fn main() -> anyhow::Result<()> {
     sys::link_patches();
-    esp_idf_svc::log::EspLogger::initialize_default();
+    // SAFETY: installs a log tap; call once, before other tasks log.
+    unsafe { sys::logtap::femto_logtap_install() };
+    logtap::init();
     info!("femto {} booting", env!("CARGO_PKG_VERSION"));
 
     let p = Peripherals::take()?;
@@ -43,7 +46,7 @@ fn main() -> anyhow::Result<()> {
     let store = store::Store::open(nvs.clone())?;
     let (ui_tx, ui_rx) = std::sync::mpsc::channel();
     let (net_cmd_tx, net_cmd_rx) = std::sync::mpsc::channel();
-    let hub = hub::Hub::new(store, ui_tx, net_cmd_tx);
+    let hub = hub::Hub::new(store, nvs.clone(), ui_tx, net_cmd_tx);
     let mut cfg = hub.lock().unwrap().live.clone();
     let mut cfg_rev = 0;
     let mut engine = Engine::new();
@@ -100,6 +103,7 @@ fn main() -> anyhow::Result<()> {
         }
         None => None,
     };
+    hub.lock().unwrap().motion = head.clone();
 
     // LCD scan-out runs on its own thread so it overlaps the next render.
     let (to_lcd, lcd_rx) = std::sync::mpsc::sync_channel::<Canvas>(1);
@@ -201,6 +205,12 @@ fn main() -> anyhow::Result<()> {
                 }
             }
         }
+        // Web UI screen mirror: hand over the last frame pushed to the LCD.
+        if let Some(reply) = hub.lock().unwrap().screen_req.take() {
+            let mut px = vec![0u16; femto_render::W * femto_render::H];
+            canvas.scanout(0, &mut px, false);
+            reply.send(px).ok();
+        }
         while let Ok(cmd) = ui_rx.try_recv() {
             info!("ui: {cmd:?}");
             match cmd {
@@ -211,6 +221,11 @@ fn main() -> anyhow::Result<()> {
                     unsafe { sys::esp_restart() };
                 }
                 hub::UiCmd::FactoryReset => factory_wipe(),
+                hub::UiCmd::Talk => {
+                    if let Some(v) = &voice {
+                        v.push_to_talk();
+                    }
+                }
             }
         }
         if !ota_confirmed && start.duration_since(boot_at) > Duration::from_secs(60) {
@@ -281,7 +296,8 @@ fn main() -> anyhow::Result<()> {
         }
         if let Some(head) = &head {
             let (pan, tilt) = tracker.head(&engine, cfg.follow);
-            let mut t = head.lock().unwrap();
+            let mut m = head.lock().unwrap();
+            let t = &mut m.target;
             // Engine pan + = viewer's right = robot's left (yaw −).
             t.yaw = -pan;
             t.pitch = motion::PITCH_NEUTRAL + tilt;
@@ -312,6 +328,11 @@ fn main() -> anyhow::Result<()> {
             s.fps = fps;
             s.face = tracker.last_face();
             s.face_age_s = tracker.last_seen.map(|t| t.elapsed().as_secs_f32());
+            if let Some(v) = &voice {
+                let (st, mic) = v.status();
+                s.voice_state = Some(st);
+                s.mic_level = mic;
+            }
         }
         // Hand the frame to the LCD thread; continue on the other buffer.
         let next = match spare.take() {

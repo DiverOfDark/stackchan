@@ -36,6 +36,7 @@ export interface Status {
   panel: string;
   wifi: { ssid: string | null; ip: string | null; rssi: number | null; connected: boolean };
   vision?: { face: { x: number; y: number } | null; seen_s_ago: number | null };
+  voice?: { state: 'idle' | 'connecting' | 'listening' | 'thinking' | 'speaking' | null; mic: number };
   usage: {
     signed_in: boolean;
     session_pct: number | null;
@@ -67,6 +68,14 @@ export interface ConnectionsPatch {
   /** Empty string clears it. Never sent back by the device. */
   usage_token?: string;
   voice_url?: string;
+}
+
+export interface MotionState {
+  yaw: number;
+  pitch: number;
+  zero: { yaw: number; pitch: number };
+  torque: boolean;
+  limits: { yaw: number; pitch_min: number; pitch_max: number };
 }
 
 export interface TestResult {
@@ -120,6 +129,32 @@ export const api = {
   setPassword: (password: string) => call<void>('POST', '/auth/password', { password }),
   reboot: () => call<void>('POST', '/reboot'),
   factoryReset: () => call<void>('POST', '/factory-reset', { confirm: 'WIPE' }),
+  motion: () => call<MotionState>('GET', '/motion'),
+  jog: (yaw: number, pitch: number) => call<void>("PUT", "/motion", { jog: [Math.round(yaw), Math.round(pitch)] }),
+  setTorque: (on: boolean) => call<void>('PUT', '/motion', { torque: on }),
+  nod: () => call<void>('PUT', '/motion', { nod: true }),
+  setZero: () => call<{ yaw: number; pitch: number }>('POST', '/motion/zero'),
+  talk: () => call<void>('POST', '/voice/talk'),
+  /** Live log stream (WebSocket); returns a close function. */
+  logs(onText: (t: string) => void, onState: (open: boolean) => void): () => void {
+    let ws: WebSocket | null = null;
+    let closed = false;
+    // The page proves its session with a one-time ticket as the first frame.
+    call<{ ticket: string }>('GET', '/ws/ticket').then(({ ticket }) => {
+      if (closed) return;
+      ws = new WebSocket(`${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/api/ws/logs`);
+      ws.onopen = () => {
+        ws!.send(ticket);
+        onState(true);
+      };
+      ws.onclose = () => onState(false);
+      ws.onmessage = (e) => onText(typeof e.data === 'string' ? e.data : '');
+    }, () => onState(false));
+    return () => {
+      closed = true;
+      ws?.close();
+    };
+  },
   /** Finishes setup: saves everything and reboots into station mode. */
   finishSetup: () => call<void>('POST', '/setup/finish'),
   async ota(file: File, onProgress: (pct: number) => void): Promise<void> {

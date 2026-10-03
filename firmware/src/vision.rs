@@ -69,6 +69,12 @@ pub fn stop() {
     unsafe { vision::femto_vision_stop() };
 }
 
+/// 24-bit BMP from native RGB565 pixels (the framebuffer).
+pub fn bmp_from_rgb565(px: &[u16], w: usize, h: usize) -> Vec<u8> {
+    let raw: Vec<u8> = px.iter().flat_map(|p| p.to_be_bytes()).collect();
+    bmp_from_rgb565be(&raw, w, h)
+}
+
 /// 24-bit BMP from big-endian RGB565 (camera byte order).
 pub fn bmp_from_rgb565be(raw: &[u8], w: usize, h: usize) -> Vec<u8> {
     let row = (w * 3 + 3) & !3;

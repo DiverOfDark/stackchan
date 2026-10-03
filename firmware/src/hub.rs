@@ -33,6 +33,8 @@ pub enum UiCmd {
     Trigger(Trigger),
     Reboot,
     FactoryReset,
+    /// Push-to-talk from the web UI.
+    Talk,
 }
 
 /// Web → network task.
@@ -55,6 +57,8 @@ pub struct Snapshot {
     /// Face tracking: last face centre (−1..1) and seconds since seen.
     pub face: Option<(f32, f32)>,
     pub face_age_s: Option<f32>,
+    pub voice_state: Option<&'static str>,
+    pub mic_level: f32,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -81,10 +85,16 @@ pub struct Hub {
     pub ui: Sender<UiCmd>,
     pub net_cmd: Sender<NetCmd>,
     pub started: Instant,
+    /// Web UI screen mirror: the UI loop answers with the current frame.
+    pub screen_req: Option<Sender<Vec<u16>>>,
+    pub motion: Option<crate::motion::MotionRef>,
+    pub nvs: esp_idf_svc::nvs::EspDefaultNvsPartition,
+    /// One-time tickets for the log WebSocket (issued to logged-in pages).
+    pub ws_tickets: std::collections::HashSet<String>,
 }
 
 impl Hub {
-    pub fn new(store: Store, ui: Sender<UiCmd>, net_cmd: Sender<NetCmd>) -> HubRef {
+    pub fn new(store: Store, nvs: esp_idf_svc::nvs::EspDefaultNvsPartition, ui: Sender<UiCmd>, net_cmd: Sender<NetCmd>) -> HubRef {
         let saved = store.settings();
         Arc::new(Mutex::new(Hub {
             live: saved.clone(),
@@ -98,6 +108,10 @@ impl Hub {
             ui,
             net_cmd,
             started: Instant::now(),
+            screen_req: None,
+            motion: None,
+            nvs,
+            ws_tickets: Default::default(),
         }))
     }
 }

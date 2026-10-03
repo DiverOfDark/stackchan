@@ -7,6 +7,8 @@ use std::time::{Duration, Instant};
 use anyhow::{anyhow, Result};
 use embedded_svc::http::Headers;
 use embedded_svc::io::Write;
+use embedded_svc::ws::FrameType;
+use esp_idf_svc::http::server::ws::{EspHttpWsConnection, EspHttpWsDetachedSender};
 use esp_idf_svc::http::server::{Configuration, EspHttpConnection, EspHttpServer, Request};
 use esp_idf_svc::http::Method;
 use esp_idf_svc::ota::EspOta;
@@ -116,6 +118,7 @@ fn status_json(hub: &HubRef) -> Value {
         },
         "heap": { "internal_kb": internal / 1024, "psram_kb": psram / 1024 },
         "fps": s.fps,
+        "voice": { "state": s.voice_state, "mic": s.mic_level },
         "vision": { "face": s.face.map(|(x, y)| json!({ "x": x, "y": y })), "seen_s_ago": s.face_age_s },
         "dirty": h.live != h.saved,
     })
@@ -381,6 +384,145 @@ pub fn start(hub: &HubRef) -> Result<EspHttpServer<'static>> {
         let mut r = req.into_response(200, None, &[("Content-Type", "image/bmp"), ("Cache-Control", "no-store")])?;
         r.write_all(&bmp)?;
         Ok(())
+    })?;
+
+    route(&mut server, hub, "/api/screen.bmp", Method::Get, false, |hub, req| {
+        let (tx, rx) = mpsc::channel();
+        hub.lock().unwrap().screen_req = Some(tx);
+        let Ok(px) = rx.recv_timeout(Duration::from_secs(2)) else {
+            return err(req, 503, "renderer busy");
+        };
+        let bmp = crate::vision::bmp_from_rgb565(&px, femto_render::W, femto_render::H);
+        let mut r = req.into_response(200, None, &[("Content-Type", "image/bmp"), ("Cache-Control", "no-store")])?;
+        r.write_all(&bmp)?;
+        Ok(())
+    })?;
+
+    // Live logs: WebSocket viewers get every log line while connected.
+    let viewers: std::sync::Arc<std::sync::Mutex<Vec<EspHttpWsDetachedSender>>> = Default::default();
+    {
+        let viewers = viewers.clone();
+        let hub = hub.clone();
+        server.ws_handler("/api/ws/logs", None, move |ws: &mut EspHttpWsConnection| -> Result<()> {
+            // ESP-IDF doesn't hand us the handshake here, so the page sends a
+            // ticket (from the authenticated /api/ws/ticket) as its first frame.
+            if ws.is_closed() {
+                let fd = ws.session();
+                let mut v = viewers.lock().unwrap();
+                v.retain(|s| s.session() != fd);
+                if v.is_empty() {
+                    // SAFETY: plain flag set.
+                    unsafe { esp_idf_svc::sys::logtap::femto_logtap_enable(false) };
+                }
+                return Ok(());
+            }
+            let mut buf = [0u8; 64];
+            let (_, len) = ws.recv(&mut buf)?;
+            let ticket = std::str::from_utf8(&buf[..len.min(buf.len())]).unwrap_or("").trim_end_matches('\0');
+            let ok = hub.lock().unwrap().ws_tickets.remove(ticket);
+            if !ok {
+                return Err(anyhow!("bad ticket"));
+            }
+            viewers.lock().unwrap().push(ws.create_detached_sender()?);
+            // SAFETY: plain flag set.
+            unsafe { esp_idf_svc::sys::logtap::femto_logtap_enable(true) };
+            info!("log viewer connected");
+            Ok(())
+        })?;
+    }
+    std::thread::Builder::new().name("logs-ws".into()).stack_size(4096).spawn(move || {
+        let mut buf = vec![0u8; 1024];
+        loop {
+            // SAFETY: buffer outlives the call.
+            let n = unsafe { esp_idf_svc::sys::logtap::femto_logtap_receive(buf.as_mut_ptr() as *mut _, buf.len(), 500) };
+            if n == 0 {
+                continue;
+            }
+            // Send outside the lock: a detached send waits on the httpd task,
+            // which needs this lock to process a viewer's close → deadlock.
+            let mut senders: Vec<EspHttpWsDetachedSender> = viewers.lock().unwrap().clone();
+            let dead: Vec<i32> = senders
+                .iter_mut()
+                .filter_map(|s| s.send(FrameType::Text(false), &buf[..n]).is_err().then(|| s.session()))
+                .collect();
+            if !dead.is_empty() {
+                let mut v = viewers.lock().unwrap();
+                v.retain(|s| !dead.contains(&s.session()));
+                if v.is_empty() {
+                    // SAFETY: plain flag set.
+                    unsafe { esp_idf_svc::sys::logtap::femto_logtap_enable(false) };
+                }
+            }
+        }
+    })?;
+
+    route(&mut server, hub, "/api/ws/ticket", Method::Get, false, |hub, req| {
+        let t = crate::hub::random_hex(12);
+        let mut h = hub.lock().unwrap();
+        if h.ws_tickets.len() > 16 {
+            h.ws_tickets.clear();
+        }
+        h.ws_tickets.insert(t.clone());
+        drop(h);
+        ok_json(req, &json!({ "ticket": t }))
+    })?;
+
+    route(&mut server, hub, "/api/voice/talk", Method::Post, false, |hub, req| {
+        hub.lock().unwrap().ui.send(UiCmd::Talk).ok();
+        no_content(req)
+    })?;
+
+    route(&mut server, hub, "/api/motion", Method::Get, false, |hub, req| {
+        let m = hub.lock().unwrap().motion.clone();
+        let Some(m) = m else { return err(req, 503, "no servos (body not found)") };
+        let m = m.lock().unwrap();
+        let v = json!({
+            "yaw": m.pos.0, "pitch": m.pos.1,
+            "zero": { "yaw": m.zero.0, "pitch": m.zero.1 },
+            "torque": m.torque_allowed,
+            "limits": { "yaw": crate::motion::YAW_LIMIT, "pitch_min": crate::motion::PITCH_MIN, "pitch_max": crate::motion::PITCH_MAX },
+        });
+        drop(m);
+        ok_json(req, &v)
+    })?;
+    route(&mut server, hub, "/api/motion", Method::Put, false, |hub, mut req| {
+        #[derive(Deserialize)]
+        struct Patch {
+            /// Whole degrees (an f32 tuple here trips an Xtensa LLVM backend bug).
+            jog: Option<[i32; 2]>,
+            torque: Option<bool>,
+            nod: Option<bool>,
+        }
+        let p: Patch = json_body(&mut req)?;
+        let m = hub.lock().unwrap().motion.clone();
+        let Some(m) = m else { return err(req, 503, "no servos (body not found)") };
+        let mut m = m.lock().unwrap();
+        if let Some([y, pi]) = p.jog {
+            m.manual = Some((y as f32, pi as f32, Instant::now() + Duration::from_secs(15)));
+        }
+        if let Some(t) = p.torque {
+            m.torque_allowed = t;
+        }
+        if p.nod == Some(true) {
+            m.nod_until = Some(Instant::now() + Duration::from_millis(2500));
+        }
+        drop(m);
+        no_content(req)
+    })?;
+    route(&mut server, hub, "/api/motion/zero", Method::Post, false, |hub, req| {
+        let (m, nvs) = {
+            let h = hub.lock().unwrap();
+            (h.motion.clone(), h.nvs.clone())
+        };
+        let Some(m) = m else { return err(req, 503, "no servos (body not found)") };
+        m.lock().unwrap().rezero = true;
+        // Wait for the motion task to apply it, then persist in M5's keys.
+        std::thread::sleep(Duration::from_millis(100));
+        let (zy, zp) = m.lock().unwrap().zero;
+        let mut servo: esp_idf_svc::nvs::EspNvs<esp_idf_svc::nvs::NvsDefault> = esp_idf_svc::nvs::EspNvs::new(nvs, "servo", true)?;
+        servo.set_i32("zero_pos_1", zy as i32)?;
+        servo.set_i32("zero_pos_2", zp as i32)?;
+        ok_json(req, &json!({ "yaw": zy, "pitch": zp }))
     })?;
 
     // Everything else: the SPA. In setup mode, foreign hosts (captive-portal

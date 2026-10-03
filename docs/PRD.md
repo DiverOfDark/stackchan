@@ -236,6 +236,8 @@ A single static single-page app (SPA), compiled at build time and served by the 
 | `#/settings` | everything in §6.6 | Grouped like the design's tweak panel: Character / Corporate / Display / Behaviour / Audio / Time. Changes apply live: the device re-renders immediately. **Save** persists to NVS; **Revert** reloads it. |
 | `#/connections` | network and backends | Wi-Fi (change network, forget), usage API, voice backend, OTA pull URL. Secrets are write-only (shown as `••••` plus "set" or "not set"). |
 | `#/motion` | servo calibration | Live sliders for pan/tilt, set centre, set soft limits, invert axis, torque on/off, "nod" test. Stored in NVS. |
+| `#/camera` | camera view | Live camera frames (on-demand BMP, only while the page is open) with the detected face marked. |
+| `#/logs` | live log | WebSocket stream of the device log (Rust + ESP-IDF), filter/pause/clear. Nothing is buffered on the device when no page is open. |
 | `#/test` | manual triggers | Force any screen (S1–S8) or mood, run the scripted "how much Claude" demo, play a test tone, mic level meter, trigger a wake event. Mirrors the design's "Try it" panel. |
 | `#/system` | diagnostics and maintenance | RSSI, heap/PSRAM, fps, task stack high-water marks, servo temp/load, last errors. Live log stream (WebSocket). OTA upload with progress. Reboot. Factory wipe (typed confirmation). Settings export/import as JSON. |
 
@@ -250,11 +252,13 @@ A single static single-page app (SPA), compiled at build time and served by the 
 | `PUT /api/connections` · `POST /api/connections/test` | backend URLs and tokens, and a reachability test run from the device |
 | `GET/PUT /api/motion` · `POST /api/motion/jog` | calibration and live jog |
 | `POST /api/test/{screen|mood|demo|tone|wake}` | manual triggers |
-| `GET /api/screen.bmp` | framebuffer snapshot (nice-to-have) |
 | `POST /api/ota` | streamed firmware upload (raw body) |
 | `POST /api/reboot` · `POST /api/factory-reset` | maintenance |
 | `POST /api/auth/login` · `POST /api/auth/password` | session cookie |
-| `WS /api/ws` | push channel: logs, status deltas, mood changes, mic level |
+| `GET /api/camera.bmp` · `GET /api/screen.bmp` | camera frame / current screen (debug views) |
+| `GET /api/ws/ticket` → `WS /api/ws/logs` | live logs; the page sends a one-time ticket as its first frame (ESP-IDF doesn't expose the handshake to the handler) |
+| `POST /api/voice/talk` | push-to-talk |
+| `GET/PUT /api/motion` · `POST /api/motion/zero` | pose, jog (whole degrees), nod, torque; save current pose as centre (M5's NVS keys) |
 
 The OpenAPI-ish schema for this API lives in `web/src/api.ts`, as shared TypeScript types. The device side is checked against it by host tests.
 

@@ -61,3 +61,9 @@ bindings_module = "vision"
 component_dirs = ["components/libpeer", "components/pv_domain", "components/pv_hal", "components/pv_transport", "components/wake_word", "components/femto_voice"]
 bindings_header = "components/femto_voice/include/femto_voice.h"
 bindings_module = "voice"
+
+# Live log tap for the web UI WebSocket
+[[package.metadata.esp-idf-sys.extra_components]]
+component_dirs = ["components/femto_logtap"]
+bindings_header = "components/femto_logtap/include/femto_logtap.h"
+bindings_module = "logtap"
