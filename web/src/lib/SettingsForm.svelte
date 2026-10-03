@@ -58,6 +58,20 @@
     </label>
   {/if}
 
+  <h2>Body LEDs</h2>
+  <div class="chips">
+    {#each [['usage', 'Usage meters'], ['mood', 'Moods only'], ['off', 'Off']] as const as [v, label]}
+      <button class:on={s.led_mode === v} onclick={() => onchange({ led_mode: v })}>{label}</button>
+    {/each}
+  </div>
+  <p class="muted">Usage meters: left strip = 5-hour session, right = week (bone / toxic / red like the status band). Moods animate either way: VU while listening, chase while thinking, voice while speaking.</p>
+  {#if s.led_mode !== 'off'}
+    <label class="field"><span class="label">Brightness {s.led_brightness}%</span>
+      <input type="range" min="5" max="100" value={s.led_brightness} onchange={(e) => onchange({ led_brightness: +e.currentTarget.value })} />
+    </label>
+    <label class="row"><input type="checkbox" checked={s.led_flip} onchange={(e) => onchange({ led_flip: e.currentTarget.checked })} /> Meters fill the other way</label>
+  {/if}
+
   <h2>Behaviour</h2>
   <label class="row"><input type="checkbox" checked={s.follow} onchange={(e) => onchange({ follow: e.currentTarget.checked })} /> Follow me (eyes + head)</label>
   <label class="row" style="margin-top:10px"><input type="checkbox" checked={s.camera} onchange={(e) => onchange({ camera: e.currentTarget.checked })} /> Camera (face tracking, standby when alone)</label>

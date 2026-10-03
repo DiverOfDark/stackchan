@@ -47,6 +47,18 @@ pub enum VoiceLang {
     En,
 }
 
+/// What the 12 body LEDs show.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize), serde(rename_all = "lowercase"))]
+pub enum LedMode {
+    /// Idle: session (left) / week (right) usage meters; moods animate.
+    #[default]
+    Usage,
+    /// Moods only: a dim accent glow when idle.
+    Mood,
+    Off,
+}
+
 #[derive(Clone, Debug, PartialEq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize), serde(default))]
 pub struct Settings {
@@ -67,6 +79,11 @@ pub struct Settings {
     /// IANA timezone name.
     pub tz: String,
     pub voice_lang: VoiceLang,
+    pub led_mode: LedMode,
+    /// 0–100.
+    pub led_brightness: u8,
+    /// Run the meters the other way along each strip.
+    pub led_flip: bool,
 }
 
 impl Default for Settings {
@@ -85,6 +102,9 @@ impl Default for Settings {
             volume: 60,
             tz: "Europe/Berlin".into(),
             voice_lang: VoiceLang::Auto,
+            led_mode: LedMode::Usage,
+            led_brightness: 40,
+            led_flip: false,
         }
     }
 }
@@ -113,6 +133,9 @@ impl Settings {
         }
         if self.brightness.is_some_and(|b| !(10..=100).contains(&b)) {
             return bad("brightness", "must be 10–100");
+        }
+        if self.led_brightness > 100 {
+            return bad("led_brightness", "must be 0–100");
         }
         if self.volume > 100 {
             return bad("volume", "must be 0–100");

@@ -133,8 +133,11 @@ Each screen except S1–S3 has the **status band**: SESSION % and WEEK %, with 1
 - Scanning: the design's −5° roll can't be done with 2 axes. Substitute a small pan "double-take" wiggle.
 - Safety: soft limits stay inside the mechanical range. Every move is clamped. Commands to the servos are rate-limited.
 
-### 5.6 LEDs (12 × WS2812C in the body), nice-to-have
-- A dim accent glow normally, pulsing while Listening, breathing while Processing, flickering red while Rationing, off in Standby.
+### 5.6 LEDs (12 × WS2812C in the body)
+Two strips of 6 (LEDs 0–5 left, 6–11 right), driven through the PY32 at 25 Hz by `femto_core::leds` (pure, unit-tested, shown in the simulator).
+- **Idle (Contempt / Satisfied), `usage` mode (default):** left strip = 5-hour session, right = week, 6 segments each, coloured like the status band (bone < 60 %, toxic 60–84 %, accent ≥ 85 %); the leading segment breathes.
+- **Moods:** Listening = VU meter from the mic; Processing = a light chasing around both strips; Speaking = brightness follows the voice; Scanning = mirrored sweep; Alarmed = strobe then hold; Amused = sparks; Rationing = failing-neon flicker; Standby = off. Boot = progress bar; Wi-Fi = slow chase; Setup = attention blink; Wipe = fast blink.
+- **Settings:** `led_mode` (usage / mood / off), `led_brightness` (0–100, gamma-corrected), `led_flip` (meter direction along each strip).
 
 ## 6. Functional requirements
 
@@ -208,6 +211,9 @@ Each screen except S1–S3 has the **status band**: SESSION % and WEEK %, with 1
 | `brightness` | 10–100 %, plus auto (LTR-553) | auto |
 | `volume` | 0–100 % | 60 |
 | `tz` | IANA timezone | Europe/Berlin |
+| `led_mode` | usage / mood / off | usage |
+| `led_brightness` | 0–100 % | 40 |
+| `led_flip` | on / off | off |
 | `voice_lang` | auto / ru / en | auto |
 
 ### 6.7 Web UI (setup and configuration)

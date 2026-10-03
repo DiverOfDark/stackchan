@@ -81,6 +81,20 @@ impl<I: I2c> Py32<I> {
         write_reg(&mut self.i2c, ADDR, REG_LED_CFG, cfg | (1 << 6))
     }
 
+    /// All LEDs in one RAM write plus the latch, without the read-modify-
+    /// write of `set_leds` (keeps 25 Hz animation light on the 100 kHz bus).
+    pub fn show_leds(&mut self, colors: &[(u8, u8, u8); LED_COUNT as usize]) -> Result<(), I::Error> {
+        let mut buf = [0u8; 1 + 2 * LED_COUNT as usize];
+        buf[0] = REG_LED_RAM;
+        for (i, &(r, g, b)) in colors.iter().enumerate() {
+            let v = ((r as u16 & 0xF8) << 8) | ((g as u16 & 0xFC) << 3) | (b as u16 >> 3);
+            buf[1 + i * 2] = v as u8;
+            buf[2 + i * 2] = (v >> 8) as u8;
+        }
+        self.i2c.write(ADDR, &buf)?;
+        write_reg(&mut self.i2c, ADDR, REG_LED_CFG, (LED_COUNT & 0x3F) | (1 << 6))
+    }
+
     pub fn fill_leds(&mut self, r: u8, g: u8, b: u8) -> Result<(), I::Error> {
         self.set_leds(&[(r, g, b); LED_COUNT as usize])
     }

@@ -22,6 +22,10 @@ export interface Settings {
   volume: number;
   tz: string;
   voice_lang: VoiceLang;
+  led_mode: 'usage' | 'mood' | 'off';
+  /** 0–100 */
+  led_brightness: number;
+  led_flip: boolean;
 }
 
 export interface Status {

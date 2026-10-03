@@ -8,7 +8,8 @@
 //!   Up / Down    session usage ±5 %      PgUp / PgDn  weekly usage ±5 %
 //!   P            head pat                K            factory-wipe confirm screen
 //!   E / A / C / X  cycle eyewear / accent, toggle corp / fx
-//!   F            toggle follow           Esc          quit
+//!   F            toggle follow           L            cycle LED mode
+//!   Esc          quit
 
 use std::time::{Duration, Instant};
 
@@ -18,10 +19,12 @@ use femto_render::{Canvas, Renderer, H, W};
 use minifb::{Key, KeyRepeat, MouseButton, MouseMode, Window, WindowOptions};
 
 fn main() {
+    // Screen plus a 16 px strip showing the 12 body LEDs (left 0–5, right 6–11).
+    const LED_ROW: usize = 16;
     let mut window = Window::new(
         "Femto simulator",
         W,
-        H,
+        H + LED_ROW,
         WindowOptions { scale: minifb::Scale::X4, ..Default::default() },
     )
     .expect("open window");
@@ -47,7 +50,8 @@ fn main() {
 
     let mut renderer = Renderer::new();
     let mut canvas = Canvas::new();
-    let mut buf = vec![0u32; W * H];
+    let mut buf = vec![0u32; W * (H + LED_ROW)];
+    let started = Instant::now();
     let mut last = Instant::now();
     let mut was_down = false;
     let mut render_time = Duration::ZERO;
@@ -109,6 +113,14 @@ fn main() {
                 }
                 Key::C => cfg.corp = !cfg.corp,
                 Key::X => cfg.fx = !cfg.fx,
+                Key::L => {
+                    use femto_core::settings::LedMode;
+                    cfg.led_mode = match cfg.led_mode {
+                        LedMode::Usage => LedMode::Mood,
+                        LedMode::Mood => LedMode::Off,
+                        LedMode::Off => LedMode::Usage,
+                    }
+                }
                 Key::F => {
                     cfg.follow = !cfg.follow;
                     engine.apply_settings(&cfg);
@@ -138,6 +150,40 @@ fn main() {
             let (r, g, b) = femto_render::canvas::unpack(p);
             *d = (r as u32) << 16 | (g as u32) << 8 | b as u32;
         }
-        window.update_with_buffer(&buf, W, H).expect("present");
+        // Body LEDs.
+        let pal = femto_render::color::Palette::new(cfg.accent);
+        let c = |x: femto_render::color::Rgb| (x.0, x.1, x.2);
+        let frame = engine.frame();
+        let leds = femto_core::leds::frame(&femto_core::leds::LedInput {
+            ms: started.elapsed().as_millis() as u64,
+            screen: &frame.screen,
+            em: frame.em,
+            usage: &frame.usage,
+            progress: frame.progress,
+            mic: if frame.em == femto_core::Emotion::Listening { 0.5 + 0.5 * (started.elapsed().as_secs_f32() * 7.0).sin() } else { 0.0 },
+            speak: frame.p.mo / 6.0,
+            mode: cfg.led_mode,
+            brightness: cfg.led_brightness,
+            flip: cfg.led_flip,
+            accent: c(pal.a),
+            ink: c(pal.ink),
+            toxic: c(pal.toxic),
+        });
+        for y in H..H + LED_ROW {
+            for x in 0..W {
+                buf[y * W + x] = 0x101010;
+            }
+        }
+        for (k, &(r, g, b)) in leds.iter().enumerate() {
+            // Undo the LED gamma so the preview shows perceived brightness.
+            let ungamma = |v: u8| ((v as f32 / 255.0).powf(1.0 / 2.2) * 255.0) as u32;
+            let x0 = if k < 6 { 20 + k * 22 } else { 172 + (k - 6) * 22 };
+            for y in H + 4..H + 12 {
+                for x in x0..x0 + 16 {
+                    buf[y * W + x] = ungamma(r) << 16 | ungamma(g) << 8 | ungamma(b);
+                }
+            }
+        }
+        window.update_with_buffer(&buf, W, H + LED_ROW).expect("present");
     }
 }

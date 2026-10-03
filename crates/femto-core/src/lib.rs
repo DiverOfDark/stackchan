@@ -6,6 +6,7 @@
 pub mod demo;
 pub mod engine;
 pub mod expr;
+pub mod leds;
 pub mod settings;
 pub mod text;
 pub mod usage;

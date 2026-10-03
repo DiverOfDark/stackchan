@@ -7,6 +7,7 @@
 mod board;
 mod dns;
 mod hub;
+mod leds;
 mod logtap;
 mod store;
 mod tz;
@@ -94,6 +95,10 @@ fn main() -> anyhow::Result<()> {
         head = attach_body(body, &mut servo_pins, &nvs);
     }
     let mut body_probe_at = Instant::now();
+    let led_state: leds::LedRef = Default::default();
+    if let Some(body) = board.body.take() {
+        leds::spawn(body, led_state.clone());
+    }
     hub.lock().unwrap().motion = head.clone();
 
     // LCD scan-out runs on its own thread so it overlaps the next render.
@@ -289,7 +294,7 @@ fn main() -> anyhow::Result<()> {
             }
         }
         // Body board missing at boot: probe every 2 s and attach when it answers.
-        if board.body.is_none() && body_probe_at.elapsed() > Duration::from_secs(2) {
+        if board.body_probe.is_some() && body_probe_at.elapsed() > Duration::from_secs(2) {
             body_probe_at = Instant::now();
             if let Some(mut probe) = board.body_probe.take() {
                 match probe.version() {
@@ -297,7 +302,7 @@ fn main() -> anyhow::Result<()> {
                         info!("PY32 body expander v{v} found after {} s", boot_at.elapsed().as_secs());
                         head = attach_body(&mut probe, &mut servo_pins, &nvs);
                         hub.lock().unwrap().motion = head.clone();
-                        board.body = Some(probe);
+                        leds::spawn(probe, led_state.clone());
                     }
                     _ => board.body_probe = Some(probe),
                 }
@@ -314,6 +319,19 @@ fn main() -> anyhow::Result<()> {
             t.may_rest = !cfg.camera && engine.resolve_emotion() == femto_core::Emotion::Sleepy;
         }
         let frame = engine.frame();
+        {
+            let mut l = led_state.lock().unwrap();
+            l.screen = frame.screen.clone();
+            l.em = frame.em;
+            l.usage = frame.usage.clone();
+            l.progress = frame.progress;
+            l.mic = voice.as_ref().map_or(0.0, |v| v.status().1);
+            l.speak = frame.p.mo / 6.0;
+            l.mode = cfg.led_mode;
+            l.brightness = cfg.led_brightness;
+            l.flip = cfg.led_flip;
+            l.accent = cfg.accent;
+        }
         if last_frame.as_ref() == Some(&frame) {
             idle_sleep(start);
             continue;
@@ -510,8 +528,6 @@ fn attach_body(
     pins: &mut Option<(esp_idf_svc::hal::uart::UART1<'static>, esp_idf_svc::hal::gpio::Gpio6<'static>, esp_idf_svc::hal::gpio::Gpio7<'static>)>,
     nvs: &esp_idf_svc::nvs::EspDefaultNvsPartition,
 ) -> Option<motion::MotionRef> {
-    // Dim accent glow (PRD §5.6).
-    body.fill_leds(24, 2, 2).ok();
     body.set_servo_power(true).ok();
     std::thread::sleep(Duration::from_millis(200));
     let (uart, tx, rx) = pins.take()?;

@@ -17,6 +17,9 @@ const defaults: Settings = {
   volume: 60,
   tz: 'Europe/Berlin',
   voice_lang: 'auto',
+  led_mode: 'usage',
+  led_brightness: 40,
+  led_flip: false,
 };
 
 export function mockDevice(opts: { setup?: boolean } = {}): Plugin {
