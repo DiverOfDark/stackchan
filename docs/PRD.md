@@ -38,7 +38,7 @@ Femto is custom firmware that turns the M5Stack StackChan into a contemptuous dy
 
 ## 3. Character and tone
 
-- **Name:** "Femto" (フェムト), configurable. The wake word in the existing backend is already "Эй, Фемто!". An English "Hey, Femto" is added (§6.4).
+- **Name:** "Femto" (フェムト), configurable. The wake word in the existing backend is already "Эй, Фемто!". It is the only wake word, for both languages.
 - **Language:** all on-screen copy is English. Voice is bilingual: Femto answers in Russian or English, matching the language you spoke.
 - **Persona:** a butler who serves the city that ate the empire, and resents you personally. Polite threats, dry contempt, never "happy", only "satisfied".
 - **Honorific:** sir / madam / guv (configurable). Used in captions and voice replies.
@@ -119,7 +119,7 @@ Each screen except S1–S3 has the **status band**: SESSION % and WEEK %, with 1
 | Tap screen | toggle Face ⇄ Ledger |
 | Top touch: head pat (Si12T, any zone) | Amused for 2 s + a snide line (optional TTS) |
 | Top touch: double-tap | push-to-talk, the same as the wake word |
-| Wake word "Эй, Фемто" / "Hey, Femto" | start a voice turn |
+| Wake word "Эй, Фемто" | start a voice turn |
 | Power button: long press (AXP2101 long-press IRQ, ~2.5 s) | opens the **Factory wipe** confirm screen: "WIPE ME? PRESS AGAIN." plus a 5 s countdown. A short press within 5 s wipes Wi-Fi, tokens, settings and calibration, then reboots into S3. A tap on the screen or the timeout cancels. |
 | Power button: short press | screen + mic **privacy mute** toggle (backlight off, wake word off, servos centred). The status band shows `MUTED` |
 | Power button: hold ≥ 10 s | hardware power-off, handled by the AXP2101. The firmware sets the off-threshold to 10 s, so it never collides with the wipe gesture |
@@ -172,9 +172,9 @@ Each screen except S1–S3 has the **status band**: SESSION % and WEEK %, with 1
 - FR-15. A "Follow me" setting switches eyes plus servos tracking on or off.
 
 ### 6.4 Voice
-- FR-16. Wake word detection on the device with microWakeWord TFLite Micro, ported from pipecat firmware's `wake_word` component. **Two models run in parallel:** the existing "Эй, Фемто" (RU), and a new "Hey, Femto" (EN), trained with the existing `tools/train_wake_word` pipeline. Each model is ≈ 50 KB, and both fit in the model partition. The model that fired is sent as a language hint in the offer.
+- FR-16. Wake word detection on the device with microWakeWord TFLite Micro, ported from pipecat firmware's `wake_word` component. It uses the single existing "Эй, Фемто" model for both languages. No English wake word is planned.
 - FR-16a. Bilingual voice:
-  - STT runs with language auto-detection (ElevenLabs Scribe with no fixed `language_code`), seeded by the wake-word hint.
+  - STT runs with language auto-detection (ElevenLabs Scribe with no fixed `language_code`). The language is detected from what you say after the wake word.
   - The LLM replies in the language of the user's turn.
   - TTS uses the multilingual `eleven_flash_v2_5` with the same voice for both languages.
   - The `voice_lang` setting (auto / ru / en) can force one language.
@@ -209,7 +209,6 @@ Each screen except S1–S3 has the **status band**: SESSION % and WEEK %, with 1
 | `volume` | 0–100 % | 60 |
 | `tz` | IANA timezone | Europe/Berlin |
 | `voice_lang` | auto / ru / en | auto |
-| `wake_words` | ru / en / both | both |
 
 ### 6.7 Web UI (setup and configuration)
 
@@ -306,7 +305,7 @@ Authorization: Bearer <STACKCHAN_TOKEN>      # new env var; 401 if set and misma
 2. **Usage tool.** Give the LLM a `get_claude_usage` tool, or inject a usage summary into context on every turn, reading §7.1. Today tools live inside Hermes, so this is either a Hermes tool or bot-side context injection. Bot-side injection is simpler and is preferred.
 3. **Persona.** Update `SYSTEM_PROMPT` to the Femto butler (contempt, honorific, short replies, ≤ 2 sentences unless asked). Send `honorific` and `name` from the device in the offer metadata.
 4. **Bilingual.**
-   - Switch Scribe STT to auto-detect, with the wake-word language hint passed through.
+   - Switch Scribe STT to auto-detect.
    - The persona prompt gets both language variants (the honorific stays English: "sir" is part of the character), plus the rule "reply in the language of the last user turn".
    - Keep `eleven_flash_v2_5`, which is multilingual.
 5. **Device identity.** Tag `/api/offer` with a device id, so the transcript SSE and logs are attributable.
@@ -444,7 +443,7 @@ nvs 24 KB · otadata 8 KB · phy 4 KB · app0 4 MB · app1 4 MB (web UI ≤ 80 K
 | M2 | Connected | SoftAP + captive DNS (S2/S3), NVS settings, SNTP, `/api/stackchan/usage` in trmnl-cyberpunk + device poller, device `/api` + WS, OTA, power-button wipe/mute | 1 wk |
 | M2b | Web UI | Svelte SPA: setup wizard, settings, connections, motion calibration, test panel, system/logs/OTA; mock API; embedded build | 1 wk |
 | M3 | Presence | ESP-DL face-detect shim → gaze + servo follow, Standby, Scanning, head pat, IMU pick-up → Alarmed | 1.5 wk |
-| M4 | Voice | wake_word + libpeer via FFI, EN wake-word model training, data-channel events + captions (incl. Cyrillic), bilingual persona + usage injection in pipecat, mouth sync | 2 wk |
+| M4 | Voice | wake_word + libpeer via FFI, data-channel events + captions (incl. Cyrillic), bilingual persona + usage injection in pipecat, mouth sync | 2 wk |
 | M5 | Polish | Soak test, perf tuning, LEDs, auto-brightness, docs | 0.5 wk |
 
 Total ≈ 10 weeks.
@@ -456,15 +455,14 @@ Total ≈ 10 weeks.
 |---|---|---|
 | D1 | Firmware stack | **Option C:** Rust app on esp-idf-svc (std) plus C components via FFI. IDF pinned to 5.5.x (§8.2–8.3). |
 | D2 | Hardware | **Official M5Stack StackChan kit** (StackChan Core + Body, SCS0009 servos, PY32 body board). The LCD C/E revision is detected at runtime. |
-| D3 | Language | **Screen: English only. Voice: Russian and English**, auto-detected per turn, with two wake words (§6.4, §7.2). |
+| D3 | Language | **Screen: English only. Voice: Russian and English**, auto-detected per turn. A single wake word, "Эй, Фемто", is used for both languages (§6.4, §7.2). |
 | D4 | Factory wipe | **Power button long-press** → on-screen confirm → short press confirms (§5.4). The design's setup-screen copy changes to "HOLD POWER 3S = FACTORY WIPE". |
 | D5 | Usage hosting | **Extend trmnl-cyberpunk** with `GET /api/stackchan/usage` (§7.1). |
 | D6 | Stock firmware | **Keep it restorable.** Before the first flash: `espflash read-flash 0 0x1000000 backup/stackchan-stock-<mac>.bin` (or `esptool.py read_flash`), plus a SHA-256. The image is stored outside git (`backup/` is gitignored, because it may contain device keys or credentials). `tools/restore-stock.sh` writes it back with `espflash write-bin 0x0`. M5Burner's stock image is the fallback. |
 
 ### Open questions
-1. **English wake word phrase:** "Hey, Femto" (proposed), or a single bilingual phrase that works in both languages, such as just "Femto"?
-2. **Privacy mute on short press:** OK as proposed (screen off, mic off, servos centred), or should short press do something else?
-3. **LCD revision on your unit:** C or E? Not blocking, since the firmware detects it, but it helps M0 planning.
+1. **Privacy mute on short press:** OK as proposed (screen off, mic off, servos centred), or should short press do something else?
+2. **LCD revision on your unit:** C or E? Not blocking, since the firmware detects it, but it helps M0 planning.
 
 ## Appendix A: design constants
 - **Palette** (OKLCH from the design → RGB565 at build time):
