@@ -7,8 +7,8 @@ use crate::text;
 use crate::usage::{Usage, UsageView};
 use crate::TICK_MS;
 
-/// No face for this long → Standby.
-pub const STANDBY_AFTER_MS: u64 = 20_000;
+/// No face and no motion in view for this long → Standby (head home).
+pub const STANDBY_AFTER_MS: u64 = 60_000;
 /// Boot progress bar fills over this many ticks.
 const BOOT_TICKS: f32 = 46.0;
 
@@ -172,6 +172,12 @@ impl Engine {
     /// A face at normalised position (−1..1, y down).
     pub fn face_seen(&mut self, nx: f32, ny: f32) {
         self.gaze = (nx.clamp(-1.0, 1.0), ny.clamp(-1.0, 1.0));
+        self.last_seen_ms = self.now_ms;
+    }
+
+    /// Something moved in front of the camera (no face yet): stay awake,
+    /// or wake from Standby to look for whoever it was.
+    pub fn motion_seen(&mut self) {
         self.last_seen_ms = self.now_ms;
     }
 
@@ -411,6 +417,20 @@ mod tests {
         assert_eq!(e.resolve_emotion(), Emotion::Sleepy);
         e.face_seen(0.2, 0.0);
         assert_eq!(e.resolve_emotion(), Emotion::Happy);
+    }
+
+    #[test]
+    fn motion_keeps_awake_and_wakes() {
+        let mut e = engine();
+        e.advance(STANDBY_AFTER_MS as u32 - 1_000);
+        e.motion_seen();
+        e.advance(2_000);
+        assert_ne!(e.resolve_emotion(), Emotion::Sleepy);
+        e.advance(STANDBY_AFTER_MS as u32);
+        assert_eq!(e.resolve_emotion(), Emotion::Sleepy);
+        assert_eq!(e.head_target(), (0.0, 0.0));
+        e.motion_seen();
+        assert_ne!(e.resolve_emotion(), Emotion::Sleepy);
     }
 
     #[test]

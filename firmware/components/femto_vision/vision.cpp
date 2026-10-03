@@ -6,6 +6,7 @@
 #include "human_face_detect.hpp"
 
 static const char *TAG = "femto_vision";
+#include <cstdlib>
 #include <cstring>
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
@@ -17,6 +18,54 @@ static uint8_t *s_last = nullptr;
 static size_t s_last_len = 0;
 static uint16_t s_last_w = 0, s_last_h = 0;
 static SemaphoreHandle_t s_lock = nullptr;
+// Motion: mean luma per cell of a coarse grid, kept from the previous frame.
+static constexpr int GW = 16, GH = 12;
+static uint8_t s_grid[GW * GH];
+static bool s_grid_ok = false;
+
+/// Fraction of grid cells whose brightness moved by more than a threshold,
+/// after removing the frame-wide shift (auto-exposure, lights dimming).
+static float motion_score(const camera_fb_t *fb)
+{
+    const int cw = fb->width / GW, ch = fb->height / GH;
+    if (cw < 2 || ch < 2) {
+        return 0.0f;
+    }
+    uint8_t grid[GW * GH];
+    for (int gy = 0; gy < GH; gy++) {
+        for (int gx = 0; gx < GW; gx++) {
+            uint32_t sum = 0, n = 0;
+            for (int y = gy * ch; y < (gy + 1) * ch; y += 2) {
+                const uint8_t *row = fb->buf + (y * fb->width + gx * cw) * 2;
+                for (int x = 0; x < cw; x += 2) {
+                    const uint16_t p = (row[x * 2] << 8) | row[x * 2 + 1];  // RGB565 BE
+                    const uint32_t r = (p >> 11) << 3, g = ((p >> 5) & 0x3F) << 2, b = (p & 0x1F) << 3;
+                    sum += (r * 77 + g * 150 + b * 29) >> 8;
+                    n++;
+                }
+            }
+            grid[gy * GW + gx] = (uint8_t)(sum / n);
+        }
+    }
+    float score = 0.0f;
+    if (s_grid_ok) {
+        int shift = 0;
+        for (int i = 0; i < GW * GH; i++) {
+            shift += grid[i] - s_grid[i];
+        }
+        shift /= GW * GH;
+        int changed = 0;
+        for (int i = 0; i < GW * GH; i++) {
+            if (abs(grid[i] - s_grid[i] - shift) > 14) {
+                changed++;
+            }
+        }
+        score = (float)changed / (GW * GH);
+    }
+    memcpy(s_grid, grid, sizeof grid);
+    s_grid_ok = true;
+    return score;
+}
 
 extern "C" esp_err_t femto_vision_init(int i2c_port)
 {
@@ -66,7 +115,7 @@ extern "C" esp_err_t femto_vision_init(int i2c_port)
     return ESP_OK;
 }
 
-extern "C" int femto_vision_step(femto_face_t *out, int max, uint32_t *detect_ms)
+extern "C" int femto_vision_step(femto_face_t *out, int max, uint32_t *detect_ms, float *motion)
 {
     if (!s_detect) {
         return -1;
@@ -74,6 +123,9 @@ extern "C" int femto_vision_step(femto_face_t *out, int max, uint32_t *detect_ms
     camera_fb_t *fb = esp_camera_fb_get();
     if (!fb) {
         return -1;
+    }
+    if (motion) {
+        *motion = motion_score(fb);
     }
     dl::image::img_t img = {};
     img.data = fb->buf;

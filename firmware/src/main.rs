@@ -286,9 +286,15 @@ fn main() -> anyhow::Result<()> {
                     log::debug!("face nx {nx:+.2} ny {ny:+.2} → head yaw {:+.1} pitch {:+.1}", tracker.yaw, tracker.pitch);
                     engine.face_seen(nx, ny);
                 }
-                vision::Sight::Nobody => {
+                vision::Sight::Nobody { motion } => {
                     if tracker.lost_for() > Duration::from_millis(600) {
                         engine.face_lost();
+                    }
+                    // Only a still head's camera can tell the room moved.
+                    let still = head.as_ref().is_none_or(|h| h.lock().unwrap().still_for(MOTION_SETTLE));
+                    if still && motion > MOTION_MIN {
+                        log::debug!("motion {:.0}%", motion * 100.0);
+                        engine.motion_seen();
                     }
                 }
             }
@@ -420,6 +426,11 @@ fn factory_wipe() -> ! {
     unsafe { sys::esp_restart() }
 }
 
+/// Fraction of the frame that must change to count as motion.
+const MOTION_MIN: f32 = 0.04;
+/// Ignore frame differences until the head has been still this long.
+const MOTION_SETTLE: Duration = Duration::from_millis(1500);
+
 /// Closed-loop head tracking: the camera sits in the head, so a face's
 /// offset is an error to integrate, not a target angle.
 #[derive(Default)]
@@ -481,6 +492,13 @@ impl Tracker {
             self.yaw = 0.0;
             self.pitch = 0.0;
             engine.head_target()
+        } else if em == femto_core::Emotion::Sleepy {
+            // Standby: ease back to the default pose and stay there; the
+            // still camera watches for motion to wake up.
+            let k = (dt * 1.5).min(1.0);
+            self.yaw -= self.yaw * k;
+            self.pitch -= self.pitch * k;
+            (self.yaw, self.pitch)
         } else if self.lost_for() > Duration::from_secs(6) {
             // Nobody around: look about for a face (the camera only sees
             // where the head points). A new glance every ~4 s.

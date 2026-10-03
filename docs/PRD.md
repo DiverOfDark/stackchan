@@ -99,7 +99,7 @@ Each screen except S1–S3 has the **status band**: SESSION % and WEEK %, with 1
    - Alarmed on a sudden loud sound, the device being picked up (IMU), or quota crossing 85 %.
    - Satisfied after answering.
 3. Session ≥ 85 % or quota locked → **Rationing**.
-4. No face seen for 20 s → **Standby**.
+4. No face and no motion in view for 60 s → **Standby**: the head returns to its default pose and stays still; motion in front of the camera wakes it to look around again.
 5. Session < 25 % → **Satisfied**.
 6. Otherwise → **Contempt**.
 

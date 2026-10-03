@@ -21,8 +21,9 @@ esp_err_t femto_vision_init(int i2c_port);
 
 /** Grab the latest frame and detect faces. Returns the number written to
  *  `out` (≤ max), or -1 when no frame was available. `detect_ms` gets the
- *  inference time. */
-int femto_vision_step(femto_face_t *out, int max, uint32_t *detect_ms);
+ *  inference time; `motion` the fraction (0..1) of a coarse grid whose
+ *  brightness changed since the previous frame (0 on the first frame). */
+int femto_vision_step(femto_face_t *out, int max, uint32_t *detect_ms, float *motion);
 
 /** Copy the most recent frame (raw RGB565 as captured, big-endian) into
  *  `buf`. Returns bytes written (0 if none yet); `w`/`h` get its size. */

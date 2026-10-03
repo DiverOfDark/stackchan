@@ -12,7 +12,8 @@ use log::{info, warn};
 pub enum Sight {
     /// Largest face centre, normalised −1..1 (x: viewer's right +, y: down +).
     Face { nx: f32, ny: f32, size: f32 },
-    Nobody,
+    /// No face; `motion` = fraction of the frame that changed (0..1).
+    Nobody { motion: f32 },
 }
 
 const W: f32 = 320.0;
@@ -31,8 +32,9 @@ pub fn spawn(i2c_port: i32, tx: Sender<Sight>) {
         let mut ms_total = 0u32;
         loop {
             let mut ms = 0u32;
-            // SAFETY: `faces` outlives the call; max matches its length.
-            let n = unsafe { vision::femto_vision_step(faces.as_mut_ptr(), faces.len() as i32, &mut ms) };
+            let mut motion = 0f32;
+            // SAFETY: `faces` and the out-params outlive the call; max matches its length.
+            let n = unsafe { vision::femto_vision_step(faces.as_mut_ptr(), faces.len() as i32, &mut ms, &mut motion) };
             if n < 0 {
                 std::thread::sleep(Duration::from_millis(50));
                 continue;
@@ -50,7 +52,7 @@ pub fn spawn(i2c_port: i32, tx: Sender<Sight>) {
                     ny: ((f.y1 + f.y2) as f32 / 2.0 / (H / 2.0) - 1.0).clamp(-1.0, 1.0),
                     size: (f.x2 - f.x1) as f32 / W,
                 },
-                None => Sight::Nobody,
+                None => Sight::Nobody { motion },
             };
             if tx.send(sight).is_err() {
                 break;

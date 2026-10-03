@@ -50,6 +50,15 @@ pub struct Motion {
     pub zero: (u16, u16),
     /// Set by the web UI: re-zero both axes at the current pose.
     pub rezero: bool,
+    /// Last time the head was moving (the camera sees its own motion).
+    pub moved_at: Option<Instant>,
+}
+
+impl Motion {
+    /// Head still long enough that frame differences mean the scene moved.
+    pub fn still_for(&self, d: Duration) -> bool {
+        self.moved_at.is_none_or(|t| t.elapsed() > d)
+    }
 }
 
 pub type MotionRef = Arc<Mutex<Motion>>;
@@ -143,6 +152,7 @@ pub fn start(uart: UART1<'static>, tx: Gpio6<'static>, rx: Gpio7<'static>, nvs: 
         pos: (yaw.pos, pitch.pos),
         zero: (yaw.zero, pitch.zero),
         rezero: false,
+        moved_at: None,
     }));
     let shared = target.clone();
     crate::psram_stack_thread("motion", 6144, move || {
@@ -185,6 +195,9 @@ pub fn start(uart: UART1<'static>, tx: Gpio6<'static>, rx: Gpio7<'static>, nvs: 
                     }
                 }
                 m.pos = (yaw.pos, pitch.pos);
+                if yaw.vel.abs() > 0.5 || pitch.vel.abs() > 0.5 {
+                    m.moved_at = Some(now);
+                }
                 (t, m.torque_allowed)
             };
             // Boot stretch: glance left, right, then hand over to the engine.

@@ -16,4 +16,4 @@
 <div class="chips">{#each screens as [v, l]}<button onclick={() => fire({ screen: v })}>{l}</button>{/each}</div>
 <h2>Mood</h2>
 <div class="chips">{#each moods as [v, l]}<button onclick={() => fire({ mood: v })}>{l}</button>{/each}</div>
-<p class="muted">Auto: satisfied under 25 % used, rationing at 85 %+, standby after 20 s without seeing you. Otherwise, contempt.</p>
+<p class="muted">Auto: satisfied under 25 % used, rationing at 85 %+, standby after a minute with nobody and nothing moving in view. Otherwise, contempt.</p>
