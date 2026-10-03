@@ -32,7 +32,12 @@ pub struct Board {
 
 impl Board {
     pub fn init(i2c: I2C1<'static>, sda: Gpio12<'static>, scl: Gpio11<'static>) -> Result<Board> {
-        let cfg = I2cConfig::new().baudrate(Hertz(400_000)).sda_enable_pullup(true).scl_enable_pullup(true);
+        // Long timeout: the PY32 body expander is an MCU and stretches the clock.
+        let cfg = I2cConfig::new()
+            .baudrate(Hertz(400_000))
+            .sda_enable_pullup(true)
+            .scl_enable_pullup(true)
+            .timeout(Duration::from_millis(10).into());
         let driver = I2cDriver::new(i2c, sda, scl, &cfg)?;
         let bus: &'static Mutex<I2cDriver<'static>> = Box::leak(Box::new(Mutex::new(driver)));
         let dev = || MutexDevice::new(bus);

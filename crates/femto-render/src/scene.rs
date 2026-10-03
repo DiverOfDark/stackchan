@@ -77,7 +77,8 @@ impl Renderer {
         x.c.xf = Xf::ID;
         x.c.alpha = 1.0;
         let t0 = std::time::Instant::now();
-        x.c.pixels_mut().copy_from_slice(bg);
+        let (y0, rows) = x.c.window();
+        x.c.pixels_mut().copy_from_slice(&bg[y0 * W..(y0 + rows) * W]);
         let t1 = std::time::Instant::now();
         let mut t2 = t1;
         match &frame.screen {

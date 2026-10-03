@@ -208,3 +208,33 @@ fn banding_is_exact() {
         assert!(a.pixels() == b.pixels());
     }
 }
+
+/// Rendering in strips (as on the device) must match full-frame rendering.
+#[test]
+fn strips_are_exact() {
+    use femto_core::settings::Eyewear;
+    for cfg in [Settings::default(), Settings { eyewear: Eyewear::Reticle, corp: false, ..Default::default() }] {
+        for (label, f) in sheet() {
+            let mut full = Canvas::new();
+            let mut r = Renderer::new();
+            r.render(&mut full, &f, &cfg);
+            let want = full.to_rgb888();
+            for rows in [40usize, 16] {
+                let mut strip = Canvas::strip(rows);
+                let mut got = Vec::new();
+                for y0 in (0..H).step_by(rows) {
+                    strip.set_window(y0);
+                    r.render(&mut strip, &f, &cfg);
+                    got.extend(strip.to_rgb888());
+                }
+                // Band origins shift float edge maths by a hair: allow 1 LSB of RGB565.
+                let close = got.iter().zip(&want).all(|(a, b)| a.abs_diff(*b) <= 8);
+                if !close {
+                    let i = got.iter().zip(&want).position(|(a, b)| a != b).unwrap() / 3;
+                    let n = got.iter().zip(&want).filter(|(a, b)| a != b).count();
+                    panic!("{label}: strips of {rows} differ at x {} y {} ({n} bytes)", i % W, i / W);
+                }
+            }
+        }
+    }
+}

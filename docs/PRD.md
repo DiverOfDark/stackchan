@@ -21,7 +21,7 @@ Femto is custom firmware that turns the M5Stack StackChan into a contemptuous dy
 ## 2. Goals and non-goals
 
 ### Goals
-- G1. Pixel-faithful rendering of every screen in the design's screen sheet (15 screens) on the 320×240 panel at ≥ 20 fps.
+- G1. Pixel-faithful rendering of every screen in the design's screen sheet (15 screens) on the 320×240 panel at the design's own animation rate: one frame per 70 ms tick (≈ 14 fps). 20 fps is a stretch goal.
 - G2. Usage data on the device is never more than 6 min old while the backend is healthy. Staleness is shown on screen when the backend is not healthy.
 - G3. Voice round trip from wake word to first audio byte: ≤ 2.5 s p50 on a warm connection.
 - G4. Face tracking: servos start moving toward a detected face within 300 ms, with no jitter and no servo buzz at rest.
@@ -416,7 +416,7 @@ stackchan/
 nvs 24 KB · otadata 8 KB · phy 4 KB · app0 4 MB · app1 4 MB (web UI ≤ 80 KB gz is embedded in the app image) · model 1 MB (wake word, face detect) · storage (LittleFS: fonts, pre-rendered layers, wake samples) ~6.9 MB.
 
 ## 9. Non-functional requirements
-- **Performance:** ≥ 20 fps on the face screen with fx on, measured over 60 s. Render task ≤ 45 ms per frame. No dropped audio frames while rendering.
+- **Performance:** one frame per 70 ms design tick on the face screen with fx on (render ≤ 70 ms, LCD push overlapped on its own thread); unchanged frames are skipped. Measured 2026-10-03: ≈ 80 ms render + 30 ms push (overlapped), ≈ 12 fps. No dropped audio frames while rendering.
 - **Memory:** ≥ 60 KB internal heap free at steady state during an active voice call. PSRAM holds the framebuffers, audio rings and camera frames.
 - **Reliability:** 7-day soak with no reboot. Watchdog on every task. Automatic reconnect for Wi-Fi, usage polling and voice.
 - **Security:**

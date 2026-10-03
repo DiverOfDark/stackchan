@@ -39,8 +39,7 @@ struct Clip {
 
 impl Clip {
     #[inline]
-    fn at(&self, idx: usize) -> u32 {
-        let (x, y) = (idx % W, idx / W);
+    fn at(&self, x: usize, y: usize) -> u32 {
         if x < self.x0 || y < self.y0 || x >= self.x0 + self.w || y >= self.y0 + self.h {
             return 0;
         }
@@ -48,8 +47,13 @@ impl Clip {
     }
 }
 
+/// A window of full-width rows `y0..y0 + rows` of the 320×240 screen.
+/// Drawing uses screen coordinates; anything outside the window is skipped.
+/// The full-screen canvas is the window `0..240`.
 pub struct Canvas {
     px: Vec<u16>,
+    y0: usize,
+    rows: usize,
     clip: Option<Clip>,
     /// Post-shade applied at scan-out: per-pixel keep factor (255 = as is).
     shade: Option<Vec<u8>>,
@@ -67,7 +71,23 @@ impl Default for Canvas {
 
 impl Canvas {
     pub fn new() -> Canvas {
-        Canvas { px: vec![0; W * H], clip: None, shade: None, acc: Vec::with_capacity((W + 2) * H), xf: Xf::ID, alpha: 1.0 }
+        Canvas { px: vec![0; W * H], y0: 0, rows: H, clip: None, shade: None, acc: Vec::with_capacity((W + 2) * H), xf: Xf::ID, alpha: 1.0 }
+    }
+
+    /// A strip canvas `rows` tall; move it with [`Canvas::set_window`].
+    pub fn strip(rows: usize) -> Canvas {
+        Canvas::with_buffer(vec![0; W * rows])
+    }
+
+    /// Point the strip at screen rows `y0..y0 + rows`.
+    pub fn set_window(&mut self, y0: usize) {
+        assert!(y0 + self.rows <= H);
+        self.y0 = y0;
+    }
+
+    /// (first row, row count).
+    pub fn window(&self) -> (usize, usize) {
+        (self.y0, self.rows)
     }
 
     /// Use `scratch` (its capacity, in f32s) for rasterization. On the device
@@ -77,10 +97,11 @@ impl Canvas {
         self.acc = scratch;
     }
 
-    /// Canvas over a caller-provided `W*H` pixel buffer.
+    /// Canvas over a caller-provided buffer of whole rows.
     pub fn with_buffer(px: Vec<u16>) -> Canvas {
-        assert_eq!(px.len(), W * H);
-        Canvas { px, ..Canvas::new() }
+        assert!(px.len() % W == 0 && px.len() <= W * H && !px.is_empty());
+        let rows = px.len() / W;
+        Canvas { px, y0: 0, rows, clip: None, shade: None, acc: Vec::with_capacity((W + 2) * 16), xf: Xf::ID, alpha: 1.0 }
     }
 
     pub fn pixels(&self) -> &[u16] {
@@ -104,21 +125,22 @@ impl Canvas {
         self.shade.is_some()
     }
 
-    /// Final pixel `i` with the shade applied.
+    /// Final pixel `i` of the window with the shade applied.
     #[inline]
     pub fn out_px(&self, i: usize) -> u16 {
         match &self.shade {
-            Some(s) => scale565(self.px[i], s[i] as u32),
+            Some(s) => scale565(self.px[i], s[self.y0 * W + i] as u32),
             None => self.px[i],
         }
     }
 
-    /// Final pixels `start..start + out.len()`, byte-swapped for SPI if asked.
+    /// Final window pixels `start..start + out.len()`, byte-swapped for SPI if asked.
     pub fn scanout(&self, start: usize, out: &mut [u16], swap: bool) {
         let src = &self.px[start..start + out.len()];
         match &self.shade {
             Some(s) => {
-                let s = &s[start..start + out.len()];
+                let base = self.y0 * W + start;
+                let s = &s[base..base + out.len()];
                 for ((d, &p), &k) in out.iter_mut().zip(src).zip(s) {
                     let v = scale565(p, k as u32);
                     *d = if swap { v.swap_bytes() } else { v };
@@ -134,8 +156,8 @@ impl Canvas {
 
     /// RGB888 copy (shade applied), for PNG export and the simulator.
     pub fn to_rgb888(&self) -> Vec<u8> {
-        let mut out = Vec::with_capacity(W * H * 3);
-        for i in 0..W * H {
+        let mut out = Vec::with_capacity(self.px.len() * 3);
+        for i in 0..self.px.len() {
             let (r, g, b) = unpack(self.out_px(i));
             out.extend_from_slice(&[r, g, b]);
         }
@@ -163,7 +185,8 @@ impl Canvas {
     /// Draw `f` clipped to `path`.
     pub fn with_clip<R>(&mut self, path: &Path, f: impl FnOnce(&mut Canvas) -> R) -> R {
         let mut pts: Vec<(u16, u16, u8)> = Vec::new();
-        rasterize(&mut self.acc, self.xf, path, |_, x, y, cov| pts.push((x as u16, y as u16, (cov * 255.0 + 0.5) as u8)));
+        let win = (self.y0, self.y0 + self.rows);
+        rasterize(&mut self.acc, self.xf, win, path, |x, y, cov| pts.push((x as u16, y as u16, (cov * 255.0 + 0.5) as u8)));
         let (mut x0, mut y0, mut x1, mut y1) = (W, H, 0, 0);
         for &(x, y, _) in &pts {
             x0 = x0.min(x as usize);
@@ -210,9 +233,10 @@ impl Canvas {
     /// group alpha the caller wants).
     pub fn fill_with(&mut self, path: &Path, shade: impl Fn(usize, usize) -> Option<(Rgb, f32)>) {
         let mut acc = std::mem::take(&mut self.acc);
-        rasterize(&mut acc, self.xf, path, |idx, x, y, cov| {
+        let win = (self.y0, self.y0 + self.rows);
+        rasterize(&mut acc, self.xf, win, path, |x, y, cov| {
             if let Some((c, a)) = shade(x, y) {
-                self.blend(idx, c, a * cov);
+                self.blend(x, y, c, a * cov);
             }
         });
         self.acc = acc;
@@ -220,10 +244,10 @@ impl Canvas {
 
     /// Per-pixel effect over a device-space rectangle.
     pub fn effect(&mut self, x0: usize, y0: usize, x1: usize, y1: usize, f: impl Fn(usize, usize) -> Option<(Rgb, f32)>) {
-        for y in y0..y1.min(H) {
+        for y in y0.max(self.y0)..y1.min(self.y0 + self.rows) {
             for x in x0..x1.min(W) {
                 if let Some((c, a)) = f(x, y) {
-                    self.blend(y * W + x, c, a);
+                    self.blend(x, y, c, a);
                 }
             }
         }
@@ -234,7 +258,7 @@ impl Canvas {
         let a = opacity * self.alpha;
         for row in 0..h {
             let py = y + row as i32;
-            if !(0..H as i32).contains(&py) {
+            if !(self.y0 as i32..(self.y0 + self.rows) as i32).contains(&py) {
                 continue;
             }
             for col in 0..w {
@@ -244,18 +268,19 @@ impl Canvas {
                 }
                 let v = cov[row * w + col];
                 if v > 0 {
-                    self.blend(py as usize * W + px as usize, c, a * v as f32 / 255.0);
+                    self.blend(px as usize, py as usize, c, a * v as f32 * (1.0 / 255.0));
                 }
             }
         }
     }
 
     #[inline]
-    fn blend(&mut self, idx: usize, c: Rgb, a: f32) {
+    fn blend(&mut self, x: usize, y: usize, c: Rgb, a: f32) {
+        let idx = (y - self.y0) * W + x;
         // Fixed-point alpha 0..=256.
         let mut a = (a * 256.0) as u32;
         if let Some(m) = &self.clip {
-            a = (a * m.at(idx)) / 255;
+            a = (a * m.at(x, y)) / 255;
         }
         if a == 0 {
             return;
@@ -273,9 +298,9 @@ impl Canvas {
 /// Diagnostics: fills, bbox pixels scanned.
 pub static STATS: [core::sync::atomic::AtomicU32; 2] = [const { core::sync::atomic::AtomicU32::new(0) }; 2];
 
-/// Scan-convert `path` (transformed by `xf`) and call `emit(idx, x, y,
-/// coverage)` for every covered pixel. `acc` is scratch space.
-fn rasterize(acc: &mut Vec<f32>, xf: Xf, path: &Path, mut emit: impl FnMut(usize, usize, usize, f32)) {
+/// Scan-convert `path` (transformed by `xf`) within screen rows `win` and
+/// call `emit(x, y, coverage)` for every covered pixel. `acc` is scratch.
+fn rasterize(acc: &mut Vec<f32>, xf: Xf, win: (usize, usize), path: &Path, mut emit: impl FnMut(usize, usize, f32)) {
     {
         let mut minx = f32::MAX;
         let mut miny = f32::MAX;
@@ -303,9 +328,9 @@ fn rasterize(acc: &mut Vec<f32>, xf: Xf, path: &Path, mut emit: impl FnMut(usize
             return;
         }
         let bx0 = (minx.floor().max(0.0)) as usize;
-        let by0 = (miny.floor().max(0.0)) as usize;
+        let by0 = (miny.floor().max(win.0 as f32)) as usize;
         let bx1 = (maxx.ceil().min(W as f32)).max(0.0) as usize;
-        let by1 = (maxy.ceil().min(H as f32)).max(0.0) as usize;
+        let by1 = (maxy.ceil().min(win.1 as f32)).max(0.0) as usize;
         if bx1 <= bx0 || by1 <= by0 {
             return;
         }
@@ -346,7 +371,7 @@ fn rasterize(acc: &mut Vec<f32>, xf: Xf, path: &Path, mut emit: impl FnMut(usize
                     let cov = sum.abs().min(1.0);
                     if cov > 0.002 {
                         let (x, y) = (bx0 + col, by0 + row0 + row);
-                        emit(y * W + x, x, y, cov);
+                        emit(x, y, cov);
                     }
                 }
             }

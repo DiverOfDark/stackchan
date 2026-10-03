@@ -15,7 +15,8 @@ use femto_core::{Engine, Event, Screen, Settings, Usage};
 use femto_render::{Canvas, Renderer};
 use log::{info, warn};
 
-const FRAME: Duration = Duration::from_millis(40);
+/// The design animates on a 70 ms tick; rendering faster shows nothing new.
+const FRAME: Duration = Duration::from_millis(femto_core::TICK_MS as u64);
 const WIPE_WINDOW_S: u8 = 5;
 
 fn main() -> anyhow::Result<()> {
@@ -54,9 +55,6 @@ fn main() -> anyhow::Result<()> {
         assert!(!ptr.is_null(), "raster scratch");
         unsafe { Vec::from_raw_parts(ptr, 0, n) }
     });
-    for (name, us) in femto_render::bench::run(&mut canvas, &mut renderer.fonts) {
-        info!("bench {name:28} {us:>6} us");
-    }
     board.pmic.set_brightness(60).ok();
     info!("panel {:?}", board.panel);
     if let Some(body) = board.body.as_mut() {
@@ -82,6 +80,7 @@ fn main() -> anyhow::Result<()> {
     let mut spare = Some(Canvas::new());
 
     let mut last = Instant::now();
+    let mut last_frame = None;
     let mut touching = false;
     let mut patting = false;
     let mut wipe_deadline: Option<Instant> = None;
@@ -131,8 +130,14 @@ fn main() -> anyhow::Result<()> {
             }
         }
 
+        let frame = engine.frame();
+        if last_frame.as_ref() == Some(&frame) {
+            idle_sleep(start);
+            continue;
+        }
         let t0 = Instant::now();
-        renderer.render(&mut canvas, &engine.frame(), &cfg);
+        renderer.render(&mut canvas, &frame, &cfg);
+        last_frame = Some(frame);
         render_us += t0.elapsed().as_micros() as u64;
         // Hand the frame to the LCD thread; continue on the other buffer.
         let next = match spare.take() {
@@ -155,13 +160,14 @@ fn main() -> anyhow::Result<()> {
             (render_us, push_us, frames) = (0, 0, 0);
         }
 
-        if let Some(rest) = FRAME.checked_sub(start.elapsed()) {
-            std::thread::sleep(rest);
-        } else {
-            // Yield so the idle task can feed the watchdog.
-            std::thread::sleep(Duration::from_millis(1));
-        }
+        idle_sleep(start);
     }
+}
+
+/// Sleep out the rest of the frame (at least 1 ms so idle tasks run).
+fn idle_sleep(start: Instant) {
+    let rest = FRAME.checked_sub(start.elapsed()).unwrap_or_default();
+    std::thread::sleep(rest.max(Duration::from_millis(1)));
 }
 
 fn factory_wipe() -> ! {
