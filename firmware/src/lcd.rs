@@ -94,7 +94,9 @@ impl Lcd {
 
         let mut bufs = [core::ptr::null_mut(); 2];
         for b in &mut bufs {
-            *b = unsafe { sys::heap_caps_malloc(CHUNK_PX * 2, sys::MALLOC_CAP_DMA | sys::MALLOC_CAP_INTERNAL) } as *mut u16;
+            // PSRAM, cache-line aligned: the S3's GDMA reads external RAM, and
+            // internal RAM is reserved for Wi-Fi, camera and audio DMA.
+            *b = unsafe { sys::heap_caps_aligned_alloc(64, CHUNK_PX * 2, sys::MALLOC_CAP_SPIRAM | sys::MALLOC_CAP_8BIT) } as *mut u16;
             assert!(!b.is_null(), "LCD DMA buffer");
         }
         let lcd = Lcd { io, bufs, queued: 0 };

@@ -10,6 +10,7 @@ mod hub;
 mod store;
 mod tz;
 mod vision;
+mod voice;
 mod web;
 mod lcd;
 mod motion;
@@ -53,11 +54,17 @@ fn main() -> anyhow::Result<()> {
     info!("Wi-Fi '{}', usage {}", net_cfg.ssid, if net_cfg.usage_url.is_empty() { "<unset>" } else { &net_cfg.usage_url });
     net::spawn(p.modem, nvs.clone(), net_cfg, hub.clone(), net_cmd_rx, net_tx)?;
     let (sight_tx, sight_rx) = std::sync::mpsc::channel();
+    report_memory_tag("before vision");
     if cfg.camera {
         vision::spawn(1, sight_tx);
+        std::thread::sleep(Duration::from_millis(1500));
     }
+    report_memory_tag("after vision");
     let mut tracker = Tracker::default();
+    let mut voice: Option<voice::Voice> = None;
+    let mut last_pat: Option<Instant> = None;
     let _web = web::start(&hub)?;
+    report_memory_tag("after web");
     let _mdns = esp_idf_svc::mdns::EspMdns::take().and_then(|mut m| {
         m.set_hostname("femto")?;
         m.add_service(Some("Femto"), "_http", "_tcp", 80, &[("path", "/")])?;
@@ -141,7 +148,16 @@ fn main() -> anyhow::Result<()> {
         if let Some(head) = board.head.as_mut() {
             let pat = head.read().map(|z| z.iter().any(|&v| v > 0)).unwrap_or(false);
             if pat && !patting {
-                engine.event(Event::HeadPat);
+                // Double pat = push-to-talk (PRD §5.4); a single pat amuses him.
+                if last_pat.is_some_and(|t| t.elapsed() < Duration::from_millis(700)) {
+                    if let Some(v) = &voice {
+                        v.push_to_talk();
+                    }
+                    last_pat = None;
+                } else {
+                    engine.event(Event::HeadPat);
+                    last_pat = Some(Instant::now());
+                }
             }
             patting = pat;
         }
@@ -175,6 +191,9 @@ fn main() -> anyhow::Result<()> {
                 drop(h);
                 engine.apply_settings(&cfg);
                 board.pmic.set_brightness(cfg.brightness.unwrap_or(60)).ok();
+                if let Some(v) = &voice {
+                    v.set_volume(cfg.volume);
+                }
                 if tz_changed {
                     if let Some(u) = engine.unix_now().or(wall_unix) {
                         engine.set_wall_clock(u, tz::offset(&cfg.tz, u));
@@ -203,12 +222,23 @@ fn main() -> anyhow::Result<()> {
             }
         }
 
+        if let Some(v) = voice.as_mut() {
+            v.sync(&mut engine);
+        }
+
         // Network → engine.
         while let Ok(ev) = net_rx.try_recv() {
             info!("net: {ev:?}");
             match ev {
                 net::NetEvent::Connecting { attempt, ssid } => after_boot = Some(Screen::Wifi { attempt, ssid }),
-                net::NetEvent::Connected { .. } => after_boot = Some(Screen::Face),
+                net::NetEvent::Connected { .. } => {
+                    after_boot = Some(Screen::Face);
+                    report_memory_tag("wifi connected");
+                    if voice.is_none() {
+                        let url = hub.lock().unwrap().store.get(store::KEY_VOICE_URL).unwrap_or_default();
+                        voice = voice::start(&url, cfg.volume);
+                    }
+                }
                 net::NetEvent::Setup { ssid, key } => after_boot = Some(Screen::Setup { ap_ssid: ssid, ap_key: key, ip: "192.168.4.1".into() }),
                 net::NetEvent::Clock { unix } => {
                     wall_unix = Some(unix);
@@ -486,6 +516,12 @@ fn trigger(engine: &mut Engine, cfg: &Settings, t: hub::Trigger) {
         engine.set_screen(Screen::Face);
         engine.set_override(em);
     }
+}
+
+fn report_memory_tag(tag: &str) {
+    // SAFETY: plain FFI getters.
+    let (free, largest) = unsafe { (sys::heap_caps_get_free_size(sys::MALLOC_CAP_INTERNAL), sys::heap_caps_get_largest_free_block(sys::MALLOC_CAP_INTERNAL)) };
+    info!("internal heap [{tag}]: {} KB free, largest block {} KB", free / 1024, largest / 1024);
 }
 
 fn report_memory() {
