@@ -1,0 +1,9 @@
+[package]
+name = "femto-drivers"
+description = "StackChan board drivers: SCS0009 servo bus, PY32 body IO expander, Si12T top touch, AXP2101, AW9523, FT6336."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+embedded-hal = "1"

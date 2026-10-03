@@ -1,0 +1,30 @@
+[package]
+name = "femto-firmware"
+description = "Femto firmware for the M5Stack StackChan (ESP32-S3, ESP-IDF)."
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+publish = false
+
+[[bin]]
+name = "femto"
+path = "src/main.rs"
+harness = false
+
+[profile.release]
+opt-level = "s"
+debug = true
+
+[profile.dev]
+debug = true
+opt-level = "z"
+
+[dependencies]
+anyhow = "1"
+log = "0.4"
+esp-idf-svc = { version = "0.53", features = ["critical-section"] }
+femto-core = { path = "../crates/femto-core", features = ["serde"] }
+femto-render = { path = "../crates/femto-render" }
+
+[build-dependencies]
+embuild = "0.33"

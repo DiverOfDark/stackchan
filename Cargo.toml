@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/femto-core", "crates/femto-render", "crates/femto-sim"]
+members = ["crates/femto-core", "crates/femto-render", "crates/femto-drivers", "crates/femto-sim"]
 # firmware/ is a separate workspace: it builds with the Xtensa `esp` toolchain.
 exclude = ["firmware"]
 
