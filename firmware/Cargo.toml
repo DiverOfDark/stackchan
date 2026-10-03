@@ -25,6 +25,9 @@ log = "0.4"
 esp-idf-svc = { version = "0.53", features = ["critical-section"] }
 femto-core = { path = "../crates/femto-core", features = ["serde"] }
 femto-render = { path = "../crates/femto-render" }
+femto-drivers = { path = "../crates/femto-drivers" }
+embedded-hal = "1"
+embedded-hal-bus = { version = "0.3", features = ["std"] }
 
 [build-dependencies]
 embuild = "0.33"

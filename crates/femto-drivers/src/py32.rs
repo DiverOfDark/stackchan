@@ -53,10 +53,11 @@ impl<I: I2c> Py32<I> {
         self.write_bit(REG_GPIO_DRV_L, pin, false)
     }
 
-    /// Factory setup: servo power on, LED strip configured and dark.
-    pub fn init(&mut self) -> Result<(), I::Error> {
+    /// Factory setup with the LED strip dark. Servo power stays as asked:
+    /// the motion task turns it on once it is ready to hold position.
+    pub fn init(&mut self, servo_power: bool) -> Result<(), I::Error> {
         self.output(PIN_SERVO_POWER)?;
-        self.set_servo_power(true)?;
+        self.set_servo_power(servo_power)?;
         self.output(PIN_LEDS)?;
         write_reg(&mut self.i2c, ADDR, REG_LED_CFG, LED_COUNT & 0x3F)?;
         self.fill_leds(0, 0, 0)
@@ -93,7 +94,7 @@ mod tests {
     #[test]
     fn servo_power_bit() {
         let mut p = Py32::new(MockI2c::default());
-        p.init().unwrap();
+        p.init(true).unwrap();
         let m = p.release();
         assert_eq!(m.regs[&(ADDR, REG_GPIO_O_L)] & 1, 1);
         assert_eq!(m.regs[&(ADDR, REG_GPIO_M_L + 1)] & (1 << 5), 1 << 5, "pin 13 output");
