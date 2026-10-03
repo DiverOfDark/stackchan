@@ -109,7 +109,8 @@ fn main() -> anyhow::Result<()> {
     let (to_lcd, lcd_rx) = std::sync::mpsc::sync_channel::<Canvas>(1);
     let (back_tx, from_lcd) = std::sync::mpsc::sync_channel::<(Canvas, u32)>(1);
     let mut lcd = board.lcd;
-    psram_stack_thread("lcd", 8192, move || {
+    // Core 1: core 0 runs the renderer and Wi-Fi.
+    psram_stack_thread_on("lcd", 8192, Some(1), move || {
         for c in lcd_rx {
             let t = Instant::now();
             if let Err(e) = lcd.push(&c) {
@@ -474,6 +475,8 @@ pub fn psram_stack_thread_on<F: FnOnce() + Send + 'static>(name: &str, stack: us
         if let Some(c) = core {
             cfg.pin_to_core = c;
         }
+        // FreeRTOS task name (shows in /api/tasks); leaked, threads live forever.
+        cfg.thread_name = std::ffi::CString::new(name).unwrap().into_raw();
         sys::esp_pthread_set_cfg(&cfg);
     }
     let h = std::thread::Builder::new().name(name.into()).stack_size(stack).spawn(f);

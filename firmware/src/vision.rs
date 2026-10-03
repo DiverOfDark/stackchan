@@ -55,7 +55,8 @@ pub fn spawn(i2c_port: i32, tx: Sender<Sight>) {
             if tx.send(sight).is_err() {
                 break;
             }
-            std::thread::sleep(Duration::from_millis(60));
+            // ~5 Hz is plenty for head tracking and leaves core 1 for audio.
+            std::thread::sleep(Duration::from_millis(130));
         }
     });
     if let Err(e) = r {

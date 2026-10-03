@@ -21,6 +21,9 @@ pub struct Renderer {
     pal: Palette,
     /// Background pre-rendered for the current accent.
     bg: Option<Vec<u16>>,
+    /// Face screens: background + status band + footer, re-rendered only
+    /// when what they show changes (key).
+    base: Option<(String, Vec<u16>)>,
     shade: Vec<u8>,
     accent: femto_core::settings::Accent,
 }
@@ -58,7 +61,7 @@ impl Tag {
 impl Renderer {
     pub fn new() -> Renderer {
         let accent = Default::default();
-        Renderer { fonts: Fonts::new(), timings: [0; 4], pal: Palette::new(accent), bg: None, shade: overlay_shade(), accent }
+        Renderer { fonts: Fonts::new(), timings: [0; 4], pal: Palette::new(accent), bg: None, base: None, shade: overlay_shade(), accent }
     }
 
     pub fn render(&mut self, c: &mut Canvas, frame: &Frame, cfg: &Settings) {
@@ -66,6 +69,7 @@ impl Renderer {
             self.accent = cfg.accent;
             self.pal = Palette::new(cfg.accent);
             self.bg = None;
+            self.base = None;
         }
         let pal = self.pal;
         let bg = self.bg.get_or_insert_with(|| {
@@ -73,42 +77,77 @@ impl Renderer {
             background(&mut tmp, &pal);
             tmp.pixels().to_vec()
         });
-        let mut x = Ctx { c, f: &mut self.fonts, p: self.pal, cfg };
-        x.c.xf = Xf::ID;
-        x.c.alpha = 1.0;
         let t0 = std::time::Instant::now();
-        let (y0, rows) = x.c.window();
-        x.c.pixels_mut().copy_from_slice(&bg[y0 * W..(y0 + rows) * W]);
-        let t1 = std::time::Instant::now();
-        let mut t2 = t1;
-        match &frame.screen {
-            Screen::Ledger => x.ledger(&frame.usage),
-            Screen::Boot => x.boot(frame.t, frame.progress),
-            Screen::Wifi { attempt, ssid } => x.wifi(frame.t, *attempt, ssid),
-            Screen::Setup { ap_ssid, ap_key, ip } => x.setup(frame.t, ap_ssid, ap_key, ip),
-            Screen::Wipe { secs_left } => x.wipe(frame.t, *secs_left),
-            screen => {
-                x.face(&frame.p, frame.em, frame.t);
-                t2 = std::time::Instant::now();
-                let mood = match screen {
-                    Screen::Speaking => cfg.name.to_uppercase(),
-                    _ => frame.em.label().to_uppercase(),
-                };
+        let (y0, rows) = c.window();
+        let full = y0 == 0 && rows == H;
+        let face_screen = !matches!(frame.screen, Screen::Ledger | Screen::Boot | Screen::Wifi { .. } | Screen::Setup { .. } | Screen::Wipe { .. });
+        let has_caption = !frame.caption.is_empty();
+        let mood = match frame.screen {
+            Screen::Speaking => cfg.name.to_uppercase(),
+            _ => frame.em.label().to_uppercase(),
+        };
+        let footer = cfg.corp && !has_caption && frame.em != Emotion::Sleepy;
+        let mut t1 = t0;
+        let mut t2 = t0;
+        if face_screen && full {
+            // Static layer from cache; rebuild when its inputs change.
+            let key = format!("{mood}|{:?}|{footer}|{}|{:?}", frame.usage, cfg.corp_name, cfg.accent);
+            if self.base.as_ref().is_none_or(|(k, _)| *k != key) {
+                c.pixels_mut().copy_from_slice(bg);
+                let mut x = Ctx { c: &mut *c, f: &mut self.fonts, p: self.pal, cfg };
+                x.c.xf = Xf::ID;
+                x.c.alpha = 1.0;
                 x.status(&frame.usage, &mood);
-                let has_caption = !frame.caption.is_empty();
-                if cfg.corp && !has_caption && frame.em != Emotion::Sleepy {
+                if footer {
                     let s = format!("PROPERTY OF {} · EMP-0007", cfg.corp_name.to_uppercase());
                     x.text(160., 233., &s, x.mono(8., x.p.sec).middle());
                 }
-                if has_caption {
-                    x.caption(*screen == Screen::Listening, &frame.caption);
+                self.base = Some((key, c.pixels().to_vec()));
+            } else {
+                c.pixels_mut().copy_from_slice(&self.base.as_ref().unwrap().1);
+            }
+            t1 = std::time::Instant::now();
+            let mut x = Ctx { c: &mut *c, f: &mut self.fonts, p: self.pal, cfg };
+            x.c.xf = Xf::ID;
+            x.c.alpha = 1.0;
+            x.face(&frame.p, frame.em, frame.t);
+            t2 = std::time::Instant::now();
+            if has_caption {
+                x.caption(frame.screen == Screen::Listening, &frame.caption);
+            }
+        } else {
+            c.pixels_mut().copy_from_slice(&bg[y0 * W..(y0 + rows) * W]);
+            t1 = std::time::Instant::now();
+            let mut x = Ctx { c: &mut *c, f: &mut self.fonts, p: self.pal, cfg };
+            x.c.xf = Xf::ID;
+            x.c.alpha = 1.0;
+            match &frame.screen {
+                Screen::Ledger => x.ledger(&frame.usage),
+                Screen::Boot => x.boot(frame.t, frame.progress),
+                Screen::Wifi { attempt, ssid } => x.wifi(frame.t, *attempt, ssid),
+                Screen::Setup { ap_ssid, ap_key, ip } => x.setup(frame.t, ap_ssid, ap_key, ip),
+                Screen::Wipe { secs_left } => x.wipe(frame.t, *secs_left),
+                screen => {
+                    x.face(&frame.p, frame.em, frame.t);
+                    t2 = std::time::Instant::now();
+                    x.status(&frame.usage, &mood);
+                    if footer {
+                        let s = format!("PROPERTY OF {} · EMP-0007", cfg.corp_name.to_uppercase());
+                        x.text(160., 233., &s, x.mono(8., x.p.sec).middle());
+                    }
+                    if has_caption {
+                        x.caption(*screen == Screen::Listening, &frame.caption);
+                    }
                 }
+            }
+            if t2 == t0 {
+                t2 = std::time::Instant::now();
             }
         }
         let t3 = std::time::Instant::now();
         // Vignette + scanlines are applied at scan-out (Canvas shade).
-        if cfg.fx != c_has_shade(x.c) {
-            x.c.set_shade(cfg.fx.then(|| self.shade.clone()));
+        if cfg.fx != c_has_shade(c) {
+            c.set_shade(cfg.fx.then(|| self.shade.clone()));
         }
         let us = |a: std::time::Instant, b: std::time::Instant| (b - a).as_micros() as u32;
         self.timings = [us(t0, t1), us(t1, t2), us(t2, t3), us(t3, std::time::Instant::now())];

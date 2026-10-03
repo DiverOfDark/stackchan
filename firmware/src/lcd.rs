@@ -8,7 +8,9 @@ use femto_drivers::ft6336::Panel;
 
 const W: usize = 320;
 const H: usize = 240;
-const CHUNK_ROWS: usize = 24;
+/// 8 rows = 5 KB per DMA buffer: small enough for internal RAM, which
+/// scan-out writes much faster than PSRAM.
+const CHUNK_ROWS: usize = 8;
 const CHUNK_PX: usize = W * CHUNK_ROWS;
 
 const PIN_MOSI: i32 = 37;
@@ -94,9 +96,7 @@ impl Lcd {
 
         let mut bufs = [core::ptr::null_mut(); 2];
         for b in &mut bufs {
-            // PSRAM, cache-line aligned: the S3's GDMA reads external RAM, and
-            // internal RAM is reserved for Wi-Fi, camera and audio DMA.
-            *b = unsafe { sys::heap_caps_aligned_alloc(64, CHUNK_PX * 2, sys::MALLOC_CAP_SPIRAM | sys::MALLOC_CAP_8BIT) } as *mut u16;
+            *b = unsafe { sys::heap_caps_malloc(CHUNK_PX * 2, sys::MALLOC_CAP_DMA | sys::MALLOC_CAP_INTERNAL) } as *mut u16;
             assert!(!b.is_null(), "LCD DMA buffer");
         }
         let lcd = Lcd { io, bufs, queued: 0 };
