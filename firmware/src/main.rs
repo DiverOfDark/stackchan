@@ -9,6 +9,7 @@ mod dns;
 mod hub;
 mod store;
 mod tz;
+mod vision;
 mod web;
 mod lcd;
 mod motion;
@@ -51,6 +52,11 @@ fn main() -> anyhow::Result<()> {
     let net_cfg = net::NetConfig::load(&hub.lock().unwrap().store, &nvs);
     info!("Wi-Fi '{}', usage {}", net_cfg.ssid, if net_cfg.usage_url.is_empty() { "<unset>" } else { &net_cfg.usage_url });
     net::spawn(p.modem, nvs.clone(), net_cfg, hub.clone(), net_cmd_rx, net_tx)?;
+    let (sight_tx, sight_rx) = std::sync::mpsc::channel();
+    if cfg.camera {
+        vision::spawn(1, sight_tx);
+    }
+    let mut tracker = Tracker::default();
     let _web = web::start(&hub)?;
     let _mdns = esp_idf_svc::mdns::EspMdns::take().and_then(|mut m| {
         m.set_hostname("femto")?;
@@ -68,14 +74,7 @@ fn main() -> anyhow::Result<()> {
 
     let mut renderer = Renderer::new();
     let mut canvas = Canvas::new();
-    // Rasterizer scratch in internal RAM (20 KB).
-    canvas.set_scratch({
-        let n = (femto_render::W + 2) * 16;
-        // SAFETY: fresh internal allocation of n f32s, len 0; freed via free().
-        let ptr = unsafe { sys::heap_caps_malloc(n * 4, sys::MALLOC_CAP_INTERNAL | sys::MALLOC_CAP_8BIT) } as *mut f32;
-        assert!(!ptr.is_null(), "raster scratch");
-        unsafe { Vec::from_raw_parts(ptr, 0, n) }
-    });
+
     board.pmic.set_brightness(60).ok();
     info!("panel {:?}", board.panel);
     let head = match board.body.as_mut() {
@@ -99,7 +98,7 @@ fn main() -> anyhow::Result<()> {
     let (to_lcd, lcd_rx) = std::sync::mpsc::sync_channel::<Canvas>(1);
     let (back_tx, from_lcd) = std::sync::mpsc::sync_channel::<(Canvas, u32)>(1);
     let mut lcd = board.lcd;
-    std::thread::Builder::new().name("lcd".into()).stack_size(8192).spawn(move || {
+    psram_stack_thread("lcd", 8192, move || {
         for c in lcd_rx {
             let t = Instant::now();
             if let Err(e) = lcd.push(&c) {
@@ -189,6 +188,7 @@ fn main() -> anyhow::Result<()> {
                 hub::UiCmd::Trigger(t) => trigger(&mut engine, &cfg, t),
                 hub::UiCmd::Reboot => {
                     std::thread::sleep(Duration::from_millis(500));
+                    vision::stop();
                     unsafe { sys::esp_restart() };
                 }
                 hub::UiCmd::FactoryReset => factory_wipe(),
@@ -232,8 +232,24 @@ fn main() -> anyhow::Result<()> {
             }
         }
 
+        while let Ok(sight) = sight_rx.try_recv() {
+            match sight {
+                vision::Sight::Face { nx, ny, .. } => {
+                    if tracker.lost_for() > Duration::from_secs(3) {
+                        engine.event(Event::NewFace);
+                    }
+                    tracker.seen(nx, ny);
+                    engine.face_seen(nx, ny);
+                }
+                vision::Sight::Nobody => {
+                    if tracker.lost_for() > Duration::from_millis(600) {
+                        engine.face_lost();
+                    }
+                }
+            }
+        }
         if let Some(head) = &head {
-            let (pan, tilt) = engine.head_target();
+            let (pan, tilt) = tracker.head(&engine, cfg.follow);
             let mut t = head.lock().unwrap();
             // Engine pan + = viewer's right = robot's left (yaw −).
             t.yaw = -pan;
@@ -262,6 +278,8 @@ fn main() -> anyhow::Result<()> {
             s.session_reset_min = fr.usage.session_reset_min;
             s.stale = fr.usage.stale;
             s.fps = fps;
+            s.face = tracker.last_face();
+            s.face_age_s = tracker.last_seen.map(|t| t.elapsed().as_secs_f32());
         }
         // Hand the frame to the LCD thread; continue on the other buffer.
         let next = match spare.take() {
@@ -299,6 +317,7 @@ fn idle_sleep(start: Instant) {
 /// Wipe Wi-Fi, tokens, settings and password (namespaces `femto` and the
 /// stock `wifi`), keep M5's servo calibration, and reboot into setup.
 fn factory_wipe() -> ! {
+    vision::stop();
     for ns in [c"femto", c"wifi"] {
         // SAFETY: NVS handle opened, erased, committed and closed here.
         unsafe {
@@ -311,6 +330,93 @@ fn factory_wipe() -> ! {
         }
     }
     unsafe { sys::esp_restart() }
+}
+
+/// Closed-loop head tracking: the camera sits in the head, so a face's
+/// offset is an error to integrate, not a target angle.
+#[derive(Default)]
+struct Tracker {
+    yaw: f32,
+    pitch: f32,
+    last_seen: Option<Instant>,
+    last_step: Option<Instant>,
+    err: (f32, f32),
+}
+
+impl Tracker {
+    const GAIN_DEG_S: f32 = 40.0;
+
+    fn seen(&mut self, nx: f32, ny: f32) {
+        self.last_seen = Some(Instant::now());
+        self.err = (nx, ny);
+    }
+
+    fn last_face(&self) -> Option<(f32, f32)> {
+        self.last_seen.map(|_| self.err)
+    }
+
+    fn lost_for(&self) -> Duration {
+        self.last_seen.map_or(Duration::MAX, |t| t.elapsed())
+    }
+
+    /// (pan, tilt) in engine convention (pan + = viewer's right, tilt + = up).
+    fn head(&mut self, engine: &Engine, follow: bool) -> (f32, f32) {
+        let now = Instant::now();
+        let dt = self.last_step.map_or(0.0, |t| (now - t).as_secs_f32()).min(0.2);
+        self.last_step = Some(now);
+        let em = engine.resolve_emotion();
+        let tracking = follow && self.lost_for() < Duration::from_millis(800) && !matches!(em, femto_core::Emotion::Sleepy | femto_core::Emotion::Thinking);
+        if tracking {
+            // Deadband so the head doesn't hunt around a centred face.
+            let (ex, ey) = self.err;
+            if ex.abs() > 0.12 {
+                self.yaw += ex * Self::GAIN_DEG_S * dt;
+            }
+            if ey.abs() > 0.15 {
+                self.pitch -= ey * Self::GAIN_DEG_S * 0.6 * dt;
+            }
+            self.yaw = self.yaw.clamp(-45.0, 45.0);
+            self.pitch = self.pitch.clamp(-10.0, 25.0);
+            (self.yaw, self.pitch)
+        } else if self.lost_for() > Duration::from_secs(3) || !follow {
+            // Nobody around: drift home, and let the engine pose (glances).
+            self.yaw *= 1.0 - (dt * 0.8).min(1.0);
+            self.pitch *= 1.0 - (dt * 0.8).min(1.0);
+            let (p, t) = engine.head_target();
+            (self.yaw + p, self.pitch + t)
+        } else {
+            (self.yaw, self.pitch)
+        }
+    }
+}
+
+/// Spawn a thread whose stack lives in PSRAM (saves internal RAM). Only for
+/// threads that never write flash: their stack is unreachable while the
+/// flash cache is off.
+pub fn psram_stack_thread<F: FnOnce() + Send + 'static>(name: &str, stack: usize, f: F) -> std::io::Result<std::thread::JoinHandle<()>> {
+    psram_stack_thread_on(name, stack, None, f)
+}
+
+/// As [`psram_stack_thread`], pinned to `core` when given (the UI loop runs
+/// on core 0; heavy workers go to core 1).
+pub fn psram_stack_thread_on<F: FnOnce() + Send + 'static>(name: &str, stack: usize, core: Option<i32>, f: F) -> std::io::Result<std::thread::JoinHandle<()>> {
+    // SAFETY: esp_pthread config is copied by value; restored right after spawn.
+    unsafe {
+        let mut cfg = sys::esp_pthread_get_default_config();
+        cfg.stack_alloc_caps = sys::MALLOC_CAP_SPIRAM | sys::MALLOC_CAP_8BIT;
+        cfg.stack_size = stack;
+        if let Some(c) = core {
+            cfg.pin_to_core = c;
+        }
+        sys::esp_pthread_set_cfg(&cfg);
+    }
+    let h = std::thread::Builder::new().name(name.into()).stack_size(stack).spawn(f);
+    // SAFETY: as above.
+    unsafe {
+        let cfg = sys::esp_pthread_get_default_config();
+        sys::esp_pthread_set_cfg(&cfg);
+    }
+    h
 }
 
 fn screen_name(s: &Screen) -> &'static str {

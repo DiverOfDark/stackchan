@@ -117,7 +117,7 @@ pub fn start(uart: UART1<'static>, tx: Gpio6<'static>, rx: Gpio7<'static>, nvs: 
 
     let target = Arc::new(Mutex::new(Target { yaw: 0.0, pitch: PITCH_NEUTRAL, may_rest: false }));
     let shared = target.clone();
-    std::thread::Builder::new().name("motion".into()).stack_size(6144).spawn(move || {
+    crate::psram_stack_thread("motion", 6144, move || {
         let mut torque = false;
         let mut resting_since: Option<Instant> = None;
         let mut errors = 0u32;

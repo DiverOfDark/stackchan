@@ -3,6 +3,8 @@ use std::process::Command;
 
 fn main() {
     embuild::espidf::sysenv::output();
+    // ESP-DL (face detection) is C++: link its runtime.
+    println!("cargo:rustc-link-arg=-lstdc++");
 
     // Build and embed the web UI (web/dist/index.html.gz). Set
     // FEMTO_SKIP_WEB=1 to reuse whatever is already built.

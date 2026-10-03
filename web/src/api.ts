@@ -35,6 +35,7 @@ export interface Status {
   screen: string;
   panel: string;
   wifi: { ssid: string | null; ip: string | null; rssi: number | null; connected: boolean };
+  vision?: { face: { x: number; y: number } | null; seen_s_ago: number | null };
   usage: {
     signed_in: boolean;
     session_pct: number | null;

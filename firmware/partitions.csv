@@ -1,9 +1,9 @@
-# PRD §8.4. 16 MB flash.
+# PRD §8.4. 16 MB flash. App slots are 6 MB: ESP-DL + the face model need ~4 MB.
 # Name,     Type, SubType,  Offset,   Size
 nvs,        data, nvs,      0x9000,   0x6000
 otadata,    data, ota,      0xf000,   0x2000
 phy_init,   data, phy,      0x11000,  0x1000
-ota_0,      app,  ota_0,    0x20000,  0x400000
-ota_1,      app,  ota_1,    0x420000, 0x400000
-model,      data, spiffs,   0x820000, 0x100000
-storage,    data, spiffs,   0x920000, 0x6E0000
+ota_0,      app,  ota_0,    0x20000,  0x600000
+ota_1,      app,  ota_1,    0x620000, 0x600000
+model,      data, spiffs,   0xC20000, 0x100000
+storage,    data, spiffs,   0xD20000, 0x2E0000

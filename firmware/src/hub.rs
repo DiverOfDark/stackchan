@@ -52,6 +52,9 @@ pub struct Snapshot {
     pub week_pct: Option<u8>,
     pub session_reset_min: Option<u32>,
     pub stale: bool,
+    /// Face tracking: last face centre (−1..1) and seconds since seen.
+    pub face: Option<(f32, f32)>,
+    pub face_age_s: Option<f32>,
 }
 
 #[derive(Clone, Debug, Default)]

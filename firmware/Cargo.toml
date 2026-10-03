@@ -49,3 +49,9 @@ opt-level = 3
 # femto.local (PRD FR-24)
 [[package.metadata.esp-idf-sys.extra_components]]
 remote_component = { name = "espressif/mdns", version = "1.8" }
+
+# Camera + face detection (C++ shim over esp32-camera and ESP-DL)
+[[package.metadata.esp-idf-sys.extra_components]]
+component_dirs = ["components/femto_vision"]
+bindings_header = "components/femto_vision/include/femto_vision.h"
+bindings_module = "vision"
