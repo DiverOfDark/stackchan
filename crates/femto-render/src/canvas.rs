@@ -392,17 +392,19 @@ fn mix565(d: u16, s: u16, a: u32) -> u16 {
     (ch(11, 0x1F) | ch(5, 0x3F) | ch(0, 0x1F)) as u16
 }
 
-/// Scale a 565 colour by `k`/255.
+/// Scale a 565 colour by `k`/255 (multiply-shift, no divisions: this runs
+/// for every pixel at scan-out).
 #[inline]
 fn scale565(p: u16, k: u32) -> u16 {
     if k >= 255 {
         return p;
     }
+    let k = k + (k >> 7); // 0..=256 ≈ k·256/255
     let p = p as u32;
-    let r = ((p >> 11) & 0x1F) * k / 255;
-    let g = ((p >> 5) & 0x3F) * k / 255;
-    let b = (p & 0x1F) * k / 255;
-    ((r << 11) | (g << 5) | b) as u16
+    let r = (((p & 0xF800) * k) >> 8) & 0xF800;
+    let g = (((p & 0x07E0) * k) >> 8) & 0x07E0;
+    let b = ((p & 0x001F) * k) >> 8;
+    (r | g | b) as u16
 }
 
 pub fn unpack(p: u16) -> (u8, u8, u8) {
@@ -473,6 +475,19 @@ fn accumulate(acc: &mut [f32], spans: &mut [(u16, u16)], stride: usize, w: usize
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn scale565_matches_division() {
+        for p in [0xFFFFu16, 0xF800, 0x07E0, 0x001F, 0x8410, 0x1234] {
+            for k in [0u32, 1, 77, 128, 200, 254, 255] {
+                let (r, g, b) = (((p >> 11) & 0x1F) as u32, ((p >> 5) & 0x3F) as u32, (p & 0x1F) as u32);
+                let want = (r * k / 255, g * k / 255, b * k / 255);
+                let got = scale565(p, k);
+                let got = (((got >> 11) & 0x1F) as u32, ((got >> 5) & 0x3F) as u32, (got & 0x1F) as u32);
+                assert!(got.0.abs_diff(want.0) <= 1 && got.1.abs_diff(want.1) <= 1 && got.2.abs_diff(want.2) <= 1, "{p:04x} k{k}: {got:?} vs {want:?}");
+            }
+        }
+    }
 
     #[test]
     fn rect_fill_exact() {

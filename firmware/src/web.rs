@@ -456,6 +456,15 @@ pub fn start(hub: &HubRef) -> Result<EspHttpServer<'static>> {
         }
     })?;
 
+    route(&mut server, hub, "/api/tasks", Method::Get, false, |_, req| {
+        // CPU share per task since boot (FreeRTOS run-time stats).
+        let mut buf = vec![0u8; 4096];
+        // SAFETY: buffer is large enough for the task table (~40 tasks × 40 B).
+        unsafe { esp_idf_svc::sys::vTaskGetRunTimeStats(buf.as_mut_ptr() as *mut _) };
+        let text = std::ffi::CStr::from_bytes_until_nul(&buf).map(|c| c.to_string_lossy().into_owned()).unwrap_or_default();
+        reply(req, 200, &text, "text/plain")
+    })?;
+
     route(&mut server, hub, "/api/ws/ticket", Method::Get, false, |hub, req| {
         let t = crate::hub::random_hex(12);
         let mut h = hub.lock().unwrap();

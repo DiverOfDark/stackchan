@@ -119,8 +119,10 @@ impl Lcd {
     }
 
     fn wait_done(&self, n: u32) {
+        // Sleep, don't spin: a 15 KB chunk takes ~3 ms at 40 MHz and the
+        // spin cost ~23 % of a core.
         while DONE.load(Ordering::Acquire).wrapping_sub(n) > u32::MAX / 2 {
-            std::hint::spin_loop();
+            std::thread::sleep(std::time::Duration::from_millis(1));
         }
     }
 
