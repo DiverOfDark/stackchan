@@ -38,6 +38,9 @@ std::optional<OfferResponse> Signaling::sendOffer(std::string_view local_sdp)
     cJSON* req = cJSON_CreateObject();
     cJSON_AddStringToObject(req, "type", "offer");
     cJSON_AddStringToObject(req, "sdp",  std::string(local_sdp).c_str());
+    if (!request_data_.empty()) {
+        if (cJSON* extra = cJSON_Parse(request_data_.c_str())) cJSON_AddItemToObject(req, "request_data", extra);
+    }
     char* body = cJSON_PrintUnformatted(req);
     cJSON_Delete(req);
     if (!body) return std::nullopt;

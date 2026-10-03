@@ -11,3 +11,5 @@
 | `wake_word` | pipecat-voice-assistant @ f9fd4e7 | "Эй, Фемто" microWakeWord model |
 
 Changes to copied components should go upstream first.
+
+Local changes: `pv_transport` opens a string data channel ("events") and can send `request_data` with the offer (Femto device identity).

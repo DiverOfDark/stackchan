@@ -42,6 +42,8 @@ public:
     // GET /ice-servers. Empty vector if backend has no TURN configured
     // (degrades to host-candidate-only ICE).
     std::vector<IceServer> fetchIceServers();
+    // Femto: JSON object sent as the offer's request_data (device identity).
+    void setRequestData(std::string json) { request_data_ = std::move(json); }
 
     // pc_id from the most recent successful sendOffer(). Useful for
     // log correlation; empty before first success.
@@ -52,6 +54,7 @@ private:
     std::string      offer_url_;
     std::string      ice_url_;
     std::string      pc_id_;
+    std::string      request_data_;
     hal::HttpsClient http_{16'384};
 };
 

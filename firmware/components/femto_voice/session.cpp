@@ -160,6 +160,11 @@ bool Session::buildAndOffer()
     peer_->setOnStateChange([this](transport::PeerState s) { onPeerState(s); });
     peer_->setOnLocalSdp   ([this](std::string sdp)        { onLocalSdp(std::move(sdp)); });
     peer_->setOnAudio      ([this](const uint8_t* d, std::size_t n) { onInboundAudio(d, n); });
+    peer_->setOnData([this](const char* d, std::size_t n) {
+        std::lock_guard<std::mutex> lk(events_mtx_);
+        if (events_.size() >= 64) events_.pop_front();
+        events_.emplace_back(d, n);
+    });
 
     const char* offer = peer_->createOffer();
     if (!offer) {
@@ -355,6 +360,15 @@ void Session::mainLoopTask()
         vTaskDelay(pdMS_TO_TICKS(10));
     }
     vTaskDelete(nullptr);
+}
+
+bool Session::nextEvent(std::string& out)
+{
+    std::lock_guard<std::mutex> lk(events_mtx_);
+    if (events_.empty()) return false;
+    out = std::move(events_.front());
+    events_.pop_front();
+    return true;
 }
 
 // ---------- Capture task (CoreS3 mono mic) ---------------------------------

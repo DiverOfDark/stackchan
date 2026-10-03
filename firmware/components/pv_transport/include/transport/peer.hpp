@@ -46,6 +46,8 @@ public:
     using OnStateChange    = std::function<void(PeerState)>;
     using OnLocalSdp       = std::function<void(std::string)>;
     using OnInboundAudio   = std::function<void(const uint8_t*, std::size_t)>;
+    // Femto: text messages on the "events" data channel.
+    using OnData           = std::function<void(const char*, std::size_t)>;
 
     // Process-global libpeer init (initialises libsrtp + usrsctp).
     // Must be called once before any Peer::create(). Idempotent.
@@ -70,6 +72,7 @@ public:
     void setOnStateChange(OnStateChange cb);
     void setOnLocalSdp   (OnLocalSdp    cb);
     void setOnAudio      (OnInboundAudio cb);
+    void setOnData       (OnData cb);
 
     // Build the local SDP offer; libpeer gathers synchronously and
     // calls the on_local_sdp callback with the full SDP.
@@ -101,6 +104,8 @@ private:
     static void thunkOnState(PeerConnectionState s, void* ud);
     static void thunkOnSdp  (char* sdp, void* ud);
     static void thunkOnAudio(uint8_t* d, std::size_t n, void* ud);
+    static void thunkOnData(char* msg, std::size_t len, void* ud, uint16_t sid);
+    static void thunkOnDcOpen(void* ud);
 
     PeerConnection*           pc_ = nullptr;
     std::vector<PeerIceServer> ice_;        // backing strings — must outlive pc_
@@ -109,6 +114,7 @@ private:
     OnStateChange  on_state_;
     OnLocalSdp     on_sdp_;
     OnInboundAudio on_audio_;
+    OnData on_data_;
 };
 
 } // namespace transport

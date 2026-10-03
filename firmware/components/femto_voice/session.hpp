@@ -5,6 +5,7 @@
 // XVF3800 LED ring / button / wake-sample upload replaced by CoreS3 audio
 // and a state + level output for the Rust UI.
 #include <atomic>
+#include <deque>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -31,6 +32,9 @@ public:
     float level() const { return level_.load(); }
     float micLevel() const { return mic_level_.load(); }
     void wake() { ptt_ = true; }
+    void setRequestData(std::string json) { signaling_.setRequestData(std::move(json)); }
+    /** Pop one backend event (JSON); false when none. */
+    bool nextEvent(std::string &out);
 
 private:
     bool buildAndOffer();
@@ -70,6 +74,8 @@ private:
     std::atomic<femto_voice_state_t> state_{FEMTO_VOICE_IDLE};
     std::atomic<float> level_{0};
     std::atomic<float> mic_level_{0};
+    std::mutex events_mtx_;
+    std::deque<std::string> events_;
     // Diagnostics kept from the original Session.
     std::atomic<int> last_peer_state_{-1};
     std::atomic<uint32_t> reconnects_{0};

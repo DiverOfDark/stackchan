@@ -52,7 +52,9 @@ std::unique_ptr<Peer> Peer::create(const std::vector<PeerIceServer>& ice)
     // RTP (PT 9, 8 kHz RTP clock per RFC 3551); the app does the codec math.
     cfg.audio_codec  = CODEC_G722;
     cfg.video_codec  = CODEC_NONE;
-    cfg.datachannel  = DATA_CHANNEL_NONE;
+    // Femto: a string data channel carries turn events + captions from the
+    // backend (see femto_voice). The device opens it once SCTP is up.
+    cfg.datachannel  = DATA_CHANNEL_STRING;
     cfg.onaudiotrack = &Peer::thunkOnAudio;
     cfg.user_data    = p.get();   // unique_ptr keeps the address stable
 
@@ -70,6 +72,7 @@ std::unique_ptr<Peer> Peer::create(const std::vector<PeerIceServer>& ice)
     }
     peer_connection_oniceconnectionstatechange(p->pc_, &Peer::thunkOnState);
     peer_connection_onicecandidate            (p->pc_, &Peer::thunkOnSdp);
+    peer_connection_ondatachannel(p->pc_, &Peer::thunkOnData, &Peer::thunkOnDcOpen, nullptr);
     return p;
 }
 
@@ -83,6 +86,7 @@ Peer::~Peer()
 void Peer::setOnStateChange(OnStateChange cb) { on_state_  = std::move(cb); }
 void Peer::setOnLocalSdp   (OnLocalSdp    cb) { on_sdp_    = std::move(cb); }
 void Peer::setOnAudio      (OnInboundAudio cb) { on_audio_ = std::move(cb); }
+void Peer::setOnData       (OnData        cb) { on_data_  = std::move(cb); }
 
 const char* Peer::createOffer()
 {
@@ -148,6 +152,24 @@ void Peer::thunkOnAudio(uint8_t* d, std::size_t n, void* ud)
 {
     auto* self = static_cast<Peer*>(ud);
     if (self && self->on_audio_) self->on_audio_(d, n);
+}
+
+void Peer::thunkOnData(char* msg, std::size_t len, void* ud, uint16_t /*sid*/)
+{
+    auto* self = static_cast<Peer*>(ud);
+    if (self && self->on_data_ && msg) self->on_data_(msg, len);
+}
+
+void Peer::thunkOnDcOpen(void* ud)
+{
+    // SCTP association is up: open our channel (the backend listens for it).
+    auto* self = static_cast<Peer*>(ud);
+    if (self && self->pc_) {
+        char label[] = "events";
+        char proto[] = "";
+        peer_connection_create_datachannel(self->pc_, DATA_CHANNEL_RELIABLE, 0, 0, label, proto);
+        ESP_LOGI(kTag, "data channel 'events' requested");
+    }
 }
 
 } // namespace transport

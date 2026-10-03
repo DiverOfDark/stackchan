@@ -252,7 +252,7 @@ fn main() -> anyhow::Result<()> {
                     report_memory_tag("wifi connected");
                     if voice.is_none() {
                         let url = hub.lock().unwrap().store.get(store::KEY_VOICE_URL).unwrap_or_default();
-                        voice = voice::start(&url, cfg.volume);
+                        voice = voice::start(&url, &cfg);
                     }
                 }
                 net::NetEvent::Setup { ssid, key } => after_boot = Some(Screen::Setup { ap_ssid: ssid, ap_key: key, ip: "192.168.4.1".into() }),
