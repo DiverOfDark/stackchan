@@ -339,6 +339,7 @@ Authorization: Bearer <STACKCHAN_TOKEN>      # new env var; 401 if set and misma
 - **Iris glow.** A pre-baked radial sprite instead of a runtime Gaussian blur.
 - **Fonts.** Barlow Condensed (600/800 italic), Share Tech Mono, and a Noto Sans JP 900 subset (フェムト警告監視), converted to anti-aliased bitmap fonts at the sizes in use: 7, 8, 10, 11, 12, 13, 15, 16, 20, 28, 32, 34, 40, 50, 54 px. **The caption font (Barlow Condensed 500, 16 px) also includes Cyrillic**, because Russian transcripts and replies appear in captions. Share Tech Mono has no Cyrillic; no system readout needs it.
 - **Golden-image tests.** Render each screen-sheet state on the host, and diff it against PNG rasters exported from the design (§10).
+- **Legibility on the 2" panel** (2026-10-03, after testing on the device): the design's 7–10 px anti-aliased text was unreadable at ~200 ppi. Small system text (≤ 12 px) uses the Terminus bitmap font (6×12 / 8×14, OFL, Latin + Cyrillic) at native size; outline glyphs ≤ 24 px get a contrast curve; scanlines are dropped (they cut every third glyph row) and the vignette only touches the corners; the secondary grey is brighter. Mini faces (boot/setup) keep their tiny outline text.
 
 ### 8.2 Firmware stack: **Option C (decided 2026-10-03)**
 
@@ -434,7 +435,7 @@ nvs 24 KB · otadata 8 KB · phy 4 KB · app0 4 MB · app1 4 MB (web UI ≤ 80 K
 ## 10. Testing
 - **Host unit tests** (`cargo test` on the pure crates, which run on x86 with no ESP toolchain): FaceEngine (easing, mood resolution rules, blink/glitch timing), usage parsing, countdown formatting, caption wrapping, settings validation and `/api` handlers (request/response vs `web/src/api.ts` types).
 - **Web UI:** Vitest component tests for the wizard and the settings forms against the mock API. One Playwright run of the full setup wizard against the mock. CI enforces the bundle-size budget.
-- **Golden-image tests:** render every screen-sheet state on the host to a 320×240 PNG and compare it to the design's rasterised canvases, which can be exported from the "On device" section of the design. Threshold ≤ 3 % pixel diff.
+- **Golden-image tests:** render every screen-sheet state on the host to a 320×240 PNG and compare it to the design's rasterised canvases, which can be exported from the "On device" section of the design. Threshold ≤ 10 % pixel diff (was 3 %; the 2026-10-03 legibility pass deliberately changes small text — see §8.1).
 - **Hardware-in-the-loop smoke test:** flash → boot → Wi-Fi → usage fetched → wake-word sample played from a speaker → round trip completes.
 - **Mocks:** a backend mock mode (`LOCAL_MODE` in trmnl-cyberpunk already serves fake usage). A device "demo" mode reproduces the design's "▶ Femto, how much Claude do I have left?" scripted flow with no network.
 

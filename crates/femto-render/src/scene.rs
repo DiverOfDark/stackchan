@@ -87,7 +87,7 @@ impl Renderer {
             _ => frame.em.label().to_uppercase(),
         };
         let footer = cfg.corp && !has_caption && frame.em != Emotion::Sleepy;
-        let mut t1 = t0;
+        let t1;
         let mut t2 = t0;
         if face_screen && full {
             // Static layer from cache; rebuild when its inputs change.
@@ -161,8 +161,21 @@ impl Ctx<'_> {
         self.c.text(self.f, x, y, s, st);
     }
 
+    /// System readouts. Small sizes use the Terminus bitmap font: at
+    /// 7–12 px an anti-aliased outline font is unreadable on the 2" panel.
     fn mono(&self, size: f32, color: Rgb) -> Style {
-        Style::new(Face::Mono, size, color)
+        // Mini faces (boot/setup) keep the tiny outline text: a full-size
+        // bitmap there would cover the little face.
+        if self.c.xf.s < 0.75 {
+            return Style::new(Face::Mono, size, color);
+        }
+        let face = match size * self.c.xf.s {
+            s if s <= 10.5 => Face::Term12,
+            s if s <= 12.5 => Face::Term12B,
+            s if s <= 15.0 => Face::Term14B,
+            _ => Face::Mono,
+        };
+        Style::new(face, size, color)
     }
 
     fn heavy(&self, size: f32, color: Rgb) -> Style {
@@ -267,7 +280,7 @@ impl Ctx<'_> {
             tp = n;
         };
         if self.cfg.corp {
-            self.corp_marks(lx, rx, cy);
+            self.corp_marks(lx, rx, cy, p.drop);
         } else {
             self.implant(lx, rx, cy, t);
         }
@@ -323,14 +336,17 @@ impl Ctx<'_> {
         let _ = oy;
     }
 
-    fn corp_marks(&mut self, lx: f32, rx: f32, cy: f32) {
+    fn corp_marks(&mut self, lx: f32, rx: f32, cy: f32, drop: f32) {
         let (x, y) = (lx - 46.0, cy + 36.0);
         let a = self.p.a;
         self.c.stroke(&Path::rect_rotated(x - 6., y - 6., 12., 12., 45., x, y), 1.5, a, 1.0);
         self.c.fill(&Path::rect_rotated(x - 2.5, y - 2.5, 5., 5., 45., x, y), a, 1.0);
         let id = format!("{}-07", self.cfg.corp_initials());
         self.text(x, y + 19., &id, self.mono(7., a).middle());
-        self.text(rx + 8., cy + 42., "EMP 0007", self.mono(7., self.p.ink).opacity(0.6));
+        // Hidden while the glasses slide down (their readout would cover it).
+        if drop < 4.0 {
+            self.text(rx + 8., cy + 45., "EMP 0007", self.mono(7., self.p.ink).opacity(0.6));
+        }
     }
 
     fn implant(&mut self, lx: f32, rx: f32, cy: f32, t: u32) {
@@ -367,7 +383,8 @@ impl Ctx<'_> {
             self.c.stroke(&bridge, 2.5, ink, 1.0);
             self.c.line(lx - 42., cy - 19. + dy, 18., cy - 26., 2.5, ink, 1.0);
             self.c.line(rx + 42., cy - 19. + dy, 302., cy - 26., 2.5, ink, 1.0);
-            self.text(rx + 42., cy + 27. + dy, hud, self.mono(7., a).end());
+            // Below the lens frame (Terminus is taller than the design's 7 px).
+            self.text(rx + 42., cy + 30. + dy, hud, self.mono(7., a).end());
             let led = Path::rect(rx - 42., cy + 22. + dy, 4., 4.);
             if t % 16 < 8 {
                 self.c.fill(&led, a, 1.0);
@@ -651,7 +668,7 @@ fn background(c: &mut Canvas, pal: &Palette) {
     c.fill_with(&Path::polygon(&[(0., 120.), (0., 240.), (120., 240.)]), dots);
 }
 
-/// Vignette + scanlines (the design's `overlay`) as a keep factor per pixel.
+/// Vignette (the design's `overlay`, minus scanlines) as a keep factor per pixel.
 fn overlay_shade() -> Vec<u8> {
     let mut m = vec![255u8; W * H];
     for y in 0..H {
@@ -659,9 +676,10 @@ fn overlay_shade() -> Vec<u8> {
             let dx = (x as f32 + 0.5 - 160.0) / 208.0;
             let dy = (y as f32 + 0.5 - 115.2) / 156.0;
             let d = (dx * dx + dy * dy).sqrt();
-            let vig = ((d - 0.55) / 0.45).clamp(0.0, 1.0) * 0.75;
-            let scan = if y % 3 == 0 { 0.4 } else { 0.0 };
-            let keep = (1.0 - vig) * (1.0 - scan);
+            // Vignette only toward the corners. No scanlines: at ~200 ppi they
+            // don't read as a CRT, they just cut every third row of each glyph.
+            let vig = ((d - 0.8) / 0.4).clamp(0.0, 1.0) * 0.45;
+            let keep = 1.0 - vig;
             m[y * W + x] = (keep * 255.0 + 0.5) as u8;
         }
     }

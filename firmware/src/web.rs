@@ -106,6 +106,8 @@ fn status_json(hub: &HubRef) -> Value {
     json!({
         "version": env!("CARGO_PKG_VERSION"),
         "uptime_s": h.started.elapsed().as_secs(),
+        // SAFETY: plain getter. 1 power-on, 3 software, 4 panic, 5–7 watchdogs, 9 brownout.
+        "reset_reason": unsafe { esp_idf_svc::sys::esp_reset_reason() },
         "setup": h.net.setup,
         "auth_required": !h.net.setup && h.store.has_password(),
         "mood": s.mood,

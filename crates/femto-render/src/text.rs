@@ -21,6 +21,70 @@ pub enum Face {
     Mono,
     /// Noto Sans JP 900 subset (フェムト警告監視).
     Jp,
+    /// Terminus bitmap 6×12 regular / bold, 8×14 bold, 8×16 bold: crisp
+    /// small text (system readouts) on the 2" panel. Size is fixed.
+    Term12,
+    Term12B,
+    Term14B,
+    Term16B,
+}
+
+impl Face {
+    fn bitmap(self) -> Option<&'static [u8]> {
+        Some(match self {
+            Face::Term12 => include_bytes!("../../../assets/fonts/terminus-12n.fbf"),
+            Face::Term12B => include_bytes!("../../../assets/fonts/terminus-12b.fbf"),
+            Face::Term14B => include_bytes!("../../../assets/fonts/terminus-14b.fbf"),
+            Face::Term16B => include_bytes!("../../../assets/fonts/terminus-16b.fbf"),
+            _ => return None,
+        })
+    }
+}
+
+/// A parsed `.fbf` monospace bitmap font (see tools/bdf2bin.py).
+struct BitmapFont {
+    w: usize,
+    h: usize,
+    ascent: i32,
+    glyphs: HashMap<char, Vec<u8>>,
+}
+
+impl BitmapFont {
+    fn parse(d: &[u8]) -> BitmapFont {
+        assert_eq!(&d[..4], b"FBF1", "bitmap font header");
+        let (w, h, ascent) = (d[4] as usize, d[5] as usize, d[6] as i32);
+        let count = u16::from_le_bytes([d[7], d[8]]) as usize;
+        let bpr = w.div_ceil(8);
+        let mut glyphs = HashMap::with_capacity(count);
+        let mut i = 9;
+        for _ in 0..count {
+            let cp = u32::from_le_bytes([d[i], d[i + 1], d[i + 2], d[i + 3]]);
+            i += 4;
+            let mut cov = vec![0u8; w * h];
+            for y in 0..h {
+                for x in 0..w {
+                    if d[i + y * bpr + x / 8] & (0x80 >> (x % 8)) != 0 {
+                        cov[y * w + x] = 255;
+                    }
+                }
+            }
+            i += bpr * h;
+            if let Some(c) = char::from_u32(cp) {
+                glyphs.insert(c, cov);
+            }
+        }
+        BitmapFont { w, h, ascent, glyphs }
+    }
+}
+
+/// Steepen anti-aliasing ramps: unhinted outlines at 10–24 px smear over
+/// two pixels; this firms the edge without going jagged.
+fn crisp(cov: &mut [u8]) {
+    for c in cov {
+        let v = *c as f32 / 255.0;
+        let v = ((v - 0.18) / 0.64).clamp(0.0, 1.0);
+        *c = (v * 255.0 + 0.5) as u8;
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -50,6 +114,7 @@ struct Glyph {
 
 pub struct Fonts {
     fonts: HashMap<Face, Font>,
+    bitmaps: HashMap<Face, BitmapFont>,
     /// Keyed by face, size in quarter-pixels, char.
     cache: HashMap<(Face, u32, char), Glyph>,
 }
@@ -66,10 +131,22 @@ impl Fonts {
             .iter()
             .map(|&(face, data)| (face, Font::from_bytes(data, FontSettings::default()).expect("bundled font parses")))
             .collect();
-        Fonts { fonts, cache: HashMap::new() }
+        let bitmaps = [Face::Term12, Face::Term12B, Face::Term14B, Face::Term16B]
+            .into_iter()
+            .map(|f| (f, BitmapFont::parse(f.bitmap().unwrap())))
+            .collect();
+        Fonts { fonts, bitmaps, cache: HashMap::new() }
     }
 
     fn glyph(&mut self, face: Face, size: f32, ch: char) -> &Glyph {
+        if let Some(bf) = self.bitmaps.get(&face) {
+            // Native size only; unknown chars render as '?'.
+            let key = (face, 0, ch);
+            return self.cache.entry(key).or_insert_with(|| {
+                let cov = bf.glyphs.get(&ch).or_else(|| bf.glyphs.get(&'?')).cloned().unwrap_or_else(|| vec![0; bf.w * bf.h]);
+                Glyph { xmin: 0, ymin: bf.ascent - bf.h as i32, w: bf.w, h: bf.h, advance: bf.w as f32, cov }
+            });
+        }
         let key = (face, (size * 4.0).round() as u32, ch);
         let fonts = &self.fonts;
         self.cache.entry(key).or_insert_with(|| {
@@ -77,7 +154,10 @@ impl Fonts {
             // Kana/kanji only exist in the JP subset; everything else falls
             // back to SemiBold when a face lacks the glyph.
             let font = if font.has_glyph(ch) { font } else { &fonts[&Face::SemiBold] };
-            let (m, cov) = font.rasterize(ch, size);
+            let (m, mut cov) = font.rasterize(ch, size);
+            if size <= 24.0 {
+                crisp(&mut cov);
+            }
             Glyph { xmin: m.xmin, ymin: m.ymin, w: m.width, h: m.height, advance: m.advance_width, cov }
         })
     }

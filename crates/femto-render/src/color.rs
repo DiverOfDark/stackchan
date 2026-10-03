@@ -64,7 +64,8 @@ impl Palette {
             bg: oklch(0.12, 0.015, 20.),
             panel: oklch(0.07, 0.01, 20.),
             sclera: oklch(0.2, 0.02, 20.),
-            sec: oklch(0.72, 0.02, 60.),
+            // Brighter than the design's 0.72: labels must read on the panel.
+            sec: oklch(0.8, 0.02, 60.),
             dim: oklch(0.3, 0.02, 20.),
             toxic: oklch(0.86, 0.17, 110.),
             a,

@@ -4,3 +4,5 @@ All fonts are licensed under the SIL Open Font License 1.1.
 - Barlow Condensed — Jeremy Tribby
 - Share Tech Mono — Carrois Apostrophe
 - Noto Sans JP (subset: フェムト警告監視・·) — Google
+- Terminus 4.49.1 (bitmap, 6×12 / 8×14 / 8×16) — Dimitar Zhekov, SIL OFL 1.1
+  (`TERMINUS-OFL.txt`). Converted with `tools/bdf2bin.py` to `*.fbf`.
