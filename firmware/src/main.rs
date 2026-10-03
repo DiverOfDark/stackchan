@@ -6,6 +6,7 @@
 
 mod board;
 mod lcd;
+mod motion;
 
 use std::time::{Duration, Instant};
 
@@ -25,6 +26,7 @@ fn main() -> anyhow::Result<()> {
     info!("femto {} booting", env!("CARGO_PKG_VERSION"));
 
     let p = Peripherals::take()?;
+    let nvs = esp_idf_svc::nvs::EspDefaultNvsPartition::take()?;
     let mut board = board::Board::init(p.i2c1, p.pins.gpio12, p.pins.gpio11)?;
     report_memory();
 
@@ -57,10 +59,22 @@ fn main() -> anyhow::Result<()> {
     });
     board.pmic.set_brightness(60).ok();
     info!("panel {:?}", board.panel);
-    if let Some(body) = board.body.as_mut() {
-        // Dim accent glow (PRD §5.6).
-        body.fill_leds(24, 2, 2).ok();
-    }
+    let head = match board.body.as_mut() {
+        Some(body) => {
+            // Dim accent glow (PRD §5.6).
+            body.fill_leds(24, 2, 2).ok();
+            body.set_servo_power(true).ok();
+            std::thread::sleep(Duration::from_millis(200));
+            match motion::start(p.uart1, p.pins.gpio6, p.pins.gpio7, nvs.clone()) {
+                Ok(t) => Some(t),
+                Err(e) => {
+                    warn!("motion: {e}");
+                    None
+                }
+            }
+        }
+        None => None,
+    };
 
     // LCD scan-out runs on its own thread so it overlaps the next render.
     let (to_lcd, lcd_rx) = std::sync::mpsc::sync_channel::<Canvas>(1);
@@ -130,6 +144,14 @@ fn main() -> anyhow::Result<()> {
             }
         }
 
+        if let Some(head) = &head {
+            let (pan, tilt) = engine.head_target();
+            let mut t = head.lock().unwrap();
+            // Engine pan + = viewer's right = robot's left (yaw −).
+            t.yaw = -pan;
+            t.pitch = motion::PITCH_NEUTRAL + tilt;
+            t.may_rest = engine.resolve_emotion() == femto_core::Emotion::Sleepy;
+        }
         let frame = engine.frame();
         if last_frame.as_ref() == Some(&frame) {
             idle_sleep(start);

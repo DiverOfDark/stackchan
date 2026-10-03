@@ -86,12 +86,24 @@ impl<B: Bus> ScsBus<B> {
     fn transact(&mut self, pkt: &[u8], reply_params: usize, id: u8) -> Result<Vec<u8>, Error<B::Error>> {
         self.bus.clear_rx();
         self.bus.write_all(pkt).map_err(Error::Bus)?;
-        // Status: FF FF id len err params… chk
-        let mut buf = vec![0u8; 6 + reply_params];
-        self.bus.read_exact(&mut buf, 20).map_err(Error::Bus)?;
-        if buf[0] != 0xFF || buf[1] != 0xFF {
-            return Err(Error::BadHeader);
+        // Status: FF FF id len err params… chk. Sync on FF FF like the
+        // vendor SDK: skip up to 10 stray bytes.
+        let mut prev = 0u8;
+        let mut skipped = 0;
+        loop {
+            let mut b = [0u8];
+            self.bus.read_exact(&mut b, 20).map_err(Error::Bus)?;
+            if prev == 0xFF && b[0] == 0xFF {
+                break;
+            }
+            prev = b[0];
+            skipped += 1;
+            if skipped > 10 {
+                return Err(Error::BadHeader);
+            }
         }
+        let mut buf = vec![0xFFu8; 6 + reply_params];
+        self.bus.read_exact(&mut buf[2..], 20).map_err(Error::Bus)?;
         if buf[2] != id {
             return Err(Error::WrongId);
         }
@@ -105,8 +117,10 @@ impl<B: Bus> ScsBus<B> {
         Ok(buf[5..n - 1].to_vec())
     }
 
+    /// Writes don't wait for the status reply: on the StackChan body replies
+    /// are unreliable, and waiting would cap the update rate.
     fn write(&mut self, id: u8, addr: u8, data: &[u8]) -> Result<(), Error<B::Error>> {
-        self.transact(&write_packet(id, addr, data), 0, id).map(|_| ())
+        self.bus.write_all(&write_packet(id, addr, data)).map_err(Error::Bus)
     }
 
     fn read(&mut self, id: u8, addr: u8, len: u8) -> Result<Vec<u8>, Error<B::Error>> {
@@ -179,7 +193,9 @@ mod tests {
             Ok(())
         }
         fn read_exact(&mut self, buf: &mut [u8], _: u32) -> Result<(), ()> {
-            buf.copy_from_slice(&self.reply[..buf.len()]);
+            let n = buf.len();
+            buf.copy_from_slice(&self.reply[..n]);
+            self.reply.drain(..n);
             Ok(())
         }
         fn clear_rx(&mut self) {}
@@ -187,9 +203,10 @@ mod tests {
 
     #[test]
     fn reads_position() {
-        let mut reply = vec![0xFF, 0xFF, 0x01, 0x04, 0x00, 0x01, 0xCC, 0x00];
+        // Leading noise byte, then the status packet.
+        let mut reply = vec![0x00, 0xFF, 0xFF, 0x01, 0x04, 0x00, 0x01, 0xCC, 0x00];
         let n = reply.len();
-        reply[n - 1] = checksum(&reply[2..n - 1]);
+        reply[n - 1] = checksum(&reply[3..n - 1]);
         let mut bus = ScsBus::new(Loopback { reply, sent: vec![] });
         assert_eq!(bus.read_pos(1).unwrap(), 0x01CC);
     }
