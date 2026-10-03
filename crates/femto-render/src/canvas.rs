@@ -1,0 +1,353 @@
+//! RGB565 canvas with an anti-aliased scanline rasterizer (signed-area
+//! accumulation, as in font-rs), a uniform-scale transform, a clip mask and
+//! a group opacity.
+
+use crate::color::Rgb;
+use crate::path::Path;
+
+pub const W: usize = 320;
+pub const H: usize = 240;
+
+#[derive(Clone, Copy, Debug)]
+pub struct Xf {
+    pub s: f32,
+    pub tx: f32,
+    pub ty: f32,
+}
+
+impl Xf {
+    pub const ID: Xf = Xf { s: 1.0, tx: 0.0, ty: 0.0 };
+
+    pub fn apply(&self, x: f32, y: f32) -> (f32, f32) {
+        (x * self.s + self.tx, y * self.s + self.ty)
+    }
+
+    /// `self` then `inner` (inner coordinates are mapped by inner first).
+    pub fn then(&self, inner: Xf) -> Xf {
+        Xf { s: self.s * inner.s, tx: self.tx + inner.tx * self.s, ty: self.ty + inner.ty * self.s }
+    }
+}
+
+pub struct Canvas {
+    px: Vec<u16>,
+    clip: Option<Vec<u8>>,
+    acc: Vec<f32>,
+    pub xf: Xf,
+    /// Group opacity multiplier for everything drawn.
+    pub alpha: f32,
+}
+
+impl Default for Canvas {
+    fn default() -> Self {
+        Canvas::new()
+    }
+}
+
+impl Canvas {
+    pub fn new() -> Canvas {
+        Canvas { px: vec![0; W * H], clip: None, acc: Vec::new(), xf: Xf::ID, alpha: 1.0 }
+    }
+
+    pub fn pixels(&self) -> &[u16] {
+        &self.px
+    }
+
+    pub fn pixels_mut(&mut self) -> &mut [u16] {
+        &mut self.px
+    }
+
+    pub fn clear(&mut self, c: Rgb) {
+        self.px.fill(c.to_565());
+    }
+
+    /// RGB888 copy, for PNG export and the simulator.
+    pub fn to_rgb888(&self) -> Vec<u8> {
+        let mut out = Vec::with_capacity(W * H * 3);
+        for &p in &self.px {
+            let (r, g, b) = unpack(p);
+            out.extend_from_slice(&[r, g, b]);
+        }
+        out
+    }
+
+    // ---- state ------------------------------------------------------------
+
+    pub fn with_xf<R>(&mut self, xf: Xf, f: impl FnOnce(&mut Canvas) -> R) -> R {
+        let saved = self.xf;
+        self.xf = saved.then(xf);
+        let r = f(self);
+        self.xf = saved;
+        r
+    }
+
+    pub fn with_alpha<R>(&mut self, a: f32, f: impl FnOnce(&mut Canvas) -> R) -> R {
+        let saved = self.alpha;
+        self.alpha *= a;
+        let r = f(self);
+        self.alpha = saved;
+        r
+    }
+
+    /// Draw `f` clipped to `path`.
+    pub fn with_clip<R>(&mut self, path: &Path, f: impl FnOnce(&mut Canvas) -> R) -> R {
+        let mut mask = vec![0u8; W * H];
+        rasterize(&mut self.acc, self.xf, path, |idx, _, _, cov| mask[idx] = (cov * 255.0 + 0.5) as u8);
+        let saved = self.clip.replace(mask);
+        let r = f(self);
+        self.clip = saved;
+        r
+    }
+
+    // ---- drawing ----------------------------------------------------------
+
+    pub fn fill(&mut self, path: &Path, c: Rgb, opacity: f32) {
+        let a = opacity * self.alpha;
+        if a <= 0.0 {
+            return;
+        }
+        let c = Rgb(c.0, c.1, c.2);
+        self.fill_with(path, |_, _| Some((c, a)));
+    }
+
+    pub fn stroke(&mut self, path: &Path, width: f32, c: Rgb, opacity: f32) {
+        self.fill(&path.stroke(width, false), c, opacity);
+    }
+
+    pub fn stroke_square(&mut self, path: &Path, width: f32, c: Rgb, opacity: f32) {
+        self.fill(&path.stroke(width, true), c, opacity);
+    }
+
+    pub fn line(&mut self, x1: f32, y1: f32, x2: f32, y2: f32, width: f32, c: Rgb, opacity: f32) {
+        self.stroke(&Path::line(x1, y1, x2, y2), width, c, opacity);
+    }
+
+    /// Fill with a per-pixel shader; `shade(x, y)` gets device pixel
+    /// coordinates and returns colour and opacity (already including any
+    /// group alpha the caller wants).
+    pub fn fill_with(&mut self, path: &Path, shade: impl Fn(usize, usize) -> Option<(Rgb, f32)>) {
+        let mut acc = std::mem::take(&mut self.acc);
+        rasterize(&mut acc, self.xf, path, |idx, x, y, cov| {
+            if let Some((c, a)) = shade(x, y) {
+                self.blend(idx, c, a * cov);
+            }
+        });
+        self.acc = acc;
+    }
+
+    /// Per-pixel effect over a device-space rectangle.
+    pub fn effect(&mut self, x0: usize, y0: usize, x1: usize, y1: usize, f: impl Fn(usize, usize) -> Option<(Rgb, f32)>) {
+        for y in y0..y1.min(H) {
+            for x in x0..x1.min(W) {
+                if let Some((c, a)) = f(x, y) {
+                    self.blend(y * W + x, c, a);
+                }
+            }
+        }
+    }
+
+    /// Blend an 8-bit coverage bitmap at device position (`x`, `y`).
+    pub fn blit_alpha(&mut self, x: i32, y: i32, w: usize, h: usize, cov: &[u8], c: Rgb, opacity: f32) {
+        let a = opacity * self.alpha;
+        for row in 0..h {
+            let py = y + row as i32;
+            if !(0..H as i32).contains(&py) {
+                continue;
+            }
+            for col in 0..w {
+                let px = x + col as i32;
+                if !(0..W as i32).contains(&px) {
+                    continue;
+                }
+                let v = cov[row * w + col];
+                if v > 0 {
+                    self.blend(py as usize * W + px as usize, c, a * v as f32 / 255.0);
+                }
+            }
+        }
+    }
+
+    #[inline]
+    fn blend(&mut self, idx: usize, c: Rgb, mut a: f32) {
+        if let Some(m) = &self.clip {
+            a *= m[idx] as f32 / 255.0;
+        }
+        if a <= 0.002 {
+            return;
+        }
+        if a >= 0.998 {
+            self.px[idx] = c.to_565();
+            return;
+        }
+        let (r, g, b) = unpack(self.px[idx]);
+        let mix = |d: u8, s: u8| (d as f32 + (s as f32 - d as f32) * a + 0.5) as u8;
+        self.px[idx] = Rgb(mix(r, c.0), mix(g, c.1), mix(b, c.2)).to_565();
+    }
+
+}
+
+/// Scan-convert `path` (transformed by `xf`) and call `emit(idx, x, y,
+/// coverage)` for every covered pixel. `acc` is scratch space.
+fn rasterize(acc: &mut Vec<f32>, xf: Xf, path: &Path, mut emit: impl FnMut(usize, usize, usize, f32)) {
+    {
+        let mut minx = f32::MAX;
+        let mut miny = f32::MAX;
+        let mut maxx = f32::MIN;
+        let mut maxy = f32::MIN;
+        let contours: Vec<Vec<(f32, f32)>> = path
+            .contours
+            .iter()
+            .filter(|c| c.pts.len() > 1)
+            .map(|c| {
+                c.pts
+                    .iter()
+                    .map(|p| {
+                        let (x, y) = xf.apply(p.x, p.y);
+                        minx = minx.min(x);
+                        miny = miny.min(y);
+                        maxx = maxx.max(x);
+                        maxy = maxy.max(y);
+                        (x, y)
+                    })
+                    .collect()
+            })
+            .collect();
+        if contours.is_empty() {
+            return;
+        }
+        let bx0 = (minx.floor().max(0.0)) as usize;
+        let by0 = (miny.floor().max(0.0)) as usize;
+        let bx1 = (maxx.ceil().min(W as f32)).max(0.0) as usize;
+        let by1 = (maxy.ceil().min(H as f32)).max(0.0) as usize;
+        if bx1 <= bx0 || by1 <= by0 {
+            return;
+        }
+        let bw = bx1 - bx0;
+        let bh = by1 - by0;
+        let stride = bw + 2;
+        acc.clear();
+        acc.resize(stride * bh, 0.0);
+        let (ox, oy) = (bx0 as f32, by0 as f32);
+        for c in &contours {
+            for i in 0..c.len() {
+                let a = c[i];
+                let b = c[(i + 1) % c.len()];
+                accumulate(acc, stride, bw, bh, (a.0 - ox, a.1 - oy), (b.0 - ox, b.1 - oy));
+            }
+        }
+        for row in 0..bh {
+            let mut sum = 0.0f32;
+            let line = &acc[row * stride..row * stride + stride];
+            for (col, &v) in line.iter().enumerate().take(bw) {
+                sum += v;
+                let cov = sum.abs().min(1.0);
+                if cov > 0.002 {
+                    let (x, y) = (bx0 + col, by0 + row);
+                    emit(y * W + x, x, y, cov);
+                }
+            }
+        }
+    }
+}
+
+pub fn unpack(p: u16) -> (u8, u8, u8) {
+    let r = ((p >> 11) & 0x1F) as u8;
+    let g = ((p >> 5) & 0x3F) as u8;
+    let b = (p & 0x1F) as u8;
+    ((r << 3) | (r >> 2), (g << 2) | (g >> 4), (b << 3) | (b >> 2))
+}
+
+/// Signed-area accumulation of one edge into `acc` (row stride `stride`,
+/// usable width `w`). X is clamped per row, which is exact for fills because
+/// coverage left of the box is equivalent to coverage at column 0.
+fn accumulate(acc: &mut [f32], stride: usize, w: usize, h: usize, p0: (f32, f32), p1: (f32, f32)) {
+    if (p0.1 - p1.1).abs() < 1e-6 {
+        return;
+    }
+    let (dir, p0, p1) = if p0.1 < p1.1 { (1.0, p0, p1) } else { (-1.0, p1, p0) };
+    let dxdy = (p1.0 - p0.0) / (p1.1 - p0.1);
+    let wf = w as f32;
+    let mut x = p0.0;
+    if p0.1 < 0.0 {
+        x -= p0.1 * dxdy;
+    }
+    let y_start = p0.1.max(0.0) as usize;
+    let y_end = (p1.1.ceil().max(0.0) as usize).min(h);
+    for y in y_start..y_end {
+        let dy = ((y + 1) as f32).min(p1.1) - (y as f32).max(p0.1);
+        let xnext = x + dxdy * dy;
+        let d = dy * dir;
+        let (xa, xb) = if x < xnext { (x, xnext) } else { (xnext, x) };
+        let (xa, xb) = (xa.clamp(0.0, wf), xb.clamp(0.0, wf));
+        let line = y * stride;
+        let x0f = xa.floor();
+        let x0i = x0f as usize;
+        let x1c = xb.ceil();
+        let x1i = x1c as usize;
+        if x1i <= x0i + 1 {
+            let xm = 0.5 * (xa + xb) - x0f;
+            acc[line + x0i] += d - d * xm;
+            acc[line + x0i + 1] += d * xm;
+        } else {
+            let s = 1.0 / (xb - xa);
+            let x0r = xa - x0f;
+            let a0 = 0.5 * s * (1.0 - x0r) * (1.0 - x0r);
+            let x1r = xb - x1c + 1.0;
+            let am = 0.5 * s * x1r * x1r;
+            acc[line + x0i] += d * a0;
+            if x1i == x0i + 2 {
+                acc[line + x0i + 1] += d * (1.0 - a0 - am);
+            } else {
+                let a1 = s * (1.5 - x0r);
+                acc[line + x0i + 1] += d * (a1 - a0);
+                for xi in x0i + 2..x1i - 1 {
+                    acc[line + xi] += d * s;
+                }
+                let a2 = a1 + (x1i - x0i - 3) as f32 * s;
+                acc[line + x1i - 1] += d * (1.0 - a2 - am);
+            }
+            acc[line + x1i] += d * am;
+        }
+        x = xnext;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rect_fill_exact() {
+        let mut c = Canvas::new();
+        c.fill(&Path::rect(10.0, 10.0, 5.0, 5.0), Rgb(255, 255, 255), 1.0);
+        let px = c.pixels();
+        assert_eq!(px[12 * W + 12], 0xFFFF);
+        assert_eq!(px[12 * W + 15], 0);
+        assert_eq!(px[9 * W + 12], 0);
+    }
+
+    #[test]
+    fn half_pixel_edge_is_grey() {
+        let mut c = Canvas::new();
+        c.fill(&Path::rect(10.5, 10.0, 5.0, 5.0), Rgb(255, 255, 255), 1.0);
+        let (r, _, _) = unpack(c.pixels()[12 * W + 10]);
+        assert!((120..136).contains(&r), "{r}");
+    }
+
+    #[test]
+    fn offscreen_shapes_do_not_panic() {
+        let mut c = Canvas::new();
+        c.fill(&Path::rect(-50.0, -50.0, 500.0, 400.0), Rgb(1, 2, 3), 1.0);
+        c.line(300.0, 10.0, 340.0, 20.0, 3.0, Rgb(255, 0, 0), 1.0);
+        c.fill(&Path::circle(-100.0, -100.0, 5.0), Rgb(255, 0, 0), 1.0);
+    }
+
+    #[test]
+    fn clip_limits_fill() {
+        let mut c = Canvas::new();
+        c.with_clip(&Path::rect(0.0, 0.0, 10.0, 10.0), |c| {
+            c.fill(&Path::rect(0.0, 0.0, 100.0, 100.0), Rgb(255, 255, 255), 1.0)
+        });
+        assert_eq!(c.pixels()[5 * W + 5], 0xFFFF);
+        assert_eq!(c.pixels()[50 * W + 50], 0);
+    }
+}

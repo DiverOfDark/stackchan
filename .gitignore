@@ -1,1 +1,3 @@
 backup/
+target/
+node_modules/

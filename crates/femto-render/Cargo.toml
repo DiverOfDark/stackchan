@@ -1,0 +1,13 @@
+[package]
+name = "femto-render"
+description = "Femto's screens rendered into a 320×240 RGB565 framebuffer. Pure; runs on host and device."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+femto-core = { path = "../femto-core" }
+fontdue = "0.9"
+
+[dev-dependencies]
+png = "0.18"
