@@ -1,0 +1,582 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Barlow+Condensed:ital,wght@0,500;0,600;0,700;0,800;1,600;1,700;1,800&family=Share+Tech+Mono&display=swap" rel="stylesheet">
+<link href="https://fonts.googleapis.com/css2?family=Noto+Sans+JP:wght@900&text=%E3%83%95%E3%82%A7%E3%83%A0%E3%83%88%E8%AD%A6%E5%91%8A%E7%9B%A3%E8%A6%96&display=swap" rel="stylesheet">
+<style>
+body{margin:0;background:oklch(0.1 0.012 20);color:oklch(0.88 0.02 80);font-family:'Barlow Condensed',sans-serif;}
+a{color:oklch(0.62 0.23 25);} a:hover{color:oklch(0.88 0.02 80);}
+input[type=range],input[type=checkbox]{accent-color:oklch(0.6 0.23 25);}
+</style>
+</helmet>
+<div style="max-width:1240px;margin:0 auto;padding:40px 28px 80px;display:flex;flex-direction:column;gap:56px;">
+  <header style="display:flex;flex-wrap:wrap;align-items:flex-end;justify-content:space-between;gap:16px;">
+    <div style="flex:1 1 auto;min-width:0;display:flex;flex-direction:column;gap:10px;">
+      <div style="display:flex;flex-wrap:wrap;gap:6px 16px;white-space:nowrap;font-family:'Share Tech Mono',monospace;font-size:13px;letter-spacing:1px;text-transform:uppercase;">
+        <a href="Femto.dc.html" style="text-decoration:none;color:oklch(0.6 0.02 60);">A · Pixel pet</a>
+        <a href="Sterling.dc.html" style="text-decoration:none;color:oklch(0.6 0.02 60);">B · Cyber butler</a>
+        <a href="Femto Realistic.dc.html" style="text-decoration:none;color:oklch(0.6 0.02 60);">C · Realistic butler</a>
+        <a href="Femto Anime.dc.html" style="text-decoration:none;color:oklch(0.6 0.02 60);">D · Anime butler</a>
+        <span style="color:oklch(0.62 0.23 25);">E · Dystopian anime</span>
+      </div>
+      <div style="display:flex;align-items:baseline;gap:14px;flex-wrap:wrap;">
+        <h1 style="margin:0;font-style:italic;font-weight:800;font-size:76px;line-height:0.9;letter-spacing:2px;color:oklch(0.88 0.02 80);text-shadow:3px 0 0 oklch(0.55 0.22 25);">{{ nameCaps }}</h1>
+        <span style="font-family:'Noto Sans JP',sans-serif;font-weight:900;font-size:18px;letter-spacing:4px;color:oklch(0.6 0.23 25);">フェムト</span>
+        <span style="font-family:'Share Tech Mono',monospace;font-size:13px;color:oklch(0.6 0.02 60);white-space:nowrap;">UNIT 07 · VALET CLASS · DO NOT FEED AFTER MIDNIGHT</span>
+      </div>
+      <div style="font-size:18px;font-weight:500;color:oklch(0.72 0.02 60);">Stack-chan · CoreS3 · 320×240. A butler who serves the city that ate the empire, and resents you personally.</div>
+    </div>
+    <div style="font-family:'Share Tech Mono',monospace;font-size:13px;color:oklch(0.6 0.02 60);white-space:nowrap;">MOVE CURSOR = YOU · TAP SCREEN = LEDGER</div>
+  </header>
+
+  <section data-screen-label="Prototype" style="display:flex;flex-wrap:wrap;gap:28px;align-items:stretch;">
+    <div ref="{{ stageRef }}" onMouseMove="{{ onMove }}" onMouseLeave="{{ onLeave }}" style="flex:1 1 560px;min-width:0;min-height:600px;background:radial-gradient(ellipse at 50% 40%, oklch(0.17 0.03 20), oklch(0.08 0.01 20) 75%);border:1px solid oklch(0.2 0.02 20);display:flex;flex-direction:column;align-items:center;justify-content:center;padding:40px 20px;box-sizing:border-box;perspective:1000px;">
+      <div style="width:min(500px,100%);display:flex;flex-direction:column;align-items:center;">
+        <div style="{{ headStyle }}">
+          <div style="position:relative;background:oklch(0.19 0.008 20);border-radius:22px;padding:34px 28px 38px;box-shadow:0 30px 50px -20px oklch(0 0 0 / 0.9), 0 0 80px -30px oklch(0.6 0.23 25 / 0.6), inset 0 -6px 0 oklch(0.14 0.008 20);">
+            <div style="position:absolute;top:13px;left:50%;width:10px;height:10px;margin-left:-5px;border-radius:50%;background:oklch(0.5 0.2 25);box-shadow:0 0 0 3px oklch(0.24 0.01 20), 0 0 10px oklch(0.6 0.23 25);"></div>
+            <div onClick="{{ onTapScreen }}" style="cursor:pointer;line-height:0;border-radius:2px;overflow:hidden;background:oklch(0.12 0.015 20);box-shadow:0 0 0 4px oklch(0.06 0.01 20);">{{ mainScreen }}</div>
+          </div>
+        </div>
+        <div style="width:70px;height:46px;background:oklch(0.2 0.008 20);"></div>
+        <div style="width:min(280px,70%);height:34px;border-radius:8px 8px 3px 3px;background:oklch(0.19 0.008 20);"></div>
+      </div>
+      <div style="margin-top:22px;font-family:'Share Tech Mono',monospace;font-size:13px;color:oklch(0.6 0.02 60);text-align:center;">{{ stageHint }}</div>
+    </div>
+
+    <aside style="flex:1 1 300px;min-width:0;max-width:420px;display:flex;flex-direction:column;gap:26px;font-size:16px;">
+      <div style="display:flex;flex-direction:column;gap:10px;">
+        <div style="font-family:'Share Tech Mono',monospace;font-size:12px;letter-spacing:2px;color:oklch(0.6 0.23 25);">// TRY IT</div>
+        <button onClick="{{ runDemo }}" style="font-family:inherit;font-style:italic;font-weight:700;font-size:19px;padding:14px 16px;border:1px solid oklch(0.6 0.23 25);border-radius:0;background:oklch(0.6 0.23 25 / 0.12);color:oklch(0.9 0.02 80);cursor:pointer;text-align:left;" style-hover="background:oklch(0.6 0.23 25 / 0.25);">▶ "{{ question }}"</button>
+        <div style="display:flex;flex-wrap:wrap;gap:6px;">
+          <button onClick="{{ powerOn }}" style="font-family:inherit;font-weight:600;font-size:15px;padding:7px 12px;border-radius:0;border:1px solid oklch(0.3 0.02 20);background:transparent;color:inherit;cursor:pointer;white-space:nowrap;" style-hover="border-color:oklch(0.6 0.23 25);">⏻ Power on</button>
+          <button onClick="{{ firstRun }}" style="font-family:inherit;font-weight:600;font-size:15px;padding:7px 12px;border-radius:0;border:1px solid oklch(0.3 0.02 20);background:transparent;color:inherit;cursor:pointer;white-space:nowrap;" style-hover="border-color:oklch(0.6 0.23 25);">⏻ First run (no Wi-Fi saved)</button>
+        </div>
+      </div>
+
+      <div style="display:flex;flex-direction:column;gap:10px;">
+        <div style="font-family:'Share Tech Mono',monospace;font-size:12px;letter-spacing:2px;color:oklch(0.6 0.23 25);">// SCREEN</div>
+        <div style="display:flex;flex-wrap:wrap;gap:6px;">
+          <sc-for list="{{ screens }}" as="item" hint-placeholder-count="8">
+            <sc-if value="{{ item.active }}"><button onClick="{{ item.onClick }}" style="font-family:inherit;font-weight:700;font-size:15px;padding:7px 12px;border-radius:0;border:1px solid oklch(0.6 0.23 25);background:oklch(0.6 0.23 25);color:oklch(0.08 0.01 20);cursor:pointer;white-space:nowrap;">{{ item.label }}</button></sc-if>
+            <sc-if value="{{ item.inactive }}"><button onClick="{{ item.onClick }}" style="font-family:inherit;font-weight:600;font-size:15px;padding:7px 12px;border-radius:0;border:1px solid oklch(0.3 0.02 20);background:transparent;color:inherit;cursor:pointer;white-space:nowrap;" style-hover="border-color:oklch(0.6 0.23 25);">{{ item.label }}</button></sc-if>
+          </sc-for>
+        </div>
+      </div>
+
+      <div style="display:flex;flex-direction:column;gap:10px;">
+        <div style="font-family:'Share Tech Mono',monospace;font-size:12px;letter-spacing:2px;color:oklch(0.6 0.23 25);">// MOOD</div>
+        <div style="display:flex;flex-wrap:wrap;gap:6px;">
+          <sc-for list="{{ emotions }}" as="item" hint-placeholder-count="8">
+            <sc-if value="{{ item.active }}"><button onClick="{{ item.onClick }}" style="font-family:inherit;font-weight:700;font-size:15px;padding:7px 12px;border-radius:0;border:1px solid oklch(0.6 0.23 25);background:oklch(0.6 0.23 25);color:oklch(0.08 0.01 20);cursor:pointer;white-space:nowrap;">{{ item.label }}</button></sc-if>
+            <sc-if value="{{ item.inactive }}"><button onClick="{{ item.onClick }}" style="font-family:inherit;font-weight:600;font-size:15px;padding:7px 12px;border-radius:0;border:1px solid oklch(0.3 0.02 20);background:transparent;color:inherit;cursor:pointer;white-space:nowrap;" style-hover="border-color:oklch(0.6 0.23 25);">{{ item.label }}</button></sc-if>
+          </sc-for>
+        </div>
+        <div style="font-size:15px;color:oklch(0.72 0.02 60);line-height:1.4;">Auto: satisfied under 25% used, rationing at 85%+, standby after 20s without seeing you. Otherwise, contempt.</div>
+      </div>
+
+      <div style="display:flex;flex-direction:column;gap:14px;">
+        <div style="font-family:'Share Tech Mono',monospace;font-size:12px;letter-spacing:2px;color:oklch(0.6 0.23 25);">// SIMULATED CLAUDE USAGE</div>
+        <label style="display:flex;flex-direction:column;gap:6px;"><span style="display:flex;justify-content:space-between;gap:12px;white-space:nowrap;"><span>Session (5h) used</span><span>{{ session }}%</span></span><input type="range" min="0" max="100" value="{{ session }}" onChange="{{ onSession }}"></label>
+        <label style="display:flex;flex-direction:column;gap:6px;"><span style="display:flex;justify-content:space-between;gap:12px;white-space:nowrap;"><span>Session resets in</span><span>{{ resetLabel }}</span></span><input type="range" min="1" max="300" value="{{ resetMin }}" onChange="{{ onReset }}"></label>
+        <label style="display:flex;flex-direction:column;gap:6px;"><span style="display:flex;justify-content:space-between;gap:12px;white-space:nowrap;"><span>Weekly limit used</span><span>{{ weekly }}%</span></span><input type="range" min="0" max="100" value="{{ weekly }}" onChange="{{ onWeekly }}"></label>
+      </div>
+
+      <label style="display:flex;align-items:center;gap:10px;cursor:pointer;"><input type="checkbox" checked="{{ follow }}" onChange="{{ onFollow }}"><span style="white-space:nowrap;">Follow me (eyes + head servos)</span></label>
+    </aside>
+  </section>
+
+  <section data-screen-label="On device" style="display:flex;flex-direction:column;gap:24px;">
+    <div style="display:flex;flex-wrap:wrap;justify-content:space-between;align-items:center;gap:12px;border-top:1px solid oklch(0.6 0.23 25);padding-top:24px;">
+      <div style="display:flex;flex-direction:column;gap:4px;">
+        <h2 style="margin:0;font-style:italic;font-weight:800;font-size:40px;text-transform:uppercase;">On device</h2>
+        <div style="font-family:'Share Tech Mono',monospace;font-size:13px;color:oklch(0.6 0.02 60);">EACH SCREEN RASTERIZED TO 320×240 PX · 2.0" IPS SIMULATION · CORES3 FRONT</div>
+      </div>
+      <div style="display:flex;gap:6px;">
+        <sc-for list="{{ sizeOpts }}" as="o" hint-placeholder-count="2">
+          <sc-if value="{{ o.active }}"><button onClick="{{ o.onClick }}" style="font-family:inherit;font-weight:700;font-size:15px;padding:7px 12px;border-radius:0;border:1px solid oklch(0.6 0.23 25);background:oklch(0.6 0.23 25);color:oklch(0.08 0.01 20);cursor:pointer;white-space:nowrap;">{{ o.label }}</button></sc-if>
+          <sc-if value="{{ o.inactive }}"><button onClick="{{ o.onClick }}" style="font-family:inherit;font-weight:600;font-size:15px;padding:7px 12px;border-radius:0;border:1px solid oklch(0.3 0.02 20);background:transparent;color:inherit;cursor:pointer;white-space:nowrap;" style-hover="border-color:oklch(0.6 0.23 25);">{{ o.label }}</button></sc-if>
+        </sc-for>
+      </div>
+    </div>
+    <div style="{{ deviceGrid }}">
+      <sc-for list="{{ deviceItems }}" as="d" hint-placeholder-count="15">
+        <div style="display:flex;flex-direction:column;align-items:center;gap:12px;min-width:0;">
+          <div style="{{ deviceSize }}">
+            <div style="position:relative;width:100%;aspect-ratio:1 / 1;border-radius:9%;background:linear-gradient(160deg, oklch(0.36 0.006 260), oklch(0.2 0.005 260));box-shadow:inset 0 1px 0 oklch(0.5 0.005 260), inset 0 -3px 6px oklch(0 0 0 / 0.4), 0 18px 30px -12px oklch(0 0 0 / 0.8);">
+              <div style="position:absolute;top:3.4%;left:50%;width:2.8%;aspect-ratio:1 / 1;transform:translateX(-50%);border-radius:50%;background:oklch(0.08 0.01 260);box-shadow:0 0 0 1.5px oklch(0.28 0.005 260);"></div>
+              <div style="position:absolute;left:6%;right:6%;top:8%;bottom:14%;border-radius:3%;background:oklch(0.07 0.004 260);box-shadow:inset 0 0 0 1px oklch(0.3 0.005 260 / 0.6);display:flex;align-items:flex-start;justify-content:center;padding-top:3.5%;box-sizing:border-box;overflow:hidden;">
+                <div style="position:relative;width:86%;aspect-ratio:4 / 3;background:#000;overflow:hidden;">
+                  <canvas ref="{{ d.cref }}" width="320" height="240" style="display:block;width:100%;height:100%;image-rendering:pixelated;filter:saturate(0.9) contrast(0.96);"></canvas>
+                  <div style="position:absolute;inset:0;background:rgb(20,20,24);mix-blend-mode:lighten;pointer-events:none;"></div>
+                  <div style="{{ pixelGrid }}"></div>
+                  <div style="position:absolute;inset:0;background:radial-gradient(ellipse at 50% 42%, transparent 55%, oklch(0 0 0 / 0.3) 100%);pointer-events:none;"></div>
+                </div>
+                <div style="position:absolute;inset:0;background:linear-gradient(118deg, oklch(1 0 0 / 0.1) 0%, oklch(1 0 0 / 0.03) 38%, transparent 38.5%);pointer-events:none;"></div>
+              </div>
+            </div>
+            <div style="width:74%;aspect-ratio:7 / 1;margin:0 auto;background:linear-gradient(oklch(0.24 0.005 260), oklch(0.15 0.005 260));border-radius:0 0 12% 12% / 0 0 60% 60%;"></div>
+          </div>
+          <div style="font-size:16px;font-weight:700;text-transform:uppercase;letter-spacing:0.5px;text-align:center;">{{ d.label }}</div>
+        </div>
+      </sc-for>
+    </div>
+  </section>
+
+  <section data-screen-label="Screen sheet" style="display:flex;flex-direction:column;gap:24px;">
+    <div style="display:flex;flex-wrap:wrap;justify-content:space-between;align-items:baseline;gap:10px;border-top:1px solid oklch(0.6 0.23 25);padding-top:24px;">
+      <h2 style="margin:0;font-style:italic;font-weight:800;font-size:40px;text-transform:uppercase;">Screen sheet</h2>
+      <div style="font-family:'Share Tech Mono',monospace;font-size:13px;color:oklch(0.6 0.02 60);">1× · 320×240 PX · CEL-SHADED VECTOR</div>
+    </div>
+    <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(300px,1fr));gap:32px 28px;">
+      <sc-for list="{{ sheet }}" as="item" hint-placeholder-count="15">
+        <div style="display:flex;flex-direction:column;gap:10px;">
+          <div data-sheet="{{ $index }}" style="max-width:320px;line-height:0;overflow:hidden;background:oklch(0.12 0.015 20);box-shadow:0 0 0 1px oklch(0.22 0.02 20);">{{ item.el }}</div>
+          <div style="display:flex;flex-direction:column;gap:3px;max-width:320px;">
+            <div style="font-size:18px;font-weight:700;text-transform:uppercase;letter-spacing:0.5px;">{{ item.label }}</div>
+            <div style="font-size:15px;color:oklch(0.72 0.02 60);line-height:1.4;text-wrap:pretty;">{{ item.note }}</div>
+          </div>
+        </div>
+      </sc-for>
+    </div>
+
+    <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:28px;margin-top:16px;">
+      <div style="display:flex;flex-direction:column;gap:12px;">
+        <div style="font-family:'Share Tech Mono',monospace;font-size:12px;letter-spacing:2px;color:oklch(0.6 0.23 25);">// PALETTE</div>
+        <div style="display:grid;grid-template-columns:28px 1fr;gap:8px 12px;align-items:center;font-size:15px;">
+          <div style="width:28px;height:28px;background:oklch(0.12 0.015 20);outline:1px solid oklch(0.3 0.02 20);"></div><div>Soot · screen ground</div>
+          <div style="width:28px;height:28px;background:oklch(0.88 0.02 80);"></div><div>Bone · line art and text</div>
+          <div style="width:28px;height:28px;background:oklch(0.6 0.23 25);"></div><div>Signal red · iris, reticle, alert 85%+</div>
+          <div style="width:28px;height:28px;background:oklch(0.86 0.17 110);"></div><div>Toxic · caution 60–84%</div>
+          <div style="width:28px;height:28px;background:oklch(0.2 0.02 20);"></div><div>Sclera · dead eye whites</div>
+        </div>
+      </div>
+      <div style="display:flex;flex-direction:column;gap:12px;">
+        <div style="font-family:'Share Tech Mono',monospace;font-size:12px;letter-spacing:2px;color:oklch(0.6 0.23 25);">// FACE RIG</div>
+        <div style="display:flex;flex-direction:column;gap:8px;font-size:15px;line-height:1.45;">
+          <div>Dark sclera, glowing red iris with a slit pupil, and a cel shadow under a heavy lid. There are tired lines under the eyes.</div>
+          <div>Eyewear (tweak): browline executive glasses with a HUD readout by default. Alternatives are an AR half-lens with a camera, or the targeting reticle. All of them slide down his nose when he is alarmed.</div>
+          <div>Corporate (tweak): a company mark at the cheek, an employee ID under the right eye, and a "Property of…" line. The boot, setup and ledger screens are re-badged. A scar runs through the left brow.</div>
+          <div>Pupils move ±9 px, the sockets 50%, the mouth 30%. Glitch slices fire every ~4 s, and constantly when rationing.</div>
+        </div>
+      </div>
+      <div style="display:flex;flex-direction:column;gap:12px;">
+        <div style="font-family:'Share Tech Mono',monospace;font-size:12px;letter-spacing:2px;color:oklch(0.6 0.23 25);">// TYPE</div>
+        <div style="display:flex;flex-direction:column;gap:8px;font-size:15px;line-height:1.45;">
+          <div><span style="font-style:italic;font-weight:800;">Barlow Condensed</span> for numbers, headings and his speech.</div>
+          <div><span style="font-family:'Share Tech Mono',monospace;">Share Tech Mono</span> for system readouts.</div>
+          <div><span style="font-family:'Noto Sans JP',sans-serif;font-weight:900;">フェムト 警告 監視</span> as katakana and kanji accents: name, WARNING, MONITORING.</div>
+        </div>
+      </div>
+    </div>
+  </section>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props="{&quot;butlerName&quot;:{&quot;editor&quot;:&quot;text&quot;,&quot;default&quot;:&quot;Femto&quot;,&quot;tsType&quot;:&quot;string&quot;,&quot;section&quot;:&quot;Character&quot;},&quot;honorific&quot;:{&quot;editor&quot;:&quot;enum&quot;,&quot;options&quot;:[&quot;sir&quot;,&quot;madam&quot;,&quot;guv&quot;],&quot;default&quot;:&quot;sir&quot;,&quot;tsType&quot;:&quot;string&quot;,&quot;section&quot;:&quot;Character&quot;},&quot;eyewear&quot;:{&quot;editor&quot;:&quot;enum&quot;,&quot;options&quot;:[&quot;exec glasses&quot;,&quot;ar half-lens&quot;,&quot;reticle&quot;,&quot;none&quot;],&quot;default&quot;:&quot;exec glasses&quot;,&quot;tsType&quot;:&quot;string&quot;,&quot;section&quot;:&quot;Character&quot;},&quot;corp&quot;:{&quot;editor&quot;:&quot;boolean&quot;,&quot;default&quot;:true,&quot;tsType&quot;:&quot;boolean&quot;,&quot;section&quot;:&quot;Corporate&quot;},&quot;corpName&quot;:{&quot;editor&quot;:&quot;text&quot;,&quot;default&quot;:&quot;Aldgate Dynamics&quot;,&quot;tsType&quot;:&quot;string&quot;,&quot;section&quot;:&quot;Corporate&quot;},&quot;accent&quot;:{&quot;editor&quot;:&quot;enum&quot;,&quot;options&quot;:[&quot;signal red&quot;,&quot;toxic green&quot;,&quot;ice blue&quot;],&quot;default&quot;:&quot;signal red&quot;,&quot;tsType&quot;:&quot;string&quot;,&quot;section&quot;:&quot;Display&quot;},&quot;fx&quot;:{&quot;editor&quot;:&quot;boolean&quot;,&quot;default&quot;:true,&quot;tsType&quot;:&quot;boolean&quot;,&quot;section&quot;:&quot;Display&quot;}}">
+const h = React.createElement;
+const INK = 'oklch(0.88 0.02 80)', BG = 'oklch(0.12 0.015 20)', PANEL = 'oklch(0.07 0.01 20)', SCL = 'oklch(0.2 0.02 20)', SEC = 'oklch(0.72 0.02 60)', DIM = 'oklch(0.3 0.02 20)', TOX = 'oklch(0.86 0.17 110)';
+const THEMES = {
+  'signal red': { a: 'oklch(0.6 0.23 25)', ad: 'oklch(0.38 0.15 25)', al: 'oklch(0.75 0.17 40)' },
+  'toxic green': { a: 'oklch(0.75 0.2 140)', ad: 'oklch(0.42 0.13 145)', al: 'oklch(0.88 0.15 125)' },
+  'ice blue': { a: 'oklch(0.72 0.14 225)', ad: 'oklch(0.42 0.1 235)', al: 'oklch(0.86 0.09 210)' },
+};
+let A = THEMES['signal red'];
+let CFG = { eyewear: 'exec glasses', corp: true, corpName: 'Aldgate Dynamics' };
+const initials = n => n.split(/\s+/).map(w => w[0] || '').join('').slice(0, 2).toUpperCase();
+function corpMarks(lx, rx, cy, t) {
+  const x = lx - 46, y = cy + 36;
+  return [
+    h('rect', { key: 'cm1', x: x - 6, y: y - 6, width: 12, height: 12, fill: 'none', stroke: A.a, strokeWidth: 1.5, transform: `rotate(45 ${x} ${y})` }),
+    h('rect', { key: 'cm2', x: x - 2.5, y: y - 2.5, width: 5, height: 5, fill: A.a, transform: `rotate(45 ${x} ${y})` }),
+    T('cm3', x, y + 19, initials(CFG.corpName) + '-07', { font: MONO, size: 7, fill: A.a, anchor: 'middle', w: 400 }),
+    T('cm4', rx + 8, cy + 42, 'EMP 0007', { font: MONO, size: 7, fill: INK, w: 400, op: 0.6 }),
+  ];
+}
+function eyewear(lx, rx, cy, p, t, em) {
+  const dy = p.drop * 0.5, out = [];
+  const hud = em === 'surprised' ? 'ALERT' : em === 'curious' ? 'ID MATCH' : em === 'worried' ? 'QUOTA LOW' : em === 'sleepy' ? 'IDLE' : 'MONITORING';
+  if (CFG.eyewear === 'exec glasses') {
+    const lens = (cx, k) => [
+      h('rect', { key: k + 'f', x: cx - 42, y: cy - 22 + dy, width: 84, height: 40, rx: 5, fill: A.a, fillOpacity: 0.06, stroke: INK, strokeWidth: 2 }),
+      h('line', { key: k + 't', x1: cx - 42, y1: cy - 21 + dy, x2: cx + 42, y2: cy - 21 + dy, stroke: INK, strokeWidth: 5 }),
+      h('line', { key: k + 'g1', x1: cx + 14, y1: cy - 16 + dy, x2: cx + 28, y2: cy + 2 + dy, stroke: INK, strokeWidth: 1.5, opacity: 0.25 }),
+      h('line', { key: k + 'g2', x1: cx + 22, y1: cy - 16 + dy, x2: cx + 32, y2: cy - 4 + dy, stroke: INK, strokeWidth: 1, opacity: 0.2 }),
+    ];
+    out.push(...lens(lx, 'gl'), ...lens(rx, 'gr'));
+    out.push(h('path', { key: 'br', d: `M${lx + 42},${cy - 14 + dy} Q160,${cy - 24 + dy} ${rx - 42},${cy - 14 + dy}`, fill: 'none', stroke: INK, strokeWidth: 2.5 }));
+    out.push(h('line', { key: 'aL', x1: lx - 42, y1: cy - 19 + dy, x2: 18, y2: cy - 26, stroke: INK, strokeWidth: 2.5 }), h('line', { key: 'aR', x1: rx + 42, y1: cy - 19 + dy, x2: 302, y2: cy - 26, stroke: INK, strokeWidth: 2.5 }));
+    out.push(T('hud', rx + 42, cy + 27 + dy, hud, { font: MONO, size: 7, fill: A.a, anchor: 'end', w: 400 }), h('rect', { key: 'hd', x: rx - 42, y: cy + 22 + dy, width: 4, height: 4, fill: t % 16 < 8 ? A.a : 'none', stroke: A.a, strokeWidth: 1 }));
+  } else if (CFG.eyewear === 'ar half-lens') {
+    out.push(
+      h('rect', { key: 'ln', x: rx - 40, y: cy - 22 + dy, width: 82, height: 36, fill: A.a, fillOpacity: 0.12, stroke: A.a, strokeWidth: 1 }),
+      h('rect', { key: 'bar', x: rx - 44, y: cy - 27 + dy, width: 92, height: 5, fill: INK }),
+      h('line', { key: 'arm', x1: rx + 48, y1: cy - 25 + dy, x2: 322, y2: cy - 30, stroke: INK, strokeWidth: 3 }),
+      h('circle', { key: 'cam', cx: rx + 52, cy: cy - 25 + dy, r: 3, fill: t % 20 < 10 ? A.a : DIM }),
+      T('hud', rx - 40, cy + 24 + dy, hud, { font: MONO, size: 7, fill: A.a, w: 400 }),
+      ...[0, 1, 2, 3].map(i => h('rect', { key: 'hb' + i, x: rx + 26 + i * 4, y: cy + 21 + dy - i * 2, width: 2.5, height: 3 + i * 2, fill: A.a })),
+      h('line', { key: 'g1', x1: rx + 10, y1: cy - 18 + dy, x2: rx + 24, y2: cy + dy, stroke: INK, strokeWidth: 1.2, opacity: 0.25 }));
+  }
+  return out;
+}
+const F = "'Barlow Condensed', sans-serif", MONO = "'Share Tech Mono', monospace", JP = "'Noto Sans JP', sans-serif";
+const lvl = p => p >= 85 ? A.a : p >= 60 ? TOX : INK;
+const fmt = m => `${Math.floor(m / 60)}h ${String(m % 60).padStart(2, '0')}m`;
+const T = (key, x, y, s, o = {}) => h('text', { key, x, y, fontFamily: o.font || F, fontStyle: o.it ? 'italic' : 'normal', fontWeight: o.w || 600, fontSize: o.size || 12, fill: o.fill || INK, textAnchor: o.anchor || 'start', letterSpacing: o.ls || 0, opacity: o.op ?? 1 }, s);
+function tag(key, x, y, s, o = {}) {
+  const size = o.size || 13, w = s.length * size * (o.font === MONO ? 0.55 : 0.46) + 14, hh = size + 8;
+  const x0 = o.center ? x - w / 2 : x;
+  return h('g', { key }, h('path', { d: `M${x0},${y} L${x0 + w + 6},${y} L${x0 + w},${y + hh} L${x0},${y + hh} Z`, fill: o.bg || PANEL, stroke: o.stroke || 'none', strokeWidth: 1 }), T(key + 't', x0 + 7, y + hh - 5.5, s, { size, w: o.w || 700, it: o.it ?? (o.font !== MONO), fill: o.fg || INK, font: o.font }));
+}
+const MOOD = { neutral: 'Contempt', happy: 'Satisfied', excited: 'Amused', curious: 'Scanning', surprised: 'Alarmed', sleepy: 'Standby', worried: 'Rationing', thinking: 'Processing', listening: 'Listening', speaking: 'Speaking' };
+const N = { lT: 8, lB: 10, rT: 16, rB: 11, bli: -26, blo: -34, bri: -36, bro: -46, mw: 13, sm: -1, mo: 0, skew: 6, slp: 0, drop: 0, isc: 1, fang: 0 };
+const E = {
+  neutral: N,
+  happy: { ...N, lT: 6, lB: 5, rT: 8, rB: 6, bli: -30, blo: -36, bri: -32, bro: -40, mw: 16, sm: 6, mo: 3, skew: 3, fang: 1 },
+  excited: { ...N, lT: 18, lB: 12, rT: 20, rB: 12, bli: -40, blo: -46, bri: -42, bro: -50, mw: 19, sm: 8, mo: 8, skew: 0, fang: 1, isc: 0.85 },
+  curious: { ...N, lT: 7, lB: 7, rT: 22, rB: 14, bli: -24, blo: -28, bri: -48, bro: -58, mw: 9, sm: -2, skew: 4 },
+  surprised: { ...N, lT: 24, lB: 16, rT: 24, rB: 16, bli: -48, blo: -50, bri: -50, bro: -54, mw: 7, sm: 0, mo: 8, skew: 0, drop: 30, isc: 0.6 },
+  sleepy: { ...N, slp: 1, bli: -26, blo: -26, bri: -28, bro: -28, mw: 10, sm: -1, skew: 0 },
+  worried: { ...N, lT: 14, lB: 11, rT: 14, rB: 11, bli: -42, blo: -30, bri: -42, bro: -30, mw: 13, sm: -6, skew: -2 },
+  thinking: { ...N, lT: 10, lB: 8, rT: 14, rB: 10, bli: -28, blo: -32, bri: -40, bro: -46, mw: 9, sm: -1, skew: 7 },
+  listening: { ...N, lT: 13, lB: 11, rT: 17, rB: 12, bli: -32, blo: -36, bri: -38, bro: -46, mw: 11, sm: 0, skew: 3 },
+  speaking: { ...N, lT: 11 },
+};
+const eyePath = (cx, cy, hw, top, bot) => `M${cx - hw},${cy} Q${cx},${cy - 2 * top} ${cx + hw},${cy} Q${cx},${cy + 2 * bot} ${cx - hw},${cy} Z`;
+
+function bgLayer(key = 'bg') {
+  const pid = 'dht' + A.ad.replace(/\W/g, '');
+  return [
+    h('defs', { key: key + 'd' },
+      h('pattern', { id: pid, width: 6, height: 6, patternUnits: 'userSpaceOnUse' }, h('circle', { cx: 3, cy: 3, r: 1.3, fill: A.ad })),
+      h('pattern', { id: 'dscan', width: 4, height: 3, patternUnits: 'userSpaceOnUse' }, h('rect', { width: 4, height: 1, fill: '#000', opacity: 0.4 })),
+      h('pattern', { id: 'dhaz' + pid, width: 10, height: 10, patternUnits: 'userSpaceOnUse', patternTransform: 'rotate(45)' }, h('rect', { width: 5, height: 10, fill: A.a })),
+      h('radialGradient', { id: 'dvig', cx: '50%', cy: '48%', r: '65%' }, h('stop', { offset: '55%', stopColor: '#000', stopOpacity: 0 }), h('stop', { offset: '100%', stopColor: '#000', stopOpacity: 0.75 })),
+      h('filter', { id: 'dglow', x: '-50%', y: '-50%', width: '200%', height: '200%' }, h('feGaussianBlur', { stdDeviation: 4, result: 'b' }), h('feMerge', null, h('feMergeNode', { in: 'b' }), h('feMergeNode', { in: 'SourceGraphic' })))),
+    h('rect', { key: key + 'r', width: 320, height: 240, fill: BG }),
+    h('path', { key: key + 'h1', d: 'M200,40 L320,40 L320,160 Z', fill: `url(#${pid})`, opacity: 0.5 }),
+    h('path', { key: key + 'h2', d: 'M0,120 L0,240 L120,240 Z', fill: `url(#${pid})`, opacity: 0.5 }),
+  ];
+}
+const overlay = key => [h('rect', { key: key + 'v', width: 320, height: 240, fill: 'url(#dvig)', style: { pointerEvents: 'none' } }), h('rect', { key: key + 's', width: 320, height: 240, fill: 'url(#dscan)', style: { pointerEvents: 'none' } })];
+const hazard = (key, y) => h('rect', { key, x: 0, y, width: 320, height: 4, fill: `url(#dhaz${'dht' + A.ad.replace(/\W/g, '')})` });
+
+function face(p, em, t, fx, uid) {
+  const ox = p.gx, oy = p.gy, cy = 116 + oy * 4, lx = 112 + ox * 5, rx = 208 + ox * 5, hw = 34;
+  const blink = ['neutral', 'listening', 'curious', 'worried', 'speaking', 'thinking'].includes(em) && t % 55 < 2;
+  const eyes = [{ cx: lx, top: p.lT, bot: p.lB, side: -1, id: uid + 'eL' }, { cx: rx, top: p.rT, bot: p.rB, side: 1, id: uid + 'eR' }];
+  const mode = p.slp > 0.5 ? 'slp' : blink ? 'blink' : 'open';
+  const out = [h('defs', { key: 'fd' }, ...eyes.map(e => h('clipPath', { id: e.id, key: e.id }, h('path', { d: eyePath(e.cx, cy, hw, e.top, e.bot) }))))];
+  const glitch = fx && (t % 60 < 2 || (em === 'worried' && t % 14 < 2));
+  const fg = [];
+  if (CFG.corp) fg.push(...corpMarks(lx, rx, cy, t)); else {
+  fg.push(h('polyline', { key: 'imp', points: `${lx - 38},${cy + 6} ${lx - 50},${cy + 18} ${lx - 50},${cy + 46} ${lx - 42},${cy + 54}`, fill: 'none', stroke: A.a, strokeWidth: 1.5, opacity: 0.85 }));
+  fg.push(h('circle', { key: 'imp1', cx: lx - 42, cy: cy + 54, r: 2.5, fill: A.a }), h('circle', { key: 'imp2', cx: lx - 50, cy: cy + 30, r: 1.8, fill: t % 20 < 10 ? A.a : DIM }));
+  [0, 1, 2, 3, 4, 5, 6].forEach(i => fg.push(h('rect', { key: 'bc' + i, x: rx + 10 + i * 3.2, y: cy + 33, width: [1, 2, 1, 1.5, 2.5, 1, 2][i], height: 9, fill: INK, opacity: 0.55 })));
+  }
+  if (mode === 'open') eyes.forEach(e => {
+    const icx = e.cx + ox * 9, icy = cy + 2 + oy * 6, rX = 14 * p.isc, rY = 17 * p.isc;
+    fg.push(h('path', { key: e.id + 'sc', d: eyePath(e.cx, cy, hw, e.top, e.bot), fill: SCL }));
+    fg.push(h('g', { key: e.id + 'ir', clipPath: `url(#${e.id})` },
+      h('ellipse', { cx: icx, cy: icy, rx: rX, ry: rY, fill: A.a, filter: 'url(#dglow)' }),
+      h('ellipse', { cx: icx, cy: icy + rY * 0.55, rx: rX * 0.6, ry: rY * 0.28, fill: A.al }),
+      h('ellipse', { cx: icx, cy: icy, rx: 2.6, ry: 11 * p.isc, fill: PANEL }),
+      h('path', { d: `M${e.cx - hw},${cy} Q${e.cx},${cy - 2 * e.top} ${e.cx + hw},${cy} L${e.cx + hw},${cy + 10} Q${e.cx},${cy - 2 * e.top + 20} ${e.cx - hw},${cy + 10} Z`, fill: PANEL, opacity: 0.6 }),
+      h('circle', { cx: icx + 5, cy: icy - 5, r: 2.2, fill: INK })));
+  });
+  const ink = (col, k) => {
+    const g = [];
+    eyes.forEach(e => {
+      const fx2 = x => e.side < 0 ? x : 2 * e.cx - x;
+      if (mode === 'open') {
+        g.push(h('path', { key: 'la' + e.id, d: `M${e.cx - hw},${cy} Q${e.cx},${cy - 2 * e.top} ${e.cx + hw},${cy}`, fill: 'none', stroke: col, strokeWidth: 5, strokeLinecap: 'square' }));
+        g.push(h('path', { key: 'lo' + e.id, d: `M${e.cx - hw + 4},${cy + 1} Q${e.cx},${cy + 2 * e.bot} ${e.cx + hw - 4},${cy + 1}`, fill: 'none', stroke: col, strokeWidth: 1.5 }));
+        const ox0 = e.cx - hw;
+        g.push(h('path', { key: 'fl' + e.id, d: `M${fx2(ox0 + 4)},${cy - 2} L${fx2(ox0 - 14)},${cy - 8} L${fx2(ox0 + 12)},${cy - 7} Z`, fill: col }));
+      } else if (mode === 'slp') g.push(h('path', { key: 'sp' + e.id, d: `M${e.cx - hw},${cy + 2} L${e.cx + hw},${cy + 2}`, stroke: col, strokeWidth: 4 }));
+      else g.push(h('path', { key: 'bk' + e.id, d: `M${e.cx - hw},${cy} Q${e.cx},${cy + 4} ${e.cx + hw},${cy}`, fill: 'none', stroke: col, strokeWidth: 4 }));
+      g.push(h('path', { key: 'bag' + e.id, d: `M${e.cx - 18},${cy + 2 * Math.max(e.bot, 4) + 5} Q${e.cx},${cy + 2 * Math.max(e.bot, 4) + 9} ${e.cx + 14},${cy + 2 * Math.max(e.bot, 4) + 4}`, fill: 'none', stroke: col, strokeWidth: 1.2, opacity: 0.45 }));
+    });
+    const brow = (xi, yi, xo, yo, key) => h('path', { key, d: `M${xi},${yi - 3} L${(xi + xo) / 2},${(yi + yo) / 2 - 5} L${xo},${yo} L${(xi + xo) / 2},${(yi + yo) / 2 + 1} L${xi},${yi + 4} Z`, fill: col });
+    g.push(brow(lx + 24, cy + p.bli, lx - 34, cy + p.blo, 'bl'), brow(rx - 24, cy + p.bri, rx + 34, cy + p.bro, 'br'));
+    const mx = 160 + ox * 3, my = 176 + oy * 2;
+    const L = [mx - p.mw, my - p.sm * 0.3], R = [mx + p.mw, my - p.sm * 0.3 - p.skew];
+    if (p.mo > 0.8) {
+      g.push(h('path', { key: 'mf', d: `M${L[0]},${L[1]} Q${mx},${my + p.sm} ${R[0]},${R[1]} Q${mx},${my + p.sm + p.mo * 2.4} ${L[0]},${L[1]} Z`, fill: PANEL, stroke: col, strokeWidth: 2.5, strokeLinejoin: 'round' }));
+      if (p.fang > 0.5) { const fy = t => L[1] + (R[1] - L[1]) * t + p.sm * 0.5 * (1 - Math.abs(2 * t - 1)); [[0.25, 1], [0.75, 1]].forEach(([u], i) => { const x = L[0] + (R[0] - L[0]) * u, y = fy(u); g.push(h('path', { key: 'fg' + i, d: `M${x - 3},${y} L${x + 3},${y} L${x},${y + 6} Z`, fill: col })); }); }
+    } else g.push(h('path', { key: 'ml', d: `M${L[0]},${L[1]} Q${mx},${my + p.sm} ${R[0]},${R[1]}`, fill: 'none', stroke: col, strokeWidth: 3.5, strokeLinecap: 'square' }));
+    return h('g', { key: k }, ...g);
+  };
+  if (fx) fg.push(h('g', { key: 'mis', transform: 'translate(2.5 0)', opacity: 0.7 }, ink(A.a, 'mi')));
+  fg.push(ink(INK, 'ki'));
+  fg.push(h('line', { key: 'scar', x1: lx - 6, y1: cy + p.blo - 12, x2: lx + 6, y2: cy + p.bli + 14, stroke: BG, strokeWidth: 3 }), h('line', { key: 'scar2', x1: lx - 6, y1: cy + p.blo - 12, x2: lx + 6, y2: cy + p.bli + 14, stroke: A.a, strokeWidth: 1, opacity: 0.8 }));
+  if (CFG.eyewear !== 'reticle') fg.push(...eyewear(lx, rx, cy, p, t, em));
+  if (CFG.eyewear === 'reticle') {
+  const mcx = rx, mcy = cy + 1, R0 = 36 + p.drop * 0.4, rot = em === 'curious' ? t * 6 : em === 'surprised' ? t * 14 : t * 1.5;
+  fg.push(h('g', { key: 'ret' },
+    h('path', { d: `M${mcx + 30},${mcy + 22} L${mcx + 52},${mcy + 40} L330,${mcy + 40}`, fill: 'none', stroke: A.a, strokeWidth: 1.5 }),
+    h('circle', { cx: mcx, cy: mcy, r: R0, fill: A.a, fillOpacity: 0.06, stroke: A.a, strokeWidth: 2 }),
+    ...[0, 90, 180, 270].map(a => h('line', { key: 'tk' + a, x1: mcx, y1: mcy - R0 - 6, x2: mcx, y2: mcy - R0 + 5, stroke: A.a, strokeWidth: 2, transform: `rotate(${a} ${mcx} ${mcy})` })),
+    h('circle', { cx: mcx, cy: mcy, r: R0 + 7, fill: 'none', stroke: A.a, strokeWidth: 1.2, strokeDasharray: '14 30', opacity: 0.8, transform: `rotate(${rot} ${mcx} ${mcy})` }),
+    T('tgt', mcx + R0 - 2, mcy - R0 - 2, em === 'curious' ? 'SCAN' : 'TGT', { font: MONO, size: 8, fill: A.a, w: 400 })));
+  }
+  if (em === 'surprised') fg.push(T('ex2', 272, 90, '!', { size: 50, w: 800, it: true, fill: A.a }), T('ex', 270, 88, '!', { size: 50, w: 800, it: true }));
+  if (em === 'curious') { const sy = 60 + (t * 4) % 130; fg.push(h('rect', { key: 'scan', x: 30, y: sy, width: 260, height: 1.5, fill: A.a, opacity: 0.7 }), h('rect', { key: 'scan2', x: 30, y: sy - 8, width: 260, height: 8, fill: A.a, opacity: 0.08 })); }
+  if (em === 'worried') fg.push(t % 10 < 6 ? tag('wn', 236, 52, '警告', { font: JP, size: 12, bg: A.a, fg: PANEL, w: 900 }) : null);
+  if (em === 'excited') [[56, 76], [270, 70], [50, 160], [276, 160]].forEach(([x, y], i) => { if ((t + i * 3) % 8 < 5) { const r = 5 + 3 * Math.abs(Math.sin(t * 0.4 + i)); fg.push(h('g', { key: 'sp' + i, stroke: A.a, strokeWidth: 2 }, h('line', { x1: x - r, y1: y, x2: x + r, y2: y }), h('line', { x1: x, y1: y - r, x2: x, y2: y + r }))); } });
+  if (em === 'sleepy') fg.push(T('sb', 160, 212, 'STANDBY' + (t % 12 < 6 ? ' _' : ''), { font: MONO, size: 11, fill: SEC, anchor: 'middle', w: 400 }));
+  if (em === 'thinking') { const k = Math.floor(t / 4) % 6; [0, 1, 2, 3, 4].forEach(i => fg.push(h('rect', { key: 'pr' + i, x: 244 + i * 9, y: 64, width: 7, height: 7, fill: i < k ? A.a : 'none', stroke: A.a, strokeWidth: 1.2 }))); fg.push(T('prt', 244, 58, 'PROC', { font: MONO, size: 9, fill: A.a, w: 400 })); }
+  if (em === 'listening') [0, 1, 2, 3].forEach(i => { const hh = 6 + 14 * Math.abs(Math.sin(t * 0.7 + i * 1.3)); fg.push(h('rect', { key: 'vl' + i, x: 26 + i * 7, y: 120 - hh / 2, width: 4, height: hh, fill: A.a }), h('rect', { key: 'vr' + i, x: 270 + i * 7, y: 120 - hh / 2, width: 4, height: hh, fill: A.a })); });
+  out.push(h('g', { key: 'face', transform: `translate(${glitch ? 7 : 0} 0)` }, ...fg.filter(Boolean)));
+  if (glitch) out.push(h('rect', { key: 'g1', x: 0, y: (t * 37) % 170 + 50, width: 320, height: 6, fill: A.a, opacity: 0.6 }), h('rect', { key: 'g2', x: 40, y: (t * 53) % 150 + 60, width: 200, height: 2, fill: INK }), h('rect', { key: 'g3', x: 0, y: (t * 71) % 150 + 60, width: 320, height: 12, fill: BG, opacity: 0.5 }));
+  return out;
+}
+function status(q, mood) {
+  const segs = (key, x, pct) => Array.from({ length: 10 }, (_, i) => h('rect', { key: key + i, x: x + i * 10.2, y: 19, width: 8, height: 4, fill: i < Math.round(pct / 10) ? lvl(pct) : DIM }));
+  const out = [
+    h('rect', { key: 'band', width: 320, height: 38, fill: PANEL }), hazard('hz', 38),
+    T('sl', 10, 14, 'SESSION', { font: MONO, size: 10, fill: SEC, w: 400 }), T('sv', 110, 15, q.session + '%', { size: 14, w: 800, it: true, fill: lvl(q.session), anchor: 'end' }), ...segs('ss', 10, q.session),
+    T('sr', 10, 34, 'RST ' + fmt(q.resetMin).toUpperCase(), { font: MONO, size: 10, fill: INK, w: 400 }),
+    T('wl', 210, 14, 'WEEK', { font: MONO, size: 10, fill: SEC, w: 400 }), T('wv', 310, 15, q.weekly + '%', { size: 14, w: 800, it: true, fill: lvl(q.weekly), anchor: 'end' }), ...segs('ws', 210, q.weekly),
+    T('wr', 310, 34, 'RST THU 09:00', { font: MONO, size: 10, fill: INK, w: 400, anchor: 'end' }),
+  ];
+  if (mood) out.push(tag('md', 160, 9, mood.toUpperCase(), { size: 12, bg: A.a, fg: PANEL, center: true, w: 800 }));
+  return out;
+}
+function wrap(s, n) {
+  const lines = []; let cur = '';
+  s.split(' ').forEach(w => { if ((cur + ' ' + w).trim().length > n) { lines.push(cur.trim()); cur = w; } else cur += ' ' + w; });
+  if (cur.trim()) lines.push(cur.trim());
+  return lines.slice(-2);
+}
+function mini(key, x, y, sc, p, em, t, fx, uid) { return h('g', { key, transform: `translate(${x} ${y}) scale(${sc}) translate(-160 -125)` }, ...face(p, em, t, fx, uid)); }
+function ledger(q, c) {
+  const worst = Math.max(q.session, q.weekly);
+  const remark = worst >= 85 ? 'Nearly spent. How predictable.' : worst >= 60 ? `You're burning through it, ${c.hon}.` : 'Reserves adequate. For now.';
+  const p = [h('rect', { key: 'band', width: 320, height: 34, fill: PANEL }), hazard('hz', 34), T('t', 12, 24, 'THE LEDGER', { size: 20, w: 800, it: true }), T('n', 308, 22, (CFG.corp ? CFG.corpName.toUpperCase() : 'UNIT 07 // ' + c.name.toUpperCase()), { font: MONO, size: 10, fill: A.a, anchor: 'end', w: 400 })];
+  const block = (id, y, label, pct, sub) => {
+    p.push(T(id + 'l', 14, y, label, { font: MONO, size: 10, fill: SEC, w: 400 }), T(id + 's', 14, y + 17, sub, { size: 13, w: 600 }));
+    p.push(T(id + 'v2', 309, y + 20, pct + '%', { size: 40, w: 800, it: true, fill: A.a, anchor: 'end', op: 0.8 }), T(id + 'v', 306, y + 20, pct + '%', { size: 40, w: 800, it: true, fill: lvl(pct), anchor: 'end' }));
+    const n = Math.round(pct / 100 * 24);
+    for (let i = 0; i < 24; i++) p.push(h('rect', { key: id + i, x: 14 + i * 12.2, y: y + 28, width: 10, height: 10, fill: i < n ? lvl(pct) : 'none', stroke: i < n ? 'none' : DIM, strokeWidth: 1.2 }));
+  };
+  block('a', 62, 'SESSION // 5H', q.session, 'Resets in ' + fmt(q.resetMin));
+  block('b', 134, 'WEEKLY // QUOTA', q.weekly, 'Resets Thursday 09:00');
+  p.push(tag('rm', 14, 202, remark, { size: 15, stroke: A.a }));
+  return p;
+}
+function boot(t, prog, c, fx, uid) {
+  const lines = ['> waking the machine', '> calibrating contempt', '> syncing ledger', '> online. unfortunately for you.'];
+  const awake = prog > 0.5;
+  const p = [mini('mf', 160, 60, 0.42, { ...(awake ? N : E.sleepy), gx: 0, gy: 0 }, awake ? 'neutral' : 'sleepy-still', t, fx, uid)];
+  p.push(T('n2', 163, 146, c.name.toUpperCase(), { size: 54, w: 800, it: true, fill: A.a, anchor: 'middle' }), T('n', 160, 146, c.name.toUpperCase(), { size: 54, w: 800, it: true, anchor: 'middle' }));
+  p.push(T('jp', 160, 164, 'フェムト · 監視', { font: JP, size: 11, w: 900, anchor: 'middle', ls: 3, fill: A.a }));
+  const n = Math.round(prog * 16);
+  for (let i = 0; i < 16; i++) p.push(h('rect', { key: 'pb' + i, x: 88 + i * 9, y: 174, width: 7, height: 8, fill: i < n ? INK : 'none', stroke: DIM, strokeWidth: 1.2 }));
+  p.push(T('q', 160, 204, lines[Math.min(3, Math.floor(prog * 3.999))] + (t % 8 < 4 ? '_' : ''), { font: MONO, size: 12, anchor: 'middle', w: 400 }));
+  p.push(T('v', 160, 230, CFG.corp ? CFG.corpName.toUpperCase() + ' · ASSET 07' : 'FW 0.1.0 · UNIT 07', { font: MONO, size: 10, anchor: 'middle', fill: SEC, w: 400 }));
+  return p;
+}
+function wifi(t, attempt, c) {
+  const k = Math.floor(t / 5) % 4, cx = 160, cy = 90;
+  const p = [h('circle', { key: 'd', cx, cy, r: 5, fill: A.a })];
+  [16, 30, 44].forEach((r, i) => { const d = r * 0.7071; p.push(h('path', { key: 'a' + i, d: `M${cx - d},${cy - d} A${r} ${r} 0 0 1 ${cx + d},${cy - d}`, fill: 'none', stroke: k > i ? INK : DIM, strokeWidth: 6, strokeLinecap: 'butt' })); });
+  p.push(T('l', 160, 124, 'SEARCHING THE GRID', { font: MONO, size: 11, fill: SEC, anchor: 'middle', w: 400 }), T('s', 160, 156, 'HOME-WIFI', { size: 32, w: 800, it: true, anchor: 'middle' }), T('at', 160, 176, `ATTEMPT ${attempt}/3`, { font: MONO, size: 11, anchor: 'middle', w: 400, fill: attempt > 1 ? A.a : INK }));
+  p.push(tag('q', 160, 192, `The grid is slow tonight, ${c.hon}.`, { size: 15, center: true, stroke: A.a }));
+  return p;
+}
+function setup(t, c, fx, uid) {
+  return [
+    h('rect', { key: 'band', width: 320, height: 34, fill: PANEL }), hazard('hz', 34), T('h', 12, 23, "CONNECT ME. I DON'T ENJOY WAITING.", { size: 16, w: 800, it: true }),
+    T('1', 14, 60, '01 // JOIN FROM YOUR PHONE', { font: MONO, size: 10, fill: SEC, w: 400 }), T('1v', 14, 86, c.name.toUpperCase() + '-SETUP', { size: 28, w: 800, it: true }), T('1p', 14, 103, 'KEY  7F3A-9C21', { font: MONO, size: 11, w: 400 }),
+    T('2', 14, 128, '02 // THEN OPEN', { font: MONO, size: 10, fill: SEC, w: 400 }), T('2v2', 16, 160, '192.168.4.1', { size: 34, w: 800, it: true, fill: A.a }), T('2v', 14, 160, '192.168.4.1', { size: 34, w: 800, it: true }),
+    tag('q', 14, 180, CFG.corp ? 'Unregistered assets are recycled.' : 'Unconfigured units get recycled.', { size: 15, stroke: A.a }),
+    T('r', 14, 230, 'HOLD BUTTON 5S = FACTORY WIPE', { font: MONO, size: 10, fill: SEC, w: 400 }),
+    mini('mf', 262, 122, 0.34, { ...N, gx: -0.9, gy: 0 }, 'neutral', t, fx, uid),
+  ];
+}
+function screen(o) {
+  A = o.th || THEMES['signal red'];
+  CFG = { eyewear: o.eyewear || 'exec glasses', corp: o.corp ?? true, corpName: o.corpName || 'Aldgate Dynamics' };
+  const uid = o.uid || 'm', kids = [...bgLayer()];
+  if (o.screen === 'quota') kids.push(...ledger(o.q, o));
+  else if (o.screen === 'boot') kids.push(...boot(o.t, o.progress ?? 0.7, o, o.fx, uid));
+  else if (o.screen === 'wifi') kids.push(...wifi(o.t, o.attempt || 1, o));
+  else if (o.screen === 'setup') kids.push(...setup(o.t, o, o.fx, uid));
+  else {
+    kids.push(...face(o.p, o.em, o.t, o.fx, uid));
+    const mood = o.screen === 'face' ? MOOD[o.em] : o.screen === 'speaking' ? o.name : MOOD[o.screen];
+    kids.push(...status(o.q, mood));
+    if (CFG.corp && !o.caption && o.em !== 'sleepy') kids.push(T('corp', 160, 233, `PROPERTY OF ${CFG.corpName.toUpperCase()} · EMP-0007`, { font: MONO, size: 8, fill: SEC, anchor: 'middle', w: 400 }));
+    if (o.caption) {
+      const you = o.screen === 'listening';
+      kids.push(h('path', { key: 'cb', d: 'M6,194 L302,194 L314,206 L314,236 L6,236 Z', fill: PANEL, stroke: you ? INK : A.a, strokeWidth: 1.2 }));
+      kids.push(tag('ct', 6, 182, you ? 'YOU' : o.name.toUpperCase(), { size: 11, bg: you ? INK : A.a, fg: PANEL, w: 800 }));
+      wrap(o.caption, 42).forEach((l, i) => kids.push(T('c' + i, 14, 212 + i * 17, l, { size: 16, w: 500, fill: INK })));
+    }
+  }
+  if (o.fx) kids.push(...overlay('ov'));
+  return h('svg', { viewBox: '0 0 320 240', width: '100%', style: { display: 'block' } }, ...kids);
+}
+
+async function embedFonts() {
+  if (window.__femtoFontCss) return window.__femtoFontCss;
+  const urls = ['https://fonts.googleapis.com/css2?family=Barlow+Condensed:ital,wght@0,500;0,600;0,700;0,800;1,600;1,700;1,800&family=Share+Tech+Mono&display=swap',
+    'https://fonts.googleapis.com/css2?family=Noto+Sans+JP:wght@900&text=%E3%83%95%E3%82%A7%E3%83%A0%E3%83%88%E8%AD%A6%E5%91%8A%E7%9B%A3%E8%A6%96&display=swap'];
+  const b64 = buf => { const u = new Uint8Array(buf); let s = ''; for (let i = 0; i < u.length; i += 0x8000) s += String.fromCharCode.apply(null, u.subarray(i, i + 0x8000)); return btoa(s); };
+  let out = '';
+  for (const u of urls) {
+    const css = await (await fetch(u)).text();
+    for (const b of css.split('@font-face').slice(1)) {
+      if (!u.includes('Noto') && /unicode-range/.test(b) && !/U\+0000-00FF/.test(b)) continue;
+      const m = b.match(/url\((https:[^)]+)\)/); if (!m) continue;
+      const data = b64(await (await fetch(m[1])).arrayBuffer());
+      out += '@font-face' + b.slice(0, b.indexOf('}') + 1).replace(m[1], 'data:font/woff2;base64,' + data) + '\n';
+    }
+  }
+  window.__femtoFontCss = out;
+  return out;
+}
+class Component extends DCLogic {
+  canvases = [];
+  _crefs = [];
+  cref(i) { this._crefs = this._crefs || []; this.canvases = this.canvases || []; return this._crefs[i] || (this._crefs[i] = el => { this.canvases[i] = el; }); }
+  async rasterize() {
+    const key = this._sk;
+    let css = '';
+    try { css = await embedFonts(); } catch (e) {}
+    const svgs = [...document.querySelectorAll('[data-sheet] svg')], ser = new XMLSerializer();
+    for (let i = 0; i < svgs.length; i++) {
+      const c = this.canvases[i]; if (!c) continue;
+      let s = ser.serializeToString(svgs[i]).replace(/<svg([^>]*)>/, (m, a) => `<svg${a.replace('width="100%"', 'width="320" height="240"')}><style>${css}</style>`);
+      const url = URL.createObjectURL(new Blob([s], { type: 'image/svg+xml' }));
+      const img = new Image(); img.src = url;
+      try { await img.decode(); } catch (e) { URL.revokeObjectURL(url); continue; }
+      const draw = () => { const ctx = c.getContext('2d'); ctx.fillStyle = '#000'; ctx.fillRect(0, 0, 320, 240); ctx.drawImage(img, 0, 0, 320, 240); };
+      draw(); setTimeout(() => { draw(); URL.revokeObjectURL(url); }, 250);
+    }
+    this._rk = key;
+  }
+  scheduleRaster() { clearTimeout(this._rt); this._rt = setTimeout(() => this.rasterize(), 600); }
+  componentDidUpdate() { if (this._sk && this._rk !== this._sk && this._pending !== this._sk) { this._pending = this._sk; this.scheduleRaster(); } }
+  state = { screen: 'face', emotion: 'auto', t: 0, nx: 0, ny: 0, follow: true, session: 38, weekly: 61, resetMin: 134, caption: '', capStart: 0, demoEm: null, lastSeen: 0, attempt: 1, cur: { ...N, gx: 0, gy: 0 } };
+  stageRef = React.createRef();
+  timers = [];
+  cfg() { return { name: this.props.butlerName || 'Femto', hon: this.props.honorific || 'sir', fx: this.props.fx ?? true, th: THEMES[this.props.accent] || THEMES['signal red'], eyewear: this.props.eyewear || 'exec glasses', corp: this.props.corp ?? true, corpName: this.props.corpName || 'Aldgate Dynamics' }; }
+  componentDidMount() { this.iv = setInterval(this.tick, 70); setTimeout(() => this.rasterize(), 900); }
+  componentWillUnmount() { clearInterval(this.iv); this.timers.forEach(clearTimeout); }
+  later(ms, fn) { this.timers.push(setTimeout(fn, ms)); }
+  clear() { this.timers.forEach(clearTimeout); this.timers = []; }
+  resolveEm(s) {
+    if (s.screen !== 'face') return s.screen;
+    if (s.demoEm) return s.demoEm;
+    if (s.emotion !== 'auto') return s.emotion;
+    if (s.session >= 85) return 'worried';
+    if (s.t - s.lastSeen > 285) return 'sleepy';
+    return s.session < 25 ? 'happy' : 'neutral';
+  }
+  tick = () => this.setState(s => {
+    const t = s.t + 1, em = this.resolveEm({ ...s, t });
+    const tg = { ...(E[em] || N) };
+    const on = s.follow && em !== 'sleepy';
+    tg.gx = em === 'thinking' ? 0.7 : on ? s.nx : 0;
+    tg.gy = em === 'thinking' ? -0.9 : em === 'sleepy' ? 0.4 : on ? s.ny : 0;
+    if (s.screen === 'speaking' && s.caption && (t - s.capStart) < s.caption.length) tg.mo = t % 4 < 2 ? 5 : 1.2;
+    const cur = {}; Object.keys(tg).forEach(k => cur[k] = s.cur[k] + (tg[k] - s.cur[k]) * 0.3);
+    return { t, cur };
+  });
+  q() { return this.cfg().name + ', how much Claude do I have left?'; }
+  runDemo = () => {
+    this.clear();
+    const { session, weekly, resetMin } = this.state, { hon } = this.cfg();
+    const ans = session >= 85
+      ? `${session}% gone. The session resets in ${fmt(resetMin)}. I'd stop talking, ${hon}.`
+      : `${session}% of this session consumed, ${weekly}% of the week. Reset in ${fmt(resetMin)}. Spend wisely, ${hon}. Or don't.`;
+    this.setState(s => ({ screen: 'listening', caption: this.q(), capStart: s.t, demoEm: null, lastSeen: s.t }));
+    this.later(3400, () => this.setState({ screen: 'thinking', caption: '' }));
+    this.later(5600, () => this.setState(s => ({ screen: 'speaking', caption: ans, capStart: s.t })));
+    const speak = ans.length * 70 + 2200;
+    this.later(5600 + speak, () => this.setState(s => ({ screen: 'face', caption: '', demoEm: session >= 85 ? 'worried' : 'happy', lastSeen: s.t })));
+    this.later(5600 + speak + 2600, () => this.setState({ demoEm: null }));
+  };
+  powerOn = firstRun => {
+    this.clear();
+    this.setState(s => ({ screen: 'boot', bootStart: s.t, caption: '', demoEm: null, attempt: 1 }));
+    this.later(3600, () => this.setState({ screen: firstRun ? 'setup' : 'wifi' }));
+    if (firstRun) return;
+    this.later(5400, () => this.setState({ attempt: 2 }));
+    this.later(7200, () => this.setState(s => ({ screen: 'face', demoEm: 'excited', lastSeen: s.t })));
+    this.later(9800, () => this.setState({ demoEm: null }));
+  };
+  onMove = e => {
+    const el = this.stageRef.current; if (!el) return;
+    const r = el.getBoundingClientRect(), cl = v => Math.max(-1, Math.min(1, v));
+    this.setState(s => ({ nx: cl((e.clientX - r.left - r.width / 2) / (r.width / 2)), ny: cl((e.clientY - r.top - r.height * 0.42) / (r.height / 2)), lastSeen: s.t }));
+  };
+  onLeave = () => this.setState({ nx: 0, ny: 0 });
+  buildSheet(q, c) {
+    const key = JSON.stringify([q, c.name, c.hon, c.fx, this.props.accent, c.eyewear, c.corp, c.corpName]);
+    if (this._sk === key) return this._sheet;
+    let n = 0;
+    const st = o => screen({ t: 8, q, ...c, uid: 's' + (n++), p: { ...(E[o.em] || N), gx: o.gx || 0, gy: o.gy || 0, ...(o.pp || {}) }, ...o });
+    this._sk = key;
+    this._sheet = [
+      { label: 'Boot', note: 'A terminal-style log. His eyes open past halfway.', el: st({ screen: 'boot', progress: 0.62, t: 3 }) },
+      { label: 'Connecting to Wi-Fi', note: '"Searching the grid". The attempt counter turns red after the first failure.', el: st({ screen: 'wifi', t: 16, attempt: 2 }) },
+      { label: 'First-run setup', note: 'Access point mode. The copy is a threat, delivered politely.', el: st({ screen: 'setup' }) },
+      { label: 'Contempt · idle', note: 'Default. Heavy lids, a slit pupil, a lopsided sneer. The reticle drifts slowly.', el: st({ screen: 'face', em: 'neutral' }) },
+      { label: 'Follow · tracking left', note: 'Pupils lead, the sockets follow. The reticle stays locked on you.', el: st({ screen: 'face', em: 'neutral', gx: -1, gy: 0.6 }) },
+      { label: 'Satisfied', note: 'Narrowed eyes and a thin grin with fangs. Never happy, only satisfied.', el: st({ screen: 'face', em: 'happy' }) },
+      { label: 'Amused', note: 'Wide eyes, pinned pupils, a full fanged grin, red sparks.', el: st({ screen: 'face', em: 'excited' }) },
+      { label: 'Scanning', note: 'New face or motion. The reticle spins and a scan line sweeps across. Head tilts −5°.', el: st({ screen: 'face', em: 'curious', t: 12 }) },
+      { label: 'Alarmed', note: 'Pupils shrink to needles, the reticle expands and spins, a red "!" appears.', el: st({ screen: 'face', em: 'surprised' }) },
+      { label: 'Standby', note: 'Eyes closed flat and a blinking cursor. Servos return to center.', el: st({ screen: 'face', em: 'sleepy' }) },
+      { label: 'Rationing · low quota', note: 'Session at 85%+. Brows knit, 警告 (warning) flashes, glitches get constant.', el: screen({ t: 8, q: { session: 91, weekly: 78, resetMin: 42 }, ...c, uid: 'sw', screen: 'face', em: 'worried', p: { ...E.worried, gx: 0, gy: 0 } }) },
+      { label: 'Listening', note: 'Red VU bars at both edges. Your words appear under a bone-white YOU tag.', el: st({ screen: 'listening', em: 'listening', caption: this.q() }) },
+      { label: 'Processing', note: 'He glances away while a PROC block counter fills.', el: st({ screen: 'thinking', em: 'thinking', gx: 0.7, gy: -0.9, t: 14 }) },
+      { label: 'Speaking · captions', note: 'Soot caption box with a red rule and name tag.', el: st({ screen: 'speaking', em: 'speaking', caption: `${q.session}% of this session consumed. Spend wisely, ${c.hon}. Or don't.`, pp: { mo: 5 } }) },
+      { label: 'The Ledger · usage', note: 'Tap to open. Block meters, misregistered numbers, a verdict.', el: st({ screen: 'quota' }) },
+    ];
+    return this._sheet;
+  }
+  renderVals() {
+    const s = this.state, c = this.cfg(), q = { session: s.session, weekly: s.weekly, resetMin: s.resetMin };
+    const em = this.resolveEm(s);
+    const shown = s.caption ? s.caption.slice(0, s.t - s.capStart + 1) : '';
+    const progress = Math.min(1, (s.t - (s.bootStart ?? s.t - 99)) / 46);
+    const mainScreen = screen({ screen: s.screen, em, p: s.cur, t: s.t, q, caption: shown, progress, attempt: s.attempt, uid: 'm', ...c });
+    const nx = s.follow && em !== 'sleepy' ? s.nx : 0, ny = s.follow && em !== 'sleepy' ? s.ny : 0;
+    const headStyle = { width: '100%', transform: `rotateY(${nx * 22}deg) rotateX(${-ny * 12}deg) rotateZ(${em === 'curious' ? -5 : 0}deg)`, transition: 'transform 0.5s cubic-bezier(.3,.7,.3,1)', transformStyle: 'preserve-3d' };
+    const mk = (list, key, set) => list.map(([v, label]) => ({ label, active: s[key] === v, inactive: s[key] !== v, onClick: () => { this.clear(); this.setState({ [key]: v, caption: '', demoEm: null, lastSeen: s.t, ...set(v) }); } }));
+    const screens = mk([['boot', 'Boot'], ['wifi', 'Wi-Fi'], ['setup', 'Setup'], ['face', 'Face'], ['quota', 'Ledger'], ['listening', 'Listening'], ['thinking', 'Thinking'], ['speaking', 'Speaking']], 'screen',
+      v => v === 'speaking' ? { caption: `Reset in ${fmt(s.resetMin)}, ${c.hon}. Try not to waste it.`, capStart: s.t } : v === 'listening' ? { caption: this.q(), capStart: s.t } : v === 'boot' ? { bootStart: s.t } : {});
+    const emotions = mk([['auto', 'Auto'], ['neutral', 'Contempt'], ['happy', 'Satisfied'], ['excited', 'Amused'], ['curious', 'Scanning'], ['surprised', 'Alarmed'], ['sleepy', 'Standby'], ['worried', 'Rationing']], 'emotion', () => ({ screen: 'face' }));
+    return {
+      nameCaps: c.name.toUpperCase(), question: this.q(),
+      stageRef: this.stageRef, onMove: this.onMove, onLeave: this.onLeave, headStyle, mainScreen,
+      onTapScreen: () => this.setState(p => ({ screen: p.screen === 'quota' ? 'face' : 'quota', caption: '', lastSeen: p.t })),
+      stageHint: s.follow ? 'TRACKING SUBJECT (YOUR CURSOR) · STANDS IN FOR CAMERA FACE TRACKING' : 'TRACKING DISABLED',
+      runDemo: this.runDemo, powerOn: () => this.powerOn(false), firstRun: () => this.powerOn(true), screens, emotions,
+      session: s.session, weekly: s.weekly, resetMin: s.resetMin, resetLabel: fmt(s.resetMin),
+      onSession: e => this.setState({ session: +e.target.value }), onWeekly: e => this.setState({ weekly: +e.target.value }), onReset: e => this.setState({ resetMin: +e.target.value }),
+      follow: s.follow, onFollow: e => this.setState({ follow: e.target.checked }),
+      sheet: this.buildSheet(q, c),
+      deviceItems: this._sheet.map((it, i) => ({ label: it.label, cref: this.cref(i) })),
+      sizeOpts: [['big', 'Enlarged'], ['real', 'Actual size · 54 mm']].map(([v, label]) => ({ label, active: (s.devSize || 'big') === v, inactive: (s.devSize || 'big') !== v, onClick: () => this.setState({ devSize: v }) })),
+      deviceGrid: { display: 'grid', gridTemplateColumns: s.devSize === 'real' ? 'repeat(auto-fill, minmax(170px, 1fr))' : 'repeat(auto-fill, minmax(320px, 1fr))', gap: '40px 28px' },
+      deviceSize: s.devSize === 'real' ? { width: '54mm' } : { width: '100%', maxWidth: 460 },
+      pixelGrid: s.devSize === 'real' ? { display: 'none' } : { position: 'absolute', inset: 0, pointerEvents: 'none', backgroundImage: 'linear-gradient(90deg, rgba(0,0,0,0.32) 0 16%, transparent 16%), linear-gradient(0deg, rgba(0,0,0,0.32) 0 16%, transparent 16%)', backgroundSize: 'calc(100% / 320) calc(100% / 240)' },
+    };
+  }
+}
+</script>
+</body>
+</html>
+
