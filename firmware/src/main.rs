@@ -87,22 +87,13 @@ fn main() -> anyhow::Result<()> {
 
     board.pmic.set_brightness(60).ok();
     info!("panel {:?}", board.panel);
-    let head = match board.body.as_mut() {
-        Some(body) => {
-            // Dim accent glow (PRD §5.6).
-            body.fill_leds(24, 2, 2).ok();
-            body.set_servo_power(true).ok();
-            std::thread::sleep(Duration::from_millis(200));
-            match motion::start(p.uart1, p.pins.gpio6, p.pins.gpio7, nvs.clone()) {
-                Ok(t) => Some(t),
-                Err(e) => {
-                    warn!("motion: {e}");
-                    None
-                }
-            }
-        }
-        None => None,
-    };
+    // Servo UART pins wait here until the body board is found.
+    let mut servo_pins = Some((p.uart1, p.pins.gpio6, p.pins.gpio7));
+    let mut head: Option<motion::MotionRef> = None;
+    if let Some(body) = board.body.as_mut() {
+        head = attach_body(body, &mut servo_pins, &nvs);
+    }
+    let mut body_probe_at = Instant::now();
     hub.lock().unwrap().motion = head.clone();
 
     // LCD scan-out runs on its own thread so it overlaps the next render.
@@ -110,7 +101,9 @@ fn main() -> anyhow::Result<()> {
     let (back_tx, from_lcd) = std::sync::mpsc::sync_channel::<(Canvas, u32)>(1);
     let mut lcd = board.lcd;
     // Core 1: core 0 runs the renderer and Wi-Fi.
-    psram_stack_thread_on("lcd", 8192, Some(1), move || {
+    // Priority 7: above face detection (5), below the mic/wake-word task (8),
+    // so the display isn't starved while a face is being tracked.
+    psram_stack_thread_prio("lcd", 8192, Some(1), Some(7), move || {
         for c in lcd_rx {
             let t = Instant::now();
             if let Err(e) = lcd.push(&c) {
@@ -295,6 +288,21 @@ fn main() -> anyhow::Result<()> {
                 }
             }
         }
+        // Body board missing at boot: probe every 2 s and attach when it answers.
+        if board.body.is_none() && body_probe_at.elapsed() > Duration::from_secs(2) {
+            body_probe_at = Instant::now();
+            if let Some(mut probe) = board.body_probe.take() {
+                match probe.version() {
+                    Ok(Some(v)) if probe.init(false).is_ok() => {
+                        info!("PY32 body expander v{v} found after {} s", boot_at.elapsed().as_secs());
+                        head = attach_body(&mut probe, &mut servo_pins, &nvs);
+                        hub.lock().unwrap().motion = head.clone();
+                        board.body = Some(probe);
+                    }
+                    _ => board.body_probe = Some(probe),
+                }
+            }
+        }
         if let Some(head) = &head {
             let (pan, tilt) = tracker.head(&engine, cfg.follow);
             let mut m = head.lock().unwrap();
@@ -467,6 +475,11 @@ pub fn psram_stack_thread<F: FnOnce() + Send + 'static>(name: &str, stack: usize
 /// As [`psram_stack_thread`], pinned to `core` when given (the UI loop runs
 /// on core 0; heavy workers go to core 1).
 pub fn psram_stack_thread_on<F: FnOnce() + Send + 'static>(name: &str, stack: usize, core: Option<i32>, f: F) -> std::io::Result<std::thread::JoinHandle<()>> {
+    psram_stack_thread_prio(name, stack, core, None, f)
+}
+
+/// As [`psram_stack_thread_on`] with an explicit FreeRTOS priority.
+pub fn psram_stack_thread_prio<F: FnOnce() + Send + 'static>(name: &str, stack: usize, core: Option<i32>, prio: Option<usize>, f: F) -> std::io::Result<std::thread::JoinHandle<()>> {
     // SAFETY: esp_pthread config is copied by value; restored right after spawn.
     unsafe {
         let mut cfg = sys::esp_pthread_get_default_config();
@@ -474,6 +487,9 @@ pub fn psram_stack_thread_on<F: FnOnce() + Send + 'static>(name: &str, stack: us
         cfg.stack_size = stack;
         if let Some(c) = core {
             cfg.pin_to_core = c;
+        }
+        if let Some(p) = prio {
+            cfg.prio = p;
         }
         // FreeRTOS task name (shows in /api/tasks); leaked, threads live forever.
         cfg.thread_name = std::ffi::CString::new(name).unwrap().into_raw();
@@ -486,6 +502,26 @@ pub fn psram_stack_thread_on<F: FnOnce() + Send + 'static>(name: &str, stack: us
         sys::esp_pthread_set_cfg(&cfg);
     }
     h
+}
+
+/// Body board found: LEDs, servo power, motion task.
+fn attach_body(
+    body: &mut femto_drivers::py32::Py32<board::Bus>,
+    pins: &mut Option<(esp_idf_svc::hal::uart::UART1<'static>, esp_idf_svc::hal::gpio::Gpio6<'static>, esp_idf_svc::hal::gpio::Gpio7<'static>)>,
+    nvs: &esp_idf_svc::nvs::EspDefaultNvsPartition,
+) -> Option<motion::MotionRef> {
+    // Dim accent glow (PRD §5.6).
+    body.fill_leds(24, 2, 2).ok();
+    body.set_servo_power(true).ok();
+    std::thread::sleep(Duration::from_millis(200));
+    let (uart, tx, rx) = pins.take()?;
+    match motion::start(uart, tx, rx, nvs.clone()) {
+        Ok(t) => Some(t),
+        Err(e) => {
+            warn!("motion: {e}");
+            None
+        }
+    }
 }
 
 fn screen_name(s: &Screen) -> &'static str {

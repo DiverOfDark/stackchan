@@ -25,19 +25,27 @@ pub struct Board {
     pub pmic: Axp2101<Bus>,
     pub touch: Ft6336<Bus>,
     pub head: Option<Si12t<Bus>>,
+    /// Body expander, once it answered (see `body_probe`).
     pub body: Option<Py32<Bus>>,
+    /// Not found at boot: keep probing (a soft reset doesn't reset the body,
+    /// and the PY32 can take a while to answer again).
+    pub body_probe: Option<Py32<Bus>>,
     pub lcd: Lcd,
     pub panel: Panel,
 }
 
 impl Board {
     pub fn init(i2c: I2C1<'static>, sda: Gpio12<'static>, scl: Gpio11<'static>) -> Result<Board> {
-        // Long timeout: the PY32 body expander is an MCU and stretches the clock.
+        bus_recovery(12, 11);
+        // Longest clock-stretch timeout the S3 supports: the PY32 body expander is
+        // an MCU, stretches the clock, and can stretch for a long time after a
+        // reset caught it mid-transaction (M5's firmware waits up to 1 s).
         let cfg = I2cConfig::new()
-            .baudrate(Hertz(400_000))
+            // 100 kHz: what M5 and every other PY32 driver use (400 kHz wedged it).
+            .baudrate(Hertz(100_000))
             .sda_enable_pullup(true)
             .scl_enable_pullup(true)
-            .timeout(Duration::from_millis(10).into());
+            .timeout(Duration::from_millis(100).into()); // hardware max (2^22 XTAL cycles)
         let driver = I2cDriver::new(i2c, sda, scl, &cfg)?;
         let bus: &'static Mutex<I2cDriver<'static>> = Box::leak(Box::new(Mutex::new(driver)));
         let dev = || MutexDevice::new(bus);
@@ -68,6 +76,18 @@ impl Board {
         aw.reset_lcd(&mut FreeRtos).map_err(|e| anyhow!("LCD reset: {e:?}"))?;
         let lcd = Lcd::new(panel)?;
 
+        {
+            use embedded_hal::i2c::I2c;
+            let mut d = dev();
+            let mut found = Vec::new();
+            for a in 0x08u8..0x78 {
+                let mut b = [0u8];
+                if d.write_read(a, &[0], &mut b).is_ok() {
+                    found.push(format!("{a:02x}"));
+                }
+            }
+            info!("i2c devices: {}", found.join(" "));
+        }
         let mut head = Si12t::new(dev());
         let head = match head.init() {
             Ok(()) => Some(head),
@@ -77,21 +97,64 @@ impl Board {
             }
         };
 
-        // The body expander boots slowly; give it 1.2 s like the BSP does.
+        // The body expander boots slowly; give it 1.2 s like the BSP does,
+        // then the UI loop keeps probing in the background.
         let mut body = Py32::new(dev());
         let started = Instant::now();
-        let body = loop {
+        let (body, body_probe) = loop {
             FreeRtos::delay_ms(200);
             if let Ok(Some(v)) = body.version() {
                 info!("PY32 body expander v{v}");
-                break body.init(false).ok().map(|_| body);
+                break match body.init(false) {
+                    Ok(()) => (Some(body), None),
+                    Err(e) => {
+                        warn!("PY32 init: {e:?}");
+                        (None, Some(body))
+                    }
+                };
             }
             if started.elapsed() > Duration::from_millis(1200) {
-                warn!("PY32 body expander not found");
-                break None;
+                warn!("PY32 body expander not answering yet; will keep probing");
+                break (None, Some(body));
             }
         };
 
-        Ok(Board { pmic, touch, head, body, lcd, panel })
+        Ok(Board { pmic, touch, head, body, body_probe, lcd, panel })
+    }
+}
+
+/// I2C bus recovery before the driver starts: 9 SCL pulses with SDA released,
+/// then a STOP. A soft reset of the ESP32 doesn't reset the body board, and
+/// the PY32 (an MCU acting as an I2C slave) stays wedged if the reset caught
+/// it mid-transaction; this clocks it out of that state.
+fn bus_recovery(sda: i32, scl: i32) {
+    use esp_idf_svc::sys::*;
+    // SAFETY: raw GPIO setup on the I2C pins before the I2C driver owns them.
+    unsafe {
+        let od = gpio_mode_t_GPIO_MODE_INPUT_OUTPUT_OD;
+        for pin in [sda, scl] {
+            gpio_reset_pin(pin);
+            gpio_set_direction(pin, od);
+            gpio_set_pull_mode(pin, gpio_pull_mode_t_GPIO_PULLUP_ONLY);
+            gpio_set_level(pin, 1);
+        }
+        esp_rom_delay_us(10);
+        let stuck = gpio_get_level(sda) == 0;
+        for _ in 0..9 {
+            gpio_set_level(scl, 0);
+            esp_rom_delay_us(10);
+            gpio_set_level(scl, 1);
+            esp_rom_delay_us(10);
+        }
+        // STOP: SDA low → high while SCL is high.
+        gpio_set_level(sda, 0);
+        esp_rom_delay_us(10);
+        gpio_set_level(scl, 1);
+        esp_rom_delay_us(10);
+        gpio_set_level(sda, 1);
+        esp_rom_delay_us(10);
+        if stuck {
+            warn!("I2C SDA was held low at boot; bus recovered: {}", gpio_get_level(sda) == 1);
+        }
     }
 }
