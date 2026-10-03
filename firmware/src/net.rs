@@ -19,6 +19,9 @@ use log::{info, warn};
 use serde::Deserialize;
 
 pub const WIFI_ATTEMPTS: u8 = 3;
+/// The owner's trmnl-cyberpunk; overridable in the setup UI or with
+/// `FEMTO_USAGE_URL` at build time.
+const DEFAULT_USAGE_URL: &str = "https://trmnl.kirillorlov.pro";
 const POLL: Duration = Duration::from_secs(60);
 /// POSIX TZ for Europe/Berlin (PRD default). Settings → TZ mapping comes with the web UI.
 const TZ_BERLIN: &str = "CET-1CEST,M3.5.0,M10.5.0/3";
@@ -64,7 +67,7 @@ impl NetConfig {
         NetConfig {
             ssid,
             pass,
-            usage_url: get("femto", "usage_url").or_else(|| option_env!("FEMTO_USAGE_URL").map(str::to_owned)).unwrap_or_default(),
+            usage_url: get("femto", "usage_url").unwrap_or_else(|| option_env!("FEMTO_USAGE_URL").unwrap_or(DEFAULT_USAGE_URL).to_owned()),
             usage_token: get("femto", "usage_tok").or_else(|| option_env!("FEMTO_USAGE_TOKEN").map(str::to_owned)).unwrap_or_default(),
         }
     }
