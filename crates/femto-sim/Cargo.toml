@@ -1,0 +1,12 @@
+[package]
+name = "femto-sim"
+description = "Desktop simulator: the real engine and renderer in a window."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+femto-core = { path = "../femto-core" }
+femto-render = { path = "../femto-render" }
+minifb = "0.29"
