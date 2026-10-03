@@ -3,3 +3,4 @@ target/
 node_modules/
 firmware/.embuild/
 firmware/target/
+web/dist/
