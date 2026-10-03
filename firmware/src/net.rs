@@ -1,40 +1,41 @@
 //! Network task: Wi-Fi station, SNTP, and the usage poller (PRD §6.1–6.2).
 //! Runs on its own thread and reports to the UI loop through a channel.
 
-use std::sync::mpsc::Sender;
+use std::sync::mpsc::{Receiver, Sender};
 use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, Result};
 use embedded_svc::http::client::Client;
-use embedded_svc::wifi::{AuthMethod, ClientConfiguration, Configuration};
+use embedded_svc::wifi::{AccessPointConfiguration, AuthMethod, ClientConfiguration, Configuration};
 use esp_idf_svc::eventloop::EspSystemEventLoop;
 use esp_idf_svc::hal::modem::Modem;
 use esp_idf_svc::http::client::{Configuration as HttpConfig, EspHttpConnection};
 use esp_idf_svc::nvs::{EspDefaultNvsPartition, EspNvs, NvsDefault};
 use esp_idf_svc::sntp::{EspSntp, SyncStatus};
+use crate::tz::days_from_civil;
 use esp_idf_svc::sys;
 use esp_idf_svc::wifi::{BlockingWifi, EspWifi};
 use femto_core::Usage;
 use log::{info, warn};
 use serde::Deserialize;
 
+use crate::hub::{HubRef, NetCmd, NetworkInfo};
+use crate::store;
+
 pub const WIFI_ATTEMPTS: u8 = 3;
 /// The owner's trmnl-cyberpunk; overridable in the setup UI or with
 /// `FEMTO_USAGE_URL` at build time.
-const DEFAULT_USAGE_URL: &str = "https://trmnl.kirillorlov.pro";
+pub const DEFAULT_USAGE_URL: &str = "https://trmnl.kirillorlov.pro";
 const POLL: Duration = Duration::from_secs(60);
-/// POSIX TZ for Europe/Berlin (PRD default). Settings → TZ mapping comes with the web UI.
-const TZ_BERLIN: &str = "CET-1CEST,M3.5.0,M10.5.0/3";
 
 #[derive(Debug)]
 pub enum NetEvent {
-    NoCredentials,
+    /// Setup mode: SoftAP `ssid` with WPA2 `key` at 192.168.4.1.
+    Setup { ssid: String, key: String },
     Connecting { attempt: u8, ssid: String },
-    Failed,
     Connected { ip: String },
-    Clock { unix: i64, utc_offset_s: i32 },
+    Clock { unix: i64 },
     Usage(Usage),
-    UsageError(String),
 }
 
 /// Device config in NVS namespace `femto` (written by the setup web UI).
@@ -47,19 +48,19 @@ pub struct NetConfig {
 }
 
 impl NetConfig {
-    pub fn load(nvs: &EspDefaultNvsPartition) -> NetConfig {
-        let get = |ns: &str, key: &str| -> Option<String> {
-            let store: EspNvs<NvsDefault> = EspNvs::new(nvs.clone(), ns, false).ok()?;
-            let mut buf = [0u8; 256];
-            store.get_str(key, &mut buf).ok().flatten().map(str::to_owned).filter(|s| !s.is_empty())
+    pub fn load(store: &store::Store, nvs: &EspDefaultNvsPartition) -> NetConfig {
+        let stock = |key: &str| -> Option<String> {
+            let ns: EspNvs<NvsDefault> = EspNvs::new(nvs.clone(), "wifi", false).ok()?;
+            let mut buf = [0u8; 128];
+            ns.get_str(key, &mut buf).ok().flatten().map(str::to_owned).filter(|s| !s.is_empty())
         };
-        let (ssid, pass) = match get("femto", "ssid") {
-            Some(s) => (s, get("femto", "pass").unwrap_or_default()),
+        let (ssid, pass) = match store.get(store::KEY_SSID) {
+            Some(s) => (s, store.get(store::KEY_PASS).unwrap_or_default()),
             // Credentials left by the stock (XiaoZhi) firmware.
-            None => match get("wifi", "ssid") {
+            None => match stock("ssid") {
                 Some(s) => {
                     info!("using Wi-Fi credentials saved by the stock firmware");
-                    (s, get("wifi", "password").unwrap_or_default())
+                    (s, stock("password").unwrap_or_default())
                 }
                 None => Default::default(),
             },
@@ -67,66 +68,49 @@ impl NetConfig {
         NetConfig {
             ssid,
             pass,
-            usage_url: get("femto", "usage_url").unwrap_or_else(|| option_env!("FEMTO_USAGE_URL").unwrap_or(DEFAULT_USAGE_URL).to_owned()),
-            usage_token: get("femto", "usage_tok").or_else(|| option_env!("FEMTO_USAGE_TOKEN").map(str::to_owned)).unwrap_or_default(),
+            usage_url: store
+                .get(store::KEY_USAGE_URL)
+                .unwrap_or_else(|| option_env!("FEMTO_USAGE_URL").unwrap_or(DEFAULT_USAGE_URL).to_owned()),
+            usage_token: store.get(store::KEY_USAGE_TOKEN).or_else(|| option_env!("FEMTO_USAGE_TOKEN").map(str::to_owned)).unwrap_or_default(),
         }
     }
 }
 
-pub fn spawn(modem: Modem<'static>, nvs: EspDefaultNvsPartition, cfg: NetConfig, tx: Sender<NetEvent>) -> Result<()> {
+pub fn spawn(modem: Modem<'static>, nvs: EspDefaultNvsPartition, cfg: NetConfig, hub: HubRef, cmds: Receiver<NetCmd>, tx: Sender<NetEvent>) -> Result<()> {
     std::thread::Builder::new().name("net".into()).stack_size(12 * 1024).spawn(move || {
-        if let Err(e) = run(modem, nvs, cfg, &tx) {
+        if let Err(e) = run(modem, nvs, cfg, &hub, &cmds, &tx) {
             warn!("net task: {e:?}");
         }
     })?;
     Ok(())
 }
 
-fn run(modem: Modem<'static>, nvs: EspDefaultNvsPartition, cfg: NetConfig, tx: &Sender<NetEvent>) -> Result<()> {
-    if cfg.ssid.is_empty() {
-        tx.send(NetEvent::NoCredentials).ok();
-        return Ok(());
-    }
+fn run(modem: Modem<'static>, nvs: EspDefaultNvsPartition, cfg: NetConfig, hub: &HubRef, cmds: &Receiver<NetCmd>, tx: &Sender<NetEvent>) -> Result<()> {
     let sysloop = EspSystemEventLoop::take()?;
     let mut wifi = BlockingWifi::wrap(EspWifi::new(modem, sysloop.clone(), Some(nvs))?, sysloop)?;
-    wifi.set_configuration(&Configuration::Client(ClientConfiguration {
-        ssid: cfg.ssid.as_str().try_into().map_err(|_| anyhow!("SSID too long"))?,
-        password: cfg.pass.as_str().try_into().map_err(|_| anyhow!("password too long"))?,
-        auth_method: if cfg.pass.is_empty() { AuthMethod::None } else { AuthMethod::WPA2Personal },
-        ..Default::default()
-    }))?;
-    wifi.start()?;
 
-    let mut attempt = 0;
-    loop {
-        attempt += 1;
-        tx.send(NetEvent::Connecting { attempt: attempt.min(WIFI_ATTEMPTS), ssid: cfg.ssid.clone() }).ok();
-        match wifi.connect().and_then(|_| wifi.wait_netif_up()) {
-            Ok(()) => break,
-            Err(e) => {
-                warn!("Wi-Fi attempt {attempt}: {e}");
-                if attempt == WIFI_ATTEMPTS {
-                    tx.send(NetEvent::Failed).ok();
-                }
-                // Keep retrying in the background (FR-2).
-                std::thread::sleep(Duration::from_secs(if attempt < WIFI_ATTEMPTS { 1 } else { 10 }));
-            }
-        }
+    let joined = !cfg.ssid.is_empty() && join(&mut wifi, &cfg, tx)?;
+    if !joined {
+        return setup_mode(&mut wifi, hub, cmds, tx);
     }
     let ip = wifi.wifi().sta_netif().get_ip_info()?.ip.to_string();
     info!("Wi-Fi up: {ip}");
+    {
+        let mut h = hub.lock().unwrap();
+        h.net = crate::hub::NetInfo { ssid: Some(cfg.ssid.clone()), ip: Some(ip.clone()), connected: true, ..Default::default() };
+    }
     tx.send(NetEvent::Connected { ip }).ok();
 
     let sntp = EspSntp::new_default().ok();
     let mut clock_set = false;
-
     let mut etag: Option<String> = None;
     let mut last_poll: Option<Instant> = None;
     loop {
         if last_poll.is_none_or(|t| t.elapsed() >= POLL) {
             last_poll = Some(Instant::now());
-            if cfg.usage_url.is_empty() {
-                tx.send(NetEvent::UsageError("no usage URL configured".into())).ok();
+            let cfg = current_usage_cfg(hub, &cfg);
+            let err = if cfg.usage_url.is_empty() {
+                Some("no usage URL configured".to_string())
             } else {
                 match fetch_usage(&cfg, etag.as_deref()) {
                     Ok((usage, date)) => {
@@ -140,13 +124,15 @@ fn run(modem: Modem<'static>, nvs: EspDefaultNvsPartition, cfg: NetConfig, tx: &
                             etag = tag;
                             tx.send(NetEvent::Usage(u)).ok();
                         }
+                        None
                     }
                     Err(e) => {
                         warn!("usage: {e:?}");
-                        tx.send(NetEvent::UsageError(e.to_string())).ok();
+                        Some(e.to_string())
                     }
                 }
-            }
+            };
+            hub.lock().unwrap().net.usage_error = err;
         }
         if !clock_set && sntp.as_ref().is_some_and(|s| s.get_sync_status() == SyncStatus::Completed) {
             clock_set = true;
@@ -155,52 +141,114 @@ fn run(modem: Modem<'static>, nvs: EspDefaultNvsPartition, cfg: NetConfig, tx: &
             info!("SNTP synced");
             send_clock(tx, now);
         }
-        if !wifi.is_connected().unwrap_or(false) {
+        let connected = wifi.is_connected().unwrap_or(false);
+        if !connected {
             warn!("Wi-Fi lost, reconnecting");
             wifi.connect().and_then(|_| wifi.wait_netif_up()).ok();
         }
-        std::thread::sleep(Duration::from_secs(1));
+        {
+            let mut h = hub.lock().unwrap();
+            h.net.connected = connected;
+            h.net.rssi = wifi.wifi().driver().get_rssi().ok().map(|r| r as i8);
+        }
+        serve_cmds(&mut wifi, cmds, Duration::from_secs(1));
     }
 }
 
-/// Set the system clock to `unix` (if it looks unset) and report it with
-/// the local UTC offset.
+/// Usage URL/token may change from the web UI without a reboot.
+fn current_usage_cfg(hub: &HubRef, base: &NetConfig) -> NetConfig {
+    let h = hub.lock().unwrap();
+    NetConfig {
+        usage_url: h.store.get(store::KEY_USAGE_URL).unwrap_or_else(|| base.usage_url.clone()),
+        usage_token: h.store.get(store::KEY_USAGE_TOKEN).unwrap_or_default(),
+        ..base.clone()
+    }
+}
+
+/// Up to WIFI_ATTEMPTS visible attempts. `false` → go to setup.
+fn join(wifi: &mut BlockingWifi<EspWifi<'static>>, cfg: &NetConfig, tx: &Sender<NetEvent>) -> Result<bool> {
+    wifi.set_configuration(&Configuration::Client(ClientConfiguration {
+        ssid: cfg.ssid.as_str().try_into().map_err(|_| anyhow!("SSID too long"))?,
+        password: cfg.pass.as_str().try_into().map_err(|_| anyhow!("password too long"))?,
+        auth_method: if cfg.pass.is_empty() { AuthMethod::None } else { AuthMethod::WPA2Personal },
+        ..Default::default()
+    }))?;
+    wifi.start()?;
+    for attempt in 1..=WIFI_ATTEMPTS {
+        tx.send(NetEvent::Connecting { attempt, ssid: cfg.ssid.clone() }).ok();
+        match wifi.connect().and_then(|_| wifi.wait_netif_up()) {
+            Ok(()) => return Ok(true),
+            Err(e) => {
+                warn!("Wi-Fi attempt {attempt}: {e}");
+                std::thread::sleep(Duration::from_secs(1));
+            }
+        }
+    }
+    wifi.stop()?;
+    Ok(false)
+}
+
+/// SoftAP + captive DNS until the web UI finishes setup (which reboots).
+fn setup_mode(wifi: &mut BlockingWifi<EspWifi<'static>>, hub: &HubRef, cmds: &Receiver<NetCmd>, tx: &Sender<NetEvent>) -> Result<()> {
+    let name = hub.lock().unwrap().live.name.to_uppercase();
+    let ssid = format!("{name}-SETUP");
+    let key = crate::hub::random_hex(4).to_uppercase();
+    let key = format!("{}-{}", &key[..4], &key[4..]);
+    wifi.set_configuration(&Configuration::Mixed(
+        ClientConfiguration::default(),
+        AccessPointConfiguration {
+            ssid: ssid.as_str().try_into().map_err(|_| anyhow!("AP SSID too long"))?,
+            password: key.as_str().try_into().unwrap(),
+            auth_method: AuthMethod::WPA2Personal,
+            channel: 6,
+            max_connections: 4,
+            ..Default::default()
+        },
+    ))?;
+    wifi.start()?;
+    info!("setup mode: SoftAP {ssid} / {key}");
+    {
+        let mut h = hub.lock().unwrap();
+        h.net = crate::hub::NetInfo { setup: true, ip: Some("192.168.4.1".into()), ..Default::default() };
+    }
+    tx.send(NetEvent::Setup { ssid, key }).ok();
+    crate::dns::spawn([192, 168, 4, 1]);
+    loop {
+        serve_cmds(wifi, cmds, Duration::from_secs(1));
+    }
+}
+
+fn serve_cmds(wifi: &mut BlockingWifi<EspWifi<'static>>, cmds: &Receiver<NetCmd>, wait: Duration) {
+    let Ok(cmd) = cmds.recv_timeout(wait) else { return };
+    match cmd {
+        NetCmd::Scan(reply) => {
+            let mut nets: Vec<NetworkInfo> = wifi
+                .scan()
+                .unwrap_or_default()
+                .into_iter()
+                .filter(|a| !a.ssid.is_empty())
+                .map(|a| NetworkInfo { ssid: a.ssid.to_string(), rssi: a.signal_strength, secure: a.auth_method.is_some_and(|m| m != AuthMethod::None) })
+                .collect();
+            nets.sort_by_key(|n| std::cmp::Reverse(n.rssi));
+            nets.dedup_by(|a, b| a.ssid == b.ssid);
+            reply.send(nets).ok();
+        }
+    }
+}
+
+/// Set the system clock to `unix` if it looks unset, and report it.
 fn send_clock(tx: &Sender<NetEvent>, unix: i64) {
-    std::env::set_var("TZ", TZ_BERLIN);
     // SAFETY: plain libc time calls.
-    let off = unsafe {
-        sys::tzset();
+    unsafe {
         let mut now: sys::time_t = 0;
         sys::time(&mut now);
         if (now as i64) < 1_700_000_000 {
             let tv = sys::timeval { tv_sec: unix as _, tv_usec: 0 };
             sys::settimeofday(&tv, core::ptr::null());
         }
-        let t = unix as sys::time_t;
-        let mut tm: sys::tm = core::mem::zeroed();
-        sys::localtime_r(&t, &mut tm);
-        // newlib has no tm_gmtoff: derive the offset from the broken-down time.
-        local_offset(unix, &tm)
-    };
-    info!("clock: unix {unix}, UTC{:+}", off / 3600);
-    tx.send(NetEvent::Clock { unix, utc_offset_s: off }).ok();
-}
-
-/// Offset of local time from UTC, from `tm` (local) and `unix`.
-fn local_offset(unix: i64, tm: &sys::tm) -> i32 {
-    let days = days_from_civil(tm.tm_year as i64 + 1900, tm.tm_mon as i64 + 1, tm.tm_mday as i64);
-    let local = days * 86_400 + tm.tm_hour as i64 * 3600 + tm.tm_min as i64 * 60 + tm.tm_sec as i64;
-    (local - unix) as i32
-}
-
-/// Days since 1970-01-01 (Howard Hinnant's algorithm).
-fn days_from_civil(y: i64, m: i64, d: i64) -> i64 {
-    let y = if m <= 2 { y - 1 } else { y };
-    let era = y.div_euclid(400);
-    let yoe = y - era * 400;
-    let doy = (153 * (m + if m > 2 { -3 } else { 9 }) + 2) / 5 + d - 1;
-    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
-    era * 146_097 + doe - 719_468
+    }
+    info!("clock: unix {unix}");
+    tx.send(NetEvent::Clock { unix }).ok();
 }
 
 #[derive(Deserialize)]
@@ -221,9 +269,9 @@ struct WindowDto {
 }
 
 /// Usage (`None` on 304 Not Modified) and the server's `Date` header.
-type Fetched = (Option<(Usage, Option<String>)>, Option<i64>);
+pub type Fetched = (Option<(Usage, Option<String>)>, Option<i64>);
 
-fn fetch_usage(cfg: &NetConfig, etag: Option<&str>) -> Result<Fetched> {
+pub fn fetch_usage(cfg: &NetConfig, etag: Option<&str>) -> Result<Fetched> {
     let conn = EspHttpConnection::new(&HttpConfig {
         crt_bundle_attach: Some(sys::esp_crt_bundle_attach),
         timeout: Some(Duration::from_secs(10)),
@@ -310,4 +358,16 @@ fn parse_http_date(s: &str) -> Option<i64> {
     let mut hms = it.next()?.split(':').map(|v| v.parse::<i64>().ok());
     let (h, mi, se) = (hms.next()??, hms.next()??, hms.next()??);
     Some(days_from_civil(y, m, d) * 86_400 + h * 3600 + mi * 60 + se)
+}
+
+/// GET `url`, return the status code (connection test for the voice backend).
+pub fn probe(url: &str) -> Result<u16> {
+    let conn = EspHttpConnection::new(&HttpConfig {
+        crt_bundle_attach: Some(sys::esp_crt_bundle_attach),
+        timeout: Some(Duration::from_secs(8)),
+        ..Default::default()
+    })?;
+    let mut client = Client::wrap(conn);
+    let resp = client.request(embedded_svc::http::Method::Get, url, &[])?.submit()?;
+    Ok(resp.status())
 }

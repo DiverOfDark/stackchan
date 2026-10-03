@@ -1,0 +1,398 @@
+//! Device HTTP server: the embedded web UI and its JSON API (PRD §6.7).
+//! Contract: `web/src/api.ts`.
+
+use std::sync::mpsc;
+use std::time::{Duration, Instant};
+
+use anyhow::{anyhow, Result};
+use embedded_svc::http::Headers;
+use embedded_svc::io::Write;
+use esp_idf_svc::http::server::{Configuration, EspHttpConnection, EspHttpServer, Request};
+use esp_idf_svc::http::Method;
+use esp_idf_svc::ota::EspOta;
+use femto_core::Settings;
+use log::{info, warn};
+use serde::Deserialize;
+use serde_json::{json, Value};
+
+use crate::hub::{HubRef, NetCmd, Trigger, UiCmd};
+use crate::net::{self, NetConfig};
+use crate::store;
+
+static INDEX_GZ: &[u8] = include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/../web/dist/index.html.gz"));
+
+type Req<'a, 'b> = Request<&'a mut EspHttpConnection<'b>>;
+
+fn read_body(req: &mut Req, limit: usize) -> Result<Vec<u8>> {
+    let len = req.content_len().unwrap_or(0) as usize;
+    if len > limit {
+        return Err(anyhow!("body too large"));
+    }
+    let mut body = vec![0u8; len];
+    let mut n = 0;
+    while n < len {
+        let r = req.read(&mut body[n..]).map_err(|e| anyhow!("{e:?}"))?;
+        if r == 0 {
+            break;
+        }
+        n += r;
+    }
+    body.truncate(n);
+    Ok(body)
+}
+
+fn json_body<T: for<'de> Deserialize<'de>>(req: &mut Req) -> Result<T> {
+    Ok(serde_json::from_slice(&read_body(req, 4096)?)?)
+}
+
+fn reply(req: Req, status: u16, body: &str, ctype: &str) -> Result<()> {
+    let mut r = req.into_response(status, None, &[("Content-Type", ctype), ("Cache-Control", "no-store")])?;
+    r.write_all(body.as_bytes())?;
+    Ok(())
+}
+
+fn ok_json(req: Req, v: &Value) -> Result<()> {
+    reply(req, 200, &v.to_string(), "application/json")
+}
+
+fn no_content(req: Req) -> Result<()> {
+    req.into_status_response(204)?;
+    Ok(())
+}
+
+fn err(req: Req, status: u16, msg: &str) -> Result<()> {
+    reply(req, status, msg, "text/plain")
+}
+
+fn session_cookie(req: &Req) -> Option<String> {
+    req.header("Cookie")?
+        .split(';')
+        .find_map(|c| c.trim().strip_prefix("femto_session=").map(str::to_owned))
+}
+
+/// Setup mode and password-less devices are open; otherwise a session.
+fn authorized(hub: &HubRef, req: &Req) -> bool {
+    let h = hub.lock().unwrap();
+    h.net.setup || !h.store.has_password() || session_cookie(req).is_some_and(|c| h.sessions.contains(&c))
+}
+
+/// Register a route; protected ones answer 401 without a session.
+fn route<F>(server: &mut EspHttpServer<'static>, hub: &HubRef, uri: &str, method: Method, open: bool, f: F) -> Result<()>
+where
+    F: Fn(&HubRef, Req) -> Result<()> + Send + 'static,
+{
+    let hub = hub.clone();
+    server.fn_handler(uri, method, move |req| -> Result<()> {
+        if !open && !authorized(&hub, &req) {
+            return err(req, 401, "login required");
+        }
+        f(&hub, req)
+    })?;
+    Ok(())
+}
+
+fn status_json(hub: &HubRef) -> Value {
+    let h = hub.lock().unwrap();
+    // SAFETY: plain heap getters.
+    let (internal, psram) = unsafe {
+        (
+            esp_idf_svc::sys::heap_caps_get_free_size(esp_idf_svc::sys::MALLOC_CAP_INTERNAL),
+            esp_idf_svc::sys::heap_caps_get_free_size(esp_idf_svc::sys::MALLOC_CAP_SPIRAM),
+        )
+    };
+    let s = &h.snap;
+    json!({
+        "version": env!("CARGO_PKG_VERSION"),
+        "uptime_s": h.started.elapsed().as_secs(),
+        "setup": h.net.setup,
+        "auth_required": !h.net.setup && h.store.has_password(),
+        "mood": s.mood,
+        "screen": s.screen,
+        "panel": s.panel,
+        "wifi": { "ssid": h.net.ssid, "ip": h.net.ip, "rssi": h.net.rssi, "connected": h.net.connected },
+        "usage": {
+            "signed_in": s.signed_in, "session_pct": s.session_pct, "week_pct": s.week_pct,
+            "session_reset_min": s.session_reset_min, "stale": s.stale, "error": h.net.usage_error,
+        },
+        "heap": { "internal_kb": internal / 1024, "psram_kb": psram / 1024 },
+        "fps": s.fps,
+        "dirty": h.live != h.saved,
+    })
+}
+
+fn connections_json(hub: &HubRef) -> Value {
+    let h = hub.lock().unwrap();
+    json!({
+        "usage_url": h.store.get(store::KEY_USAGE_URL).unwrap_or_else(|| net::DEFAULT_USAGE_URL.to_owned()),
+        "usage_token_set": h.store.get(store::KEY_USAGE_TOKEN).is_some(),
+        "voice_url": h.store.get(store::KEY_VOICE_URL).unwrap_or_default(),
+    })
+}
+
+fn apply_settings(hub: &HubRef, patch: Value) -> std::result::Result<Settings, String> {
+    let mut h = hub.lock().unwrap();
+    let mut cur = serde_json::to_value(&h.live).expect("settings serialize");
+    let (Value::Object(cur_map), Value::Object(p)) = (&mut cur, patch) else { return Err("expected a JSON object".into()) };
+    for (k, v) in p {
+        cur_map.insert(k, v);
+    }
+    let next: Settings = serde_json::from_value(cur).map_err(|e| e.to_string())?;
+    next.validate().map_err(|e| format!("{}: {}", e.field, e.reason))?;
+    h.live = next.clone();
+    h.rev += 1;
+    Ok(next)
+}
+
+pub fn start(hub: &HubRef) -> Result<EspHttpServer<'static>> {
+    let mut server = EspHttpServer::new(&Configuration {
+        stack_size: 12 * 1024,
+        max_uri_handlers: 32,
+        uri_match_wildcard: true,
+        ..Default::default()
+    })?;
+
+    route(&mut server, hub, "/api/status", Method::Get, true, |hub, req| ok_json(req, &status_json(hub)))?;
+
+    route(&mut server, hub, "/api/auth/login", Method::Post, true, |hub, mut req| {
+        #[derive(Deserialize)]
+        struct Login {
+            password: String,
+        }
+        let Login { password } = json_body(&mut req)?;
+        let mut h = hub.lock().unwrap();
+        // 5 attempts per minute (PRD §6.7).
+        while h.login_failures.front().is_some_and(|t| t.elapsed() > Duration::from_secs(60)) {
+            h.login_failures.pop_front();
+        }
+        if h.login_failures.len() >= 5 {
+            drop(h);
+            return err(req, 429, "too many attempts; wait a minute");
+        }
+        if !h.store.check_password(&password) {
+            h.login_failures.push_back(Instant::now());
+            drop(h);
+            return err(req, 401, "wrong password");
+        }
+        let token = crate::hub::random_hex(16);
+        h.sessions.push_back(token.clone());
+        if h.sessions.len() > 8 {
+            h.sessions.pop_front();
+        }
+        drop(h);
+        let cookie = format!("femto_session={token}; HttpOnly; SameSite=Strict; Path=/");
+        req.into_response(204, None, &[("Set-Cookie", &cookie)])?;
+        Ok(())
+    })?;
+
+    route(&mut server, hub, "/api/auth/password", Method::Post, false, |hub, mut req| {
+        #[derive(Deserialize)]
+        struct Pw {
+            password: String,
+        }
+        let Pw { password } = json_body(&mut req)?;
+        if !password.is_empty() && password.len() < 6 {
+            return err(req, 422, "at least 6 characters");
+        }
+        let mut h = hub.lock().unwrap();
+        h.store.set_password(&password);
+        h.sessions.clear();
+        drop(h);
+        no_content(req)
+    })?;
+
+    route(&mut server, hub, "/api/settings", Method::Get, false, |hub, req| {
+        let v = serde_json::to_value(&hub.lock().unwrap().live)?;
+        ok_json(req, &v)
+    })?;
+    route(&mut server, hub, "/api/settings", Method::Put, false, |hub, mut req| {
+        let patch: Value = json_body(&mut req)?;
+        match apply_settings(hub, patch) {
+            Ok(s) => ok_json(req, &serde_json::to_value(s)?),
+            Err(e) => err(req, 422, &e),
+        }
+    })?;
+    route(&mut server, hub, "/api/settings/save", Method::Post, false, |hub, req| {
+        let mut h = hub.lock().unwrap();
+        let live = h.live.clone();
+        h.store.save_settings(&live);
+        h.saved = live;
+        drop(h);
+        no_content(req)
+    })?;
+    route(&mut server, hub, "/api/settings/revert", Method::Post, false, |hub, req| {
+        let mut h = hub.lock().unwrap();
+        h.live = h.saved.clone();
+        h.rev += 1;
+        let v = serde_json::to_value(&h.live)?;
+        drop(h);
+        ok_json(req, &v)
+    })?;
+
+    route(&mut server, hub, "/api/wifi/scan", Method::Get, false, |hub, req| {
+        let (tx, rx) = mpsc::channel();
+        hub.lock().unwrap().net_cmd.send(NetCmd::Scan(tx)).ok();
+        let nets = rx.recv_timeout(Duration::from_secs(10)).unwrap_or_default();
+        ok_json(req, &serde_json::to_value(nets)?)
+    })?;
+    route(&mut server, hub, "/api/wifi", Method::Put, false, |hub, mut req| {
+        #[derive(Deserialize)]
+        struct Wifi {
+            ssid: String,
+            password: String,
+        }
+        let w: Wifi = json_body(&mut req)?;
+        if w.ssid.is_empty() || w.ssid.len() > 32 || w.password.len() > 64 {
+            return err(req, 422, "SSID 1–32 bytes, password up to 64");
+        }
+        let mut h = hub.lock().unwrap();
+        h.store.set(store::KEY_SSID, &w.ssid);
+        h.store.set(store::KEY_PASS, &w.password);
+        let setup = h.net.setup;
+        let ui = h.ui.clone();
+        drop(h);
+        // Outside setup, a changed network takes effect by rebooting onto it.
+        if !setup {
+            ui.send(UiCmd::Reboot).ok();
+        }
+        no_content(req)
+    })?;
+
+    route(&mut server, hub, "/api/connections", Method::Get, false, |hub, req| ok_json(req, &connections_json(hub)))?;
+    route(&mut server, hub, "/api/connections", Method::Put, false, |hub, mut req| {
+        #[derive(Deserialize)]
+        struct Patch {
+            usage_url: Option<String>,
+            usage_token: Option<String>,
+            voice_url: Option<String>,
+        }
+        let p: Patch = json_body(&mut req)?;
+        {
+            let mut h = hub.lock().unwrap();
+            if let Some(u) = p.usage_url {
+                h.store.set(store::KEY_USAGE_URL, u.trim().trim_end_matches('/'));
+            }
+            if let Some(t) = p.usage_token {
+                h.store.set(store::KEY_USAGE_TOKEN, t.trim());
+            }
+            if let Some(v) = p.voice_url {
+                h.store.set(store::KEY_VOICE_URL, v.trim().trim_end_matches('/'));
+            }
+        }
+        ok_json(req, &connections_json(hub))
+    })?;
+    route(&mut server, hub, "/api/connections/test", Method::Post, false, |hub, req| {
+        let voice = req.uri().contains("which=voice");
+        let (url, token) = {
+            let h = hub.lock().unwrap();
+            if voice {
+                (h.store.get(store::KEY_VOICE_URL).unwrap_or_default(), String::new())
+            } else {
+                (h.store.get(store::KEY_USAGE_URL).unwrap_or_else(|| net::DEFAULT_USAGE_URL.to_owned()), h.store.get(store::KEY_USAGE_TOKEN).unwrap_or_default())
+            }
+        };
+        if url.is_empty() {
+            return ok_json(req, &json!({ "ok": false, "status": null, "latency_ms": null, "detail": "not configured" }));
+        }
+        let t0 = Instant::now();
+        let v = if voice {
+            match net::probe(&format!("{url}/health")) {
+                Ok(code) => json!({ "ok": code < 400, "status": code, "latency_ms": t0.elapsed().as_millis() as u64, "detail": if code < 400 { "reachable" } else { "unexpected status" } }),
+                Err(e) => json!({ "ok": false, "status": null, "latency_ms": null, "detail": e.to_string() }),
+            }
+        } else {
+            let cfg = NetConfig { usage_url: url, usage_token: token, ..Default::default() };
+            match net::fetch_usage(&cfg, None) {
+                Ok((Some((u, _)), _)) => {
+                    let detail = if u.signed_in { format!("signed in · session {} %", u.session_pct) } else { "server up, no Claude account signed in".into() };
+                    json!({ "ok": u.signed_in, "status": 200, "latency_ms": t0.elapsed().as_millis() as u64, "detail": detail })
+                }
+                Ok((None, _)) => json!({ "ok": true, "status": 304, "latency_ms": t0.elapsed().as_millis() as u64, "detail": "unchanged" }),
+                Err(e) => json!({ "ok": false, "status": null, "latency_ms": null, "detail": e.to_string() }),
+            }
+        };
+        ok_json(req, &v)
+    })?;
+
+    route(&mut server, hub, "/api/test", Method::Post, false, |hub, mut req| {
+        let t: Trigger = json_body(&mut req)?;
+        hub.lock().unwrap().ui.send(UiCmd::Trigger(t)).ok();
+        no_content(req)
+    })?;
+    route(&mut server, hub, "/api/reboot", Method::Post, false, |hub, req| {
+        hub.lock().unwrap().ui.send(UiCmd::Reboot).ok();
+        no_content(req)
+    })?;
+    route(&mut server, hub, "/api/factory-reset", Method::Post, false, |hub, mut req| {
+        let body: Value = json_body(&mut req)?;
+        if body.get("confirm").and_then(Value::as_str) != Some("WIPE") {
+            return err(req, 422, "confirm with {\"confirm\":\"WIPE\"}");
+        }
+        hub.lock().unwrap().ui.send(UiCmd::FactoryReset).ok();
+        no_content(req)
+    })?;
+    route(&mut server, hub, "/api/setup/finish", Method::Post, false, |hub, req| {
+        let mut h = hub.lock().unwrap();
+        let live = h.live.clone();
+        h.store.save_settings(&live);
+        h.saved = live;
+        h.ui.send(UiCmd::Reboot).ok();
+        drop(h);
+        no_content(req)
+    })?;
+
+    route(&mut server, hub, "/api/ota", Method::Post, false, |hub, mut req| {
+        let len = req.content_len().unwrap_or(0) as usize;
+        if len < 64 * 1024 {
+            return err(req, 422, "that is not a firmware image");
+        }
+        info!("OTA: receiving {len} bytes");
+        let mut ota = EspOta::new()?;
+        let mut update = ota.initiate_update()?;
+        let mut buf = vec![0u8; 4096];
+        let mut got = 0;
+        while got < len {
+            let n = req.read(&mut buf).map_err(|e| anyhow!("{e:?}"))?;
+            if n == 0 {
+                break;
+            }
+            update.write(&buf[..n])?;
+            got += n;
+        }
+        if got != len {
+            update.abort()?;
+            return err(req, 400, "upload cut short");
+        }
+        update.complete()?;
+        info!("OTA: image written, rebooting");
+        hub.lock().unwrap().ui.send(UiCmd::Reboot).ok();
+        no_content(req)
+    })?;
+
+    // Everything else: the SPA. In setup mode, foreign hosts (captive-portal
+    // probes) are redirected to the portal.
+    let hub2 = hub.clone();
+    server.fn_handler("/*", Method::Get, move |req| -> Result<()> {
+        let setup = hub2.lock().unwrap().net.setup;
+        let host = req.header("Host").unwrap_or("");
+        if setup && !host.starts_with("192.168.4.1") {
+            req.into_response(302, None, &[("Location", "http://192.168.4.1/#/setup")])?;
+            return Ok(());
+        }
+        if req.uri().starts_with("/api/") {
+            return err(req, 404, "no such endpoint");
+        }
+        let mut r = req.into_response(
+            200,
+            None,
+            &[("Content-Type", "text/html; charset=utf-8"), ("Content-Encoding", "gzip"), ("Cache-Control", "no-cache")],
+        )?;
+        r.write_all(INDEX_GZ)?;
+        Ok(())
+    })?;
+
+    if INDEX_GZ.len() < 1024 {
+        warn!("embedded web UI looks empty");
+    }
+    info!("web server up ({} KB UI)", INDEX_GZ.len() / 1024);
+    Ok(server)
+}

@@ -5,6 +5,11 @@
 //! Wi-Fi, clock and live usage come from the `net` task.
 
 mod board;
+mod dns;
+mod hub;
+mod store;
+mod tz;
+mod web;
 mod lcd;
 mod motion;
 mod net;
@@ -31,16 +36,34 @@ fn main() -> anyhow::Result<()> {
     let mut board = board::Board::init(p.i2c1, p.pins.gpio12, p.pins.gpio11)?;
     report_memory();
 
-    let cfg = Settings::default();
+    // TCP/IP stack up before the web server and the Wi-Fi task race for it.
+    sys::esp!(unsafe { sys::esp_netif_init() })?;
+    let store = store::Store::open(nvs.clone())?;
+    let (ui_tx, ui_rx) = std::sync::mpsc::channel();
+    let (net_cmd_tx, net_cmd_rx) = std::sync::mpsc::channel();
+    let hub = hub::Hub::new(store, ui_tx, net_cmd_tx);
+    let mut cfg = hub.lock().unwrap().live.clone();
+    let mut cfg_rev = 0;
     let mut engine = Engine::new();
     engine.apply_settings(&cfg);
     engine.set_screen(Screen::Boot);
     let (net_tx, net_rx) = std::sync::mpsc::channel();
-    let net_cfg = net::NetConfig::load(&nvs);
+    let net_cfg = net::NetConfig::load(&hub.lock().unwrap().store, &nvs);
     info!("Wi-Fi '{}', usage {}", net_cfg.ssid, if net_cfg.usage_url.is_empty() { "<unset>" } else { &net_cfg.usage_url });
-    net::spawn(p.modem, nvs.clone(), net_cfg, net_tx)?;
+    net::spawn(p.modem, nvs.clone(), net_cfg, hub.clone(), net_cmd_rx, net_tx)?;
+    let _web = web::start(&hub)?;
+    let _mdns = esp_idf_svc::mdns::EspMdns::take().and_then(|mut m| {
+        m.set_hostname("femto")?;
+        m.add_service(Some("Femto"), "_http", "_tcp", 80, &[("path", "/")])?;
+        Ok(m)
+    });
+    if let Err(e) = &_mdns {
+        warn!("mDNS: {e}");
+    }
+    let mut ota_confirmed = false;
     // Screen the network wants once the boot animation has played.
     let mut after_boot: Option<Screen> = None;
+    let mut wall_unix: Option<i64> = None;
     let mut booted = false;
 
     let mut renderer = Renderer::new();
@@ -90,11 +113,14 @@ fn main() -> anyhow::Result<()> {
     let mut spare = Some(Canvas::new());
 
     let mut last = Instant::now();
+    let boot_at = last;
     let mut last_frame = None;
     let mut touching = false;
     let mut patting = false;
     let mut wipe_deadline: Option<Instant> = None;
     let (mut render_us, mut push_us, mut frames) = (0u64, 0u64, 0u32);
+    let mut fps = 0.0f32;
+    let mut last_report = Instant::now();
 
     loop {
         let start = Instant::now();
@@ -140,18 +166,55 @@ fn main() -> anyhow::Result<()> {
             }
         }
 
+        // Settings changed from the web UI: apply live.
+        {
+            let h = hub.lock().unwrap();
+            if h.rev != cfg_rev {
+                cfg_rev = h.rev;
+                let tz_changed = h.live.tz != cfg.tz;
+                cfg = h.live.clone();
+                drop(h);
+                engine.apply_settings(&cfg);
+                board.pmic.set_brightness(cfg.brightness.unwrap_or(60)).ok();
+                if tz_changed {
+                    if let Some(u) = engine.unix_now().or(wall_unix) {
+                        engine.set_wall_clock(u, tz::offset(&cfg.tz, u));
+                    }
+                }
+            }
+        }
+        while let Ok(cmd) = ui_rx.try_recv() {
+            info!("ui: {cmd:?}");
+            match cmd {
+                hub::UiCmd::Trigger(t) => trigger(&mut engine, &cfg, t),
+                hub::UiCmd::Reboot => {
+                    std::thread::sleep(Duration::from_millis(500));
+                    unsafe { sys::esp_restart() };
+                }
+                hub::UiCmd::FactoryReset => factory_wipe(),
+            }
+        }
+        if !ota_confirmed && start.duration_since(boot_at) > Duration::from_secs(60) {
+            // Healthy for a minute: keep this image (PRD FR-25 rollback).
+            ota_confirmed = true;
+            match esp_idf_svc::ota::EspOta::new().and_then(|mut o| o.mark_running_slot_valid()) {
+                Ok(()) => info!("firmware marked valid"),
+                Err(e) => warn!("mark valid: {e}"),
+            }
+        }
+
         // Network → engine.
         while let Ok(ev) = net_rx.try_recv() {
             info!("net: {ev:?}");
             match ev {
                 net::NetEvent::Connecting { attempt, ssid } => after_boot = Some(Screen::Wifi { attempt, ssid }),
                 net::NetEvent::Connected { .. } => after_boot = Some(Screen::Face),
-                net::NetEvent::NoCredentials | net::NetEvent::Failed => {
-                    after_boot = Some(Screen::Setup { ap_ssid: format!("{}-SETUP", cfg.name.to_uppercase()), ap_key: "----".into(), ip: "192.168.4.1".into() })
+                net::NetEvent::Setup { ssid, key } => after_boot = Some(Screen::Setup { ap_ssid: ssid, ap_key: key, ip: "192.168.4.1".into() }),
+                net::NetEvent::Clock { unix } => {
+                    wall_unix = Some(unix);
+                    engine.set_wall_clock(unix, tz::offset(&cfg.tz, unix));
                 }
-                net::NetEvent::Clock { unix, utc_offset_s } => engine.set_wall_clock(unix, utc_offset_s),
                 net::NetEvent::Usage(u) => engine.set_usage(u),
-                net::NetEvent::UsageError(_) => {}
             }
         }
         if !booted && engine.frame().progress >= 1.0 {
@@ -186,6 +249,20 @@ fn main() -> anyhow::Result<()> {
         renderer.render(&mut canvas, &frame, &cfg);
         last_frame = Some(frame);
         render_us += t0.elapsed().as_micros() as u64;
+        {
+            let fr = last_frame.as_ref().unwrap();
+            let mut h = hub.lock().unwrap();
+            let s = &mut h.snap;
+            s.mood = fr.em.label().to_string();
+            s.screen = screen_name(&fr.screen).to_string();
+            s.panel = format!("{:?}", board.panel);
+            s.signed_in = fr.usage.signed_in;
+            s.session_pct = fr.usage.session_pct;
+            s.week_pct = fr.usage.week_pct;
+            s.session_reset_min = fr.usage.session_reset_min;
+            s.stale = fr.usage.stale;
+            s.fps = fps;
+        }
         // Hand the frame to the LCD thread; continue on the other buffer.
         let next = match spare.take() {
             Some(c) => c,
@@ -203,6 +280,8 @@ fn main() -> anyhow::Result<()> {
             info!("render {:.1} ms (bg {bg} face {face} chrome {chrome} overlay {ov} us), push {:.1} ms, mood {:?}", render_us as f32 / 10_000.0, push_us as f32 / 10_000.0, engine.resolve_emotion());
             let prof: Vec<u32> = femto_render::scene::PROF.iter().map(|a| a.swap(0, std::sync::atomic::Ordering::Relaxed) / 10).collect();
             info!("face stages us: {prof:?}");
+            fps = frames as f32 * 1000.0 / last_report.elapsed().as_millis().max(1) as f32;
+            last_report = Instant::now();
             report_memory();
             (render_us, push_us, frames) = (0, 0, 0);
         }
@@ -217,11 +296,74 @@ fn idle_sleep(start: Instant) {
     std::thread::sleep(rest.max(Duration::from_millis(1)));
 }
 
+/// Wipe Wi-Fi, tokens, settings and password (namespaces `femto` and the
+/// stock `wifi`), keep M5's servo calibration, and reboot into setup.
 fn factory_wipe() -> ! {
-    // SAFETY: erases the default NVS partition, then restarts.
-    unsafe {
-        sys::nvs_flash_erase();
-        sys::esp_restart()
+    for ns in [c"femto", c"wifi"] {
+        // SAFETY: NVS handle opened, erased, committed and closed here.
+        unsafe {
+            let mut h: sys::nvs_handle_t = 0;
+            if sys::nvs_open(ns.as_ptr(), sys::nvs_open_mode_t_NVS_READWRITE, &mut h) == sys::ESP_OK {
+                sys::nvs_erase_all(h);
+                sys::nvs_commit(h);
+                sys::nvs_close(h);
+            }
+        }
+    }
+    unsafe { sys::esp_restart() }
+}
+
+fn screen_name(s: &Screen) -> &'static str {
+    match s {
+        Screen::Boot => "boot",
+        Screen::Wifi { .. } => "wifi",
+        Screen::Setup { .. } => "setup",
+        Screen::Face => "face",
+        Screen::Ledger => "ledger",
+        Screen::Listening => "listening",
+        Screen::Thinking => "thinking",
+        Screen::Speaking => "speaking",
+        Screen::Wipe { .. } => "wipe",
+    }
+}
+
+/// Test-panel triggers from the web UI.
+fn trigger(engine: &mut Engine, cfg: &Settings, t: hub::Trigger) {
+    use femto_core::{Emotion, VoiceState};
+    if let Some(demo) = t.demo.as_deref() {
+        match demo {
+            "ask" => engine.run_demo(cfg),
+            "power-on" => engine.run_power_on_demo(false, cfg),
+            "first-run" => engine.run_power_on_demo(true, cfg),
+            _ => {}
+        }
+    }
+    if let Some(screen) = t.screen.as_deref() {
+        engine.cancel_demo();
+        match screen {
+            "boot" => engine.set_screen(Screen::Boot),
+            "wifi" => engine.set_screen(Screen::Wifi { attempt: 2, ssid: "HOME-WIFI".into() }),
+            "setup" => engine.set_screen(Screen::Setup { ap_ssid: format!("{}-SETUP", cfg.name.to_uppercase()), ap_key: "7F3A-9C21".into(), ip: "192.168.4.1".into() }),
+            "ledger" => engine.set_screen(Screen::Ledger),
+            "listening" => engine.voice(VoiceState::Listening(format!("{}{}", cfg.name, femto_core::text::QUESTION_SUFFIX))),
+            "thinking" => engine.voice(VoiceState::Thinking),
+            "speaking" => engine.voice(VoiceState::Speaking(format!("Reset soon, {}. Try not to waste it.", cfg.honorific.as_str()))),
+            _ => engine.set_screen(Screen::Face),
+        }
+    }
+    if let Some(mood) = t.mood.as_deref() {
+        let em = match mood {
+            "neutral" => Some(Emotion::Neutral),
+            "happy" => Some(Emotion::Happy),
+            "excited" => Some(Emotion::Excited),
+            "curious" => Some(Emotion::Curious),
+            "surprised" => Some(Emotion::Surprised),
+            "sleepy" => Some(Emotion::Sleepy),
+            "worried" => Some(Emotion::Worried),
+            _ => None,
+        };
+        engine.set_screen(Screen::Face);
+        engine.set_override(em);
     }
 }
 
