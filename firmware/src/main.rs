@@ -2,17 +2,18 @@
 //!
 //! M0/M1 on hardware: board bring-up, the real engine + renderer on the LCD,
 //! touch → Ledger, power key → factory-wipe confirm, head pat → Amused.
-//! Usage is mocked until the network milestone (M2).
+//! Wi-Fi, clock and live usage come from the `net` task.
 
 mod board;
 mod lcd;
 mod motion;
+mod net;
 
 use std::time::{Duration, Instant};
 
 use esp_idf_svc::hal::peripherals::Peripherals;
 use esp_idf_svc::sys;
-use femto_core::{Engine, Event, Screen, Settings, Usage};
+use femto_core::{Engine, Event, Screen, Settings};
 use femto_render::{Canvas, Renderer};
 use log::{info, warn};
 
@@ -33,19 +34,14 @@ fn main() -> anyhow::Result<()> {
     let cfg = Settings::default();
     let mut engine = Engine::new();
     engine.apply_settings(&cfg);
-    // No clock yet (SNTP comes with Wi-Fi); anchor at a fixed instant.
-    engine.set_wall_clock(1_791_400_000, 2 * 3600);
-    engine.set_usage(Usage {
-        signed_in: true,
-        ok: true,
-        fetched_at: Some(1_791_400_000),
-        session_pct: 38,
-        session_resets_at: Some(1_791_400_000 + 134 * 60),
-        week_pct: 61,
-        week_resets_at: Some(1_791_400_000 + 5 * 86_400),
-        ..Default::default()
-    });
-    engine.run_power_on_demo(false, &cfg);
+    engine.set_screen(Screen::Boot);
+    let (net_tx, net_rx) = std::sync::mpsc::channel();
+    let net_cfg = net::NetConfig::load(&nvs);
+    info!("Wi-Fi '{}', usage {}", net_cfg.ssid, if net_cfg.usage_url.is_empty() { "<unset>" } else { &net_cfg.usage_url });
+    net::spawn(p.modem, nvs.clone(), net_cfg, net_tx)?;
+    // Screen the network wants once the boot animation has played.
+    let mut after_boot: Option<Screen> = None;
+    let mut booted = false;
 
     let mut renderer = Renderer::new();
     let mut canvas = Canvas::new();
@@ -141,6 +137,35 @@ fn main() -> anyhow::Result<()> {
                 engine.set_screen(Screen::Face);
             } else {
                 engine.set_screen(Screen::Wipe { secs_left: left.as_secs() as u8 + 1 });
+            }
+        }
+
+        // Network → engine.
+        while let Ok(ev) = net_rx.try_recv() {
+            info!("net: {ev:?}");
+            match ev {
+                net::NetEvent::Connecting { attempt, ssid } => after_boot = Some(Screen::Wifi { attempt, ssid }),
+                net::NetEvent::Connected { .. } => after_boot = Some(Screen::Face),
+                net::NetEvent::NoCredentials | net::NetEvent::Failed => {
+                    after_boot = Some(Screen::Setup { ap_ssid: format!("{}-SETUP", cfg.name.to_uppercase()), ap_key: "----".into(), ip: "192.168.4.1".into() })
+                }
+                net::NetEvent::Clock { unix, utc_offset_s } => engine.set_wall_clock(unix, utc_offset_s),
+                net::NetEvent::Usage(u) => engine.set_usage(u),
+                net::NetEvent::UsageError(_) => {}
+            }
+        }
+        if !booted && engine.frame().progress >= 1.0 {
+            booted = true;
+        }
+        if booted {
+            if let Some(s) = after_boot.take() {
+                let to_face = s == Screen::Face && !matches!(engine.screen(), Screen::Face | Screen::Ledger);
+                if !matches!(engine.screen(), Screen::Face | Screen::Ledger) || s != Screen::Face {
+                    engine.set_screen(s);
+                }
+                if to_face {
+                    engine.event(Event::BootDone);
+                }
             }
         }
 
