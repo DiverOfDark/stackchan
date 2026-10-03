@@ -121,7 +121,7 @@ Each screen except S1–S3 has the **status band**: SESSION % and WEEK %, with 1
 | Top touch: double-tap | push-to-talk, the same as the wake word |
 | Wake word "Эй, Фемто" | start a voice turn |
 | Power button: long press (AXP2101 long-press IRQ, ~2.5 s) | opens the **Factory wipe** confirm screen: "WIPE ME? PRESS AGAIN." plus a 5 s countdown. A short press within 5 s wipes Wi-Fi, tokens, settings and calibration, then reboots into S3. A tap on the screen or the timeout cancels. |
-| Power button: short press | screen + mic **privacy mute** toggle (backlight off, wake word off, servos centred). The status band shows `MUTED` |
+| Power button: short press | no action, except confirming a wipe. There is no privacy mode. |
 | Power button: hold ≥ 10 s | hardware power-off, handled by the AXP2101. The firmware sets the off-threshold to 10 s, so it never collides with the wipe gesture |
 | Face appears / moves | Scanning, then follow (eyes plus servos) |
 
@@ -440,7 +440,7 @@ nvs 24 KB · otadata 8 KB · phy 4 KB · app0 4 MB · app1 4 MB (web UI ≤ 80 K
 | M-1 | Stock backup | Full 16 MB flash dump of the factory XiaoZhi firmware, verified restore (§12, D6) | 0.5 day |
 | M0 | Toolchain + bring-up | Cargo workspace, espup/espflash, esp-idf-svc on pinned IDF 5.5. **All C components linking** (libpeer, wake_word, esp32-camera, esp-dl, esp_codec_dev). esp_lcd framebuffer push (C/E detect), touch, AXP2101 power key + AW9523, Rust drivers for SCS0009 / PY32 / Si12T, audio loopback, one camera frame | 2 wk |
 | M1 | Face engine | femto-core + femto-render: all moods, easing, blink/glitch/fx, status band, Ledger, eyewear/corp/accent variants, demo mode, simulator, golden tests | 2 wk |
-| M2 | Connected | SoftAP + captive DNS (S2/S3), NVS settings, SNTP, `/api/stackchan/usage` in trmnl-cyberpunk + device poller, device `/api` + WS, OTA, power-button wipe/mute | 1 wk |
+| M2 | Connected | SoftAP + captive DNS (S2/S3), NVS settings, SNTP, `/api/stackchan/usage` in trmnl-cyberpunk + device poller, device `/api` + WS, OTA, power-button wipe | 1 wk |
 | M2b | Web UI | Svelte SPA: setup wizard, settings, connections, motion calibration, test panel, system/logs/OTA; mock API; embedded build | 1 wk |
 | M3 | Presence | ESP-DL face-detect shim → gaze + servo follow, Standby, Scanning, head pat, IMU pick-up → Alarmed | 1.5 wk |
 | M4 | Voice | wake_word + libpeer via FFI, data-channel events + captions (incl. Cyrillic), bilingual persona + usage injection in pipecat, mouth sync | 2 wk |
@@ -461,8 +461,7 @@ Total ≈ 10 weeks.
 | D6 | Stock firmware | **Keep it restorable.** Before the first flash: `espflash read-flash 0 0x1000000 backup/stackchan-stock-<mac>.bin` (or `esptool.py read_flash`), plus a SHA-256. The image is stored outside git (`backup/` is gitignored, because it may contain device keys or credentials). `tools/restore-stock.sh` writes it back with `espflash write-bin 0x0`. M5Burner's stock image is the fallback. |
 
 ### Open questions
-1. **Privacy mute on short press:** OK as proposed (screen off, mic off, servos centred), or should short press do something else?
-2. **LCD revision on your unit:** C or E? Not blocking, since the firmware detects it, but it helps M0 planning.
+1. **LCD revision on your unit:** C or E? Not blocking, since the firmware detects it, but it helps M0 planning.
 
 ## Appendix A: design constants
 - **Palette** (OKLCH from the design → RGB565 at build time):
