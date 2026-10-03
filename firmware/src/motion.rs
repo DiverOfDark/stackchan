@@ -25,6 +25,12 @@ pub const PITCH_MIN: f32 = 0.0;
 pub const PITCH_MAX: f32 = 60.0;
 /// Torque off after resting this long (no buzz, less power).
 const REST_TORQUE_OFF: Duration = Duration::from_secs(10);
+/// Servo feedback is checked this often (UART time is shared with moves).
+const FEEDBACK_EVERY: u32 = 5;
+/// Head this far from where it's driven, twice in a row = a hand holds it.
+const GRAB_DEG: f32 = 12.0;
+/// A held head that stops moving for this long has been let go.
+const RELEASE_AFTER: Duration = Duration::from_secs(2);
 
 /// What the main loop wants: degrees, yaw + = robot's right, pitch + = up.
 #[derive(Clone, Copy, Debug, Default)]
@@ -52,12 +58,23 @@ pub struct Motion {
     pub rezero: bool,
     /// Last time the head was moving (the camera sees its own motion).
     pub moved_at: Option<Instant>,
+    /// Set by the UI loop from the IMU: the robot is being carried or
+    /// bumped, so hold the pose until then.
+    pub freeze_until: Option<Instant>,
+    /// A hand is holding the head: torque is off so it can be posed, and
+    /// back on once it's let go.
+    pub grabbed: bool,
 }
 
 impl Motion {
     /// Head still long enough that frame differences mean the scene moved.
     pub fn still_for(&self, d: Duration) -> bool {
-        self.moved_at.is_none_or(|t| t.elapsed() > d)
+        !self.grabbed && self.moved_at.is_none_or(|t| t.elapsed() > d)
+    }
+
+    /// Being handled: the head isn't following anything right now.
+    pub fn handled(&self) -> bool {
+        self.grabbed || self.freeze_until.is_some_and(|t| Instant::now() < t)
     }
 }
 
@@ -153,6 +170,8 @@ pub fn start(uart: UART1<'static>, tx: Gpio6<'static>, rx: Gpio7<'static>, nvs: 
         zero: (yaw.zero, pitch.zero),
         rezero: false,
         moved_at: None,
+        freeze_until: None,
+        grabbed: false,
     }));
     let shared = target.clone();
     crate::psram_stack_thread("motion", 6144, move || {
@@ -160,8 +179,16 @@ pub fn start(uart: UART1<'static>, tx: Gpio6<'static>, rx: Gpio7<'static>, nvs: 
         let mut resting_since: Option<Instant> = None;
         let mut errors = 0u32;
         let started = Instant::now();
+        let mut tick = 0u32;
+        // Grab detection: strikes above GRAB_DEG; while grabbed, the last
+        // read pose and since when it hasn't changed.
+        let mut strikes = 0u8;
+        let mut grabbed = false;
+        let mut held_pose = (0.0f32, 0.0f32);
+        let mut held_still_since = Instant::now();
         loop {
-            let (mut t, allowed) = {
+            tick = tick.wrapping_add(1);
+            let (mut t, allowed, frozen) = {
                 let mut m = shared.lock().unwrap();
                 if std::mem::take(&mut m.rezero) {
                     // Current pose becomes the new centre (raw zero), so the
@@ -195,13 +222,56 @@ pub fn start(uart: UART1<'static>, tx: Gpio6<'static>, rx: Gpio7<'static>, nvs: 
                     }
                 }
                 m.pos = (yaw.pos, pitch.pos);
-                if yaw.vel.abs() > 0.5 || pitch.vel.abs() > 0.5 {
+                if yaw.vel.abs() > 0.5 || pitch.vel.abs() > 0.5 || grabbed {
                     m.moved_at = Some(now);
                 }
-                (t, m.torque_allowed)
+                m.grabbed = grabbed;
+                let frozen = m.freeze_until.is_some_and(|u| now < u);
+                (t, m.torque_allowed, frozen)
             };
+            // Servo feedback: is a hand forcing the head, or has it let go?
+            if torque || grabbed {
+                if tick % FEEDBACK_EVERY == 0 {
+                    let read = |bus: &mut ScsBus<Uart>, a: &Axis| bus.read_pos(a.id).ok().map(|raw| scs::decidegrees_from_raw(a.zero, raw) as f32 / 10.0);
+                    if let (Some(ay), Some(ap)) = (read(&mut bus, &yaw), read(&mut bus, &pitch)) {
+                        if grabbed {
+                            // Limp: the spring starts from wherever the hand leaves it.
+                            if (ay - held_pose.0).abs() > 1.0 || (ap - held_pose.1).abs() > 1.0 {
+                                held_still_since = Instant::now();
+                            }
+                            held_pose = (ay, ap);
+                            yaw.pos = ay;
+                            pitch.pos = ap;
+                            yaw.vel = 0.0;
+                            pitch.vel = 0.0;
+                            if held_still_since.elapsed() > RELEASE_AFTER {
+                                info!("head let go at yaw {ay:.1}° pitch {ap:.1}°");
+                                grabbed = false;
+                                strikes = 0;
+                            }
+                        } else if (ay - yaw.pos).abs() > GRAB_DEG || (ap - pitch.pos).abs() > GRAB_DEG {
+                            strikes += 1;
+                            if strikes >= 2 {
+                                info!("head grabbed (driven {:.1}°/{:.1}°, at {ay:.1}°/{ap:.1}°): going limp", yaw.pos, pitch.pos);
+                                grabbed = true;
+                                held_pose = (ay, ap);
+                                held_still_since = Instant::now();
+                            }
+                        } else {
+                            strikes = 0;
+                        }
+                    }
+                }
+            }
+            if frozen || grabbed {
+                // Hold the pose: no spring, no boot stretch.
+                t = Target { yaw: yaw.pos, pitch: pitch.pos, may_rest: false };
+                yaw.vel = 0.0;
+                pitch.vel = 0.0;
+            }
             // Boot stretch: glance left, right, then hand over to the engine.
             match started.elapsed().as_millis() {
+                _ if frozen || grabbed => {}
                 0..700 => t = Target { yaw: -20.0, pitch: PITCH_NEUTRAL + 8.0, may_rest: false },
                 700..1400 => t = Target { yaw: 20.0, pitch: PITCH_NEUTRAL + 8.0, may_rest: false },
                 _ => {}
@@ -216,9 +286,14 @@ pub fn start(uart: UART1<'static>, tx: Gpio6<'static>, rx: Gpio7<'static>, nvs: 
                 (true, s) => s,
                 (false, _) => None,
             };
-            let rest = !allowed || resting_since.is_some_and(|s| s.elapsed() > REST_TORQUE_OFF);
+            let rest = !allowed || grabbed || resting_since.is_some_and(|s| s.elapsed() > REST_TORQUE_OFF);
             if rest == torque {
                 for axis in [&yaw, &pitch] {
+                    // The goal register may be stale (limp, re-zero): aim at
+                    // the current pose before torque comes back.
+                    if !rest {
+                        bus.write_pos(axis.id, axis.raw(), 0, 0).ok();
+                    }
                     if let Err(e) = bus.torque(axis.id, !rest) {
                         errors += 1;
                         if errors % 100 == 1 {

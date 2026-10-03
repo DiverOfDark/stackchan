@@ -3,6 +3,7 @@
 //! the host with a mock bus.
 
 pub mod aw9523;
+pub mod bmi270;
 pub mod axp2101;
 pub mod ft6336;
 pub mod py32;

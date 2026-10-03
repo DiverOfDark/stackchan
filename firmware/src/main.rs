@@ -126,6 +126,7 @@ fn main() -> anyhow::Result<()> {
     let mut last_frame = None;
     let mut touching = false;
     let mut patting = false;
+    let mut was_handled = false;
     let mut wipe_deadline: Option<Instant> = None;
     let (mut render_us, mut push_us, mut frames) = (0u64, 0u64, 0u32);
     let mut fps = 0.0f32;
@@ -163,6 +164,28 @@ fn main() -> anyhow::Result<()> {
                 }
             }
             patting = pat;
+        }
+
+        // Carried or bumped (IMU in the head): freeze the servos. The head
+        // also turns itself, so a still head gets the strict thresholds.
+        if let (Some(imu), Some(head)) = (board.imu.as_mut(), &head) {
+            if let Ok(s) = imu.read() {
+                let mut m = head.lock().unwrap();
+                let (jolt, spin) = if m.still_for(Duration::from_millis(400)) { (0.12, 20.0) } else { (0.4, 200.0) };
+                if (s.acc_g() - 1.0).abs() > jolt || s.gyr_dps() > spin {
+                    if !m.handled() {
+                        info!("carried: |a| {:.2} g, ω {:.0} °/s; head frozen", s.acc_g(), s.gyr_dps());
+                    }
+                    m.freeze_until = Some(Instant::now() + HANDLED_HOLD);
+                }
+            }
+        }
+        if let Some(head) = &head {
+            let handled = head.lock().unwrap().handled();
+            if handled && !was_handled {
+                engine.event(Event::PickedUp);
+            }
+            was_handled = handled;
         }
 
         // Power key: long press arms the wipe, a short press confirms it.
@@ -315,13 +338,14 @@ fn main() -> anyhow::Result<()> {
             }
         }
         if let Some(head) = &head {
-            // During a voice turn the head holds still: servo noise next to
-            // the mics hurts recognition, and it reads as fidgeting. The eyes
-            // keep following.
+            // The head holds still during a voice turn (servo noise next to
+            // the mics hurts recognition, and it reads as fidgeting) and
+            // while carried or held. The eyes keep following.
             let in_turn = engine.screen().is_voice();
             let mut m = head.lock().unwrap();
+            let handled = m.handled();
             let t = &mut m.target;
-            if in_turn {
+            if in_turn || handled {
                 tracker.hold();
             } else {
                 let (pan, tilt) = tracker.head(&engine, cfg.follow);
@@ -425,6 +449,9 @@ fn factory_wipe() -> ! {
     }
     unsafe { sys::esp_restart() }
 }
+
+/// Head stays frozen this long after the last sign of being carried.
+const HANDLED_HOLD: Duration = Duration::from_secs(3);
 
 /// Fraction of the frame that must change to count as motion.
 const MOTION_MIN: f32 = 0.04;

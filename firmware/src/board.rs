@@ -12,6 +12,7 @@ use esp_idf_svc::hal::gpio::{Gpio11, Gpio12};
 use esp_idf_svc::hal::units::Hertz;
 use femto_drivers::aw9523::Aw9523;
 use femto_drivers::axp2101::Axp2101;
+use femto_drivers::bmi270::Bmi270;
 use femto_drivers::ft6336::{Ft6336, Panel};
 use femto_drivers::py32::Py32;
 use femto_drivers::si12t::Si12t;
@@ -25,6 +26,8 @@ pub struct Board {
     pub pmic: Axp2101<Bus>,
     pub touch: Ft6336<Bus>,
     pub head: Option<Si12t<Bus>>,
+    /// CoreS3 IMU (in the head): notices the robot being carried.
+    pub imu: Option<Bmi270<Bus>>,
     /// Body expander, once it answered (see `body_probe`).
     pub body: Option<Py32<Bus>>,
     /// Not found at boot: keep probing (a soft reset doesn't reset the body,
@@ -97,6 +100,17 @@ impl Board {
             }
         };
 
+        let imu = match Bmi270::init(dev(), FreeRtos::delay_ms) {
+            Ok(imu) => {
+                info!("BMI270 IMU up");
+                Some(imu)
+            }
+            Err((_, e)) => {
+                warn!("BMI270 IMU: {e:?}");
+                None
+            }
+        };
+
         // The body expander boots slowly; give it 1.2 s like the BSP does,
         // then the UI loop keeps probing in the background.
         let mut body = Py32::new(dev());
@@ -119,7 +133,7 @@ impl Board {
             }
         };
 
-        Ok(Board { pmic, touch, head, body, body_probe, lcd, panel })
+        Ok(Board { pmic, touch, head, imu, body, body_probe, lcd, panel })
     }
 }
 
