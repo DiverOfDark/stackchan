@@ -6,7 +6,17 @@
 #include "human_face_detect.hpp"
 
 static const char *TAG = "femto_vision";
+#include <cstring>
+#include "freertos/FreeRTOS.h"
+#include "freertos/semphr.h"
+#include "esp_heap_caps.h"
+
 static HumanFaceDetect *s_detect = nullptr;
+// Last frame, for the web UI's camera preview (debugging; never leaves the LAN).
+static uint8_t *s_last = nullptr;
+static size_t s_last_len = 0;
+static uint16_t s_last_w = 0, s_last_h = 0;
+static SemaphoreHandle_t s_lock = nullptr;
 
 extern "C" esp_err_t femto_vision_init(int i2c_port)
 {
@@ -49,6 +59,10 @@ extern "C" esp_err_t femto_vision_init(int i2c_port)
         s->set_hmirror(s, 1);  // so "left" in the frame is the robot's left
     }
     s_detect = new HumanFaceDetect();
+    // Desk faces are small, often turned or backlit: be less strict than
+    // the 0.5 defaults (stage 0 = MSR proposals, stage 1 = MNP refine).
+    s_detect->set_score_thr(0.3f, 0);
+    s_detect->set_score_thr(0.35f, 1);
     return ESP_OK;
 }
 
@@ -67,6 +81,22 @@ extern "C" int femto_vision_step(femto_face_t *out, int max, uint32_t *detect_ms
     img.height = (uint16_t)fb->height;
     img.pix_type = dl::image::DL_IMAGE_PIX_TYPE_RGB565BE;
 
+    if (!s_lock) {
+        s_lock = xSemaphoreCreateMutex();
+    }
+    if (xSemaphoreTake(s_lock, 0) == pdTRUE) {
+        if (!s_last || s_last_len < fb->len) {
+            heap_caps_free(s_last);
+            s_last = (uint8_t *)heap_caps_malloc(fb->len, MALLOC_CAP_SPIRAM);
+        }
+        if (s_last) {
+            memcpy(s_last, fb->buf, fb->len);
+            s_last_len = fb->len;
+            s_last_w = fb->width;
+            s_last_h = fb->height;
+        }
+        xSemaphoreGive(s_lock);
+    }
     int64_t t0 = esp_timer_get_time();
     std::list<dl::detect::result_t> &res = s_detect->run(img);
     if (detect_ms) {
@@ -99,4 +129,18 @@ extern "C" void femto_vision_stop(void)
         s->set_reg(s, 0x25, 0xFF, 0x00);
     }
     esp_camera_deinit();
+}
+
+extern "C" size_t femto_vision_last_frame(uint8_t *buf, size_t cap, uint16_t *w, uint16_t *h)
+{
+    if (!s_lock || !s_last) {
+        return 0;
+    }
+    xSemaphoreTake(s_lock, portMAX_DELAY);
+    size_t n = s_last_len < cap ? s_last_len : cap;
+    memcpy(buf, s_last, n);
+    *w = s_last_w;
+    *h = s_last_h;
+    xSemaphoreGive(s_lock);
+    return n;
 }

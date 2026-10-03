@@ -18,10 +18,11 @@ const STIFFNESS: f32 = 170.0;
 const DAMPING: f32 = 26.0;
 const DT: f32 = 0.02;
 /// Neutral pitch: slightly up, so following can look down a little.
-pub const PITCH_NEUTRAL: f32 = 12.0;
+/// Neutral pitch: the camera sits in the head, so look up at a seated face.
+pub const PITCH_NEUTRAL: f32 = 25.0;
 const YAW_LIMIT: f32 = 60.0;
 const PITCH_MIN: f32 = 0.0;
-const PITCH_MAX: f32 = 45.0;
+const PITCH_MAX: f32 = 60.0;
 /// Torque off after resting this long (no buzz, less power).
 const REST_TORQUE_OFF: Duration = Duration::from_secs(10);
 

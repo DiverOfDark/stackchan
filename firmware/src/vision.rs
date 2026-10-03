@@ -68,3 +68,30 @@ pub fn stop() {
     // SAFETY: C shim; safe to call when the camera never started.
     unsafe { vision::femto_vision_stop() };
 }
+
+/// 24-bit BMP from big-endian RGB565 (camera byte order).
+pub fn bmp_from_rgb565be(raw: &[u8], w: usize, h: usize) -> Vec<u8> {
+    let row = (w * 3 + 3) & !3;
+    let size = 54 + row * h;
+    let mut b = Vec::with_capacity(size);
+    b.extend_from_slice(b"BM");
+    b.extend_from_slice(&(size as u32).to_le_bytes());
+    b.extend_from_slice(&[0; 4]);
+    b.extend_from_slice(&54u32.to_le_bytes());
+    b.extend_from_slice(&40u32.to_le_bytes());
+    b.extend_from_slice(&(w as i32).to_le_bytes());
+    b.extend_from_slice(&(-(h as i32)).to_le_bytes()); // top-down
+    b.extend_from_slice(&1u16.to_le_bytes());
+    b.extend_from_slice(&24u16.to_le_bytes());
+    b.extend_from_slice(&[0; 24]);
+    for y in 0..h {
+        for x in 0..w {
+            let i = (y * w + x) * 2;
+            let p = u16::from_be_bytes([raw[i], raw[i + 1]]);
+            let (r, g, bl) = (((p >> 11) & 0x1F) << 3, ((p >> 5) & 0x3F) << 2, (p & 0x1F) << 3);
+            b.extend_from_slice(&[bl as u8, g as u8, r as u8]);
+        }
+        b.resize(b.len() + row - w * 3, 0);
+    }
+    b
+}

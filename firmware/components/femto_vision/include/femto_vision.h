@@ -1,6 +1,7 @@
 // C shim over esp32-camera (GC0308) and ESP-DL human_face_detect, so the
 // Rust firmware only deals with plain structs (PRD §8.2, option C).
 #pragma once
+#include <stddef.h>
 #include <stdint.h>
 #include "esp_err.h"
 
@@ -22,6 +23,10 @@ esp_err_t femto_vision_init(int i2c_port);
  *  `out` (≤ max), or -1 when no frame was available. `detect_ms` gets the
  *  inference time. */
 int femto_vision_step(femto_face_t *out, int max, uint32_t *detect_ms);
+
+/** Copy the most recent frame (raw RGB565 as captured, big-endian) into
+ *  `buf`. Returns bytes written (0 if none yet); `w`/`h` get its size. */
+size_t femto_vision_last_frame(uint8_t *buf, size_t cap, uint16_t *w, uint16_t *h);
 
 /** Stop streaming and put the sensor in standby (call before restarting:
  *  the camera's PCLK sits on strapping pin GPIO45). */

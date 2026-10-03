@@ -369,6 +369,20 @@ pub fn start(hub: &HubRef) -> Result<EspHttpServer<'static>> {
         no_content(req)
     })?;
 
+    route(&mut server, hub, "/api/camera.bmp", Method::Get, false, |_, req| {
+        let mut raw = vec![0u8; 320 * 240 * 2];
+        let (mut w, mut h) = (0u16, 0u16);
+        // SAFETY: buffer and out-params live across the call.
+        let n = unsafe { esp_idf_svc::sys::vision::femto_vision_last_frame(raw.as_mut_ptr(), raw.len(), &mut w, &mut h) };
+        if n == 0 {
+            return err(req, 404, "no camera frame yet");
+        }
+        let bmp = crate::vision::bmp_from_rgb565be(&raw[..n], w as usize, h as usize);
+        let mut r = req.into_response(200, None, &[("Content-Type", "image/bmp"), ("Cache-Control", "no-store")])?;
+        r.write_all(&bmp)?;
+        Ok(())
+    })?;
+
     // Everything else: the SPA. In setup mode, foreign hosts (captive-portal
     // probes) are redirected to the portal.
     let hub2 = hub.clone();

@@ -239,6 +239,7 @@ fn main() -> anyhow::Result<()> {
                         engine.event(Event::NewFace);
                     }
                     tracker.seen(nx, ny);
+                    log::debug!("face nx {nx:+.2} ny {ny:+.2} → head yaw {:+.1} pitch {:+.1}", tracker.yaw, tracker.pitch);
                     engine.face_seen(nx, ny);
                 }
                 vision::Sight::Nobody => {
@@ -254,7 +255,8 @@ fn main() -> anyhow::Result<()> {
             // Engine pan + = viewer's right = robot's left (yaw −).
             t.yaw = -pan;
             t.pitch = motion::PITCH_NEUTRAL + tilt;
-            t.may_rest = engine.resolve_emotion() == femto_core::Emotion::Sleepy;
+            // Keep looking for faces even in Standby; rest only without a camera.
+            t.may_rest = !cfg.camera && engine.resolve_emotion() == femto_core::Emotion::Sleepy;
         }
         let frame = engine.frame();
         if last_frame.as_ref() == Some(&frame) {
@@ -341,6 +343,7 @@ struct Tracker {
     last_seen: Option<Instant>,
     last_step: Option<Instant>,
     err: (f32, f32),
+    started: Option<Instant>,
 }
 
 impl Tracker {
@@ -349,6 +352,10 @@ impl Tracker {
     fn seen(&mut self, nx: f32, ny: f32) {
         self.last_seen = Some(Instant::now());
         self.err = (nx, ny);
+    }
+
+    fn epoch(&mut self) -> Instant {
+        *self.started.get_or_insert_with(Instant::now)
     }
 
     fn last_face(&self) -> Option<(f32, f32)> {
@@ -365,7 +372,7 @@ impl Tracker {
         let dt = self.last_step.map_or(0.0, |t| (now - t).as_secs_f32()).min(0.2);
         self.last_step = Some(now);
         let em = engine.resolve_emotion();
-        let tracking = follow && self.lost_for() < Duration::from_millis(800) && !matches!(em, femto_core::Emotion::Sleepy | femto_core::Emotion::Thinking);
+        let tracking = follow && self.lost_for() < Duration::from_millis(1200) && !matches!(em, femto_core::Emotion::Sleepy | femto_core::Emotion::Thinking);
         if tracking {
             // Deadband so the head doesn't hunt around a centred face.
             let (ex, ey) = self.err;
@@ -376,14 +383,22 @@ impl Tracker {
                 self.pitch -= ey * Self::GAIN_DEG_S * 0.6 * dt;
             }
             self.yaw = self.yaw.clamp(-45.0, 45.0);
-            self.pitch = self.pitch.clamp(-10.0, 25.0);
+            self.pitch = self.pitch.clamp(-20.0, 30.0);
             (self.yaw, self.pitch)
-        } else if self.lost_for() > Duration::from_secs(3) || !follow {
-            // Nobody around: drift home, and let the engine pose (glances).
-            self.yaw *= 1.0 - (dt * 0.8).min(1.0);
-            self.pitch *= 1.0 - (dt * 0.8).min(1.0);
-            let (p, t) = engine.head_target();
-            (self.yaw + p, self.pitch + t)
+        } else if !follow {
+            self.yaw = 0.0;
+            self.pitch = 0.0;
+            engine.head_target()
+        } else if self.lost_for() > Duration::from_secs(6) {
+            // Nobody around: look about for a face (the camera only sees
+            // where the head points). A new glance every ~4 s.
+            const GLANCES: [(f32, f32); 6] = [(0.0, 6.0), (-25.0, 10.0), (20.0, 2.0), (0.0, 15.0), (25.0, 10.0), (-15.0, 0.0)];
+            let slot = (now.duration_since(self.epoch()).as_secs() / 4) as usize % GLANCES.len();
+            let (gy, gp) = GLANCES[slot];
+            let k = (dt * 1.5).min(1.0);
+            self.yaw += (gy - self.yaw) * k;
+            self.pitch += (gp - self.pitch) * k;
+            (self.yaw, self.pitch)
         } else {
             (self.yaw, self.pitch)
         }
