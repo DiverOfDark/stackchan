@@ -28,9 +28,31 @@ impl Xf {
     }
 }
 
+/// Coverage mask over a device-space box.
+struct Clip {
+    x0: usize,
+    y0: usize,
+    w: usize,
+    h: usize,
+    mask: Vec<u8>,
+}
+
+impl Clip {
+    #[inline]
+    fn at(&self, idx: usize) -> u32 {
+        let (x, y) = (idx % W, idx / W);
+        if x < self.x0 || y < self.y0 || x >= self.x0 + self.w || y >= self.y0 + self.h {
+            return 0;
+        }
+        self.mask[(y - self.y0) * self.w + (x - self.x0)] as u32
+    }
+}
+
 pub struct Canvas {
     px: Vec<u16>,
-    clip: Option<Vec<u8>>,
+    clip: Option<Clip>,
+    /// Post-shade applied at scan-out: per-pixel keep factor (255 = as is).
+    shade: Option<Vec<u8>>,
     acc: Vec<f32>,
     pub xf: Xf,
     /// Group opacity multiplier for everything drawn.
@@ -45,7 +67,20 @@ impl Default for Canvas {
 
 impl Canvas {
     pub fn new() -> Canvas {
-        Canvas { px: vec![0; W * H], clip: None, acc: Vec::new(), xf: Xf::ID, alpha: 1.0 }
+        Canvas { px: vec![0; W * H], clip: None, shade: None, acc: Vec::with_capacity((W + 2) * H), xf: Xf::ID, alpha: 1.0 }
+    }
+
+    /// Use `scratch` (its capacity, in f32s) for rasterization. On the device
+    /// this is a small internal-RAM buffer; taller shapes are done in bands.
+    pub fn set_scratch(&mut self, scratch: Vec<f32>) {
+        assert!(scratch.capacity() >= W + 2, "scratch must hold at least one row");
+        self.acc = scratch;
+    }
+
+    /// Canvas over a caller-provided `W*H` pixel buffer.
+    pub fn with_buffer(px: Vec<u16>) -> Canvas {
+        assert_eq!(px.len(), W * H);
+        Canvas { px, ..Canvas::new() }
     }
 
     pub fn pixels(&self) -> &[u16] {
@@ -60,11 +95,48 @@ impl Canvas {
         self.px.fill(c.to_565());
     }
 
-    /// RGB888 copy, for PNG export and the simulator.
+    /// Set the scan-out shade (vignette + scanlines), or `None`.
+    pub fn set_shade(&mut self, shade: Option<Vec<u8>>) {
+        self.shade = shade;
+    }
+
+    pub fn has_shade(&self) -> bool {
+        self.shade.is_some()
+    }
+
+    /// Final pixel `i` with the shade applied.
+    #[inline]
+    pub fn out_px(&self, i: usize) -> u16 {
+        match &self.shade {
+            Some(s) => scale565(self.px[i], s[i] as u32),
+            None => self.px[i],
+        }
+    }
+
+    /// Final pixels `start..start + out.len()`, byte-swapped for SPI if asked.
+    pub fn scanout(&self, start: usize, out: &mut [u16], swap: bool) {
+        let src = &self.px[start..start + out.len()];
+        match &self.shade {
+            Some(s) => {
+                let s = &s[start..start + out.len()];
+                for ((d, &p), &k) in out.iter_mut().zip(src).zip(s) {
+                    let v = scale565(p, k as u32);
+                    *d = if swap { v.swap_bytes() } else { v };
+                }
+            }
+            None => {
+                for (d, &p) in out.iter_mut().zip(src) {
+                    *d = if swap { p.swap_bytes() } else { p };
+                }
+            }
+        }
+    }
+
+    /// RGB888 copy (shade applied), for PNG export and the simulator.
     pub fn to_rgb888(&self) -> Vec<u8> {
         let mut out = Vec::with_capacity(W * H * 3);
-        for &p in &self.px {
-            let (r, g, b) = unpack(p);
+        for i in 0..W * H {
+            let (r, g, b) = unpack(self.out_px(i));
             out.extend_from_slice(&[r, g, b]);
         }
         out
@@ -90,9 +162,21 @@ impl Canvas {
 
     /// Draw `f` clipped to `path`.
     pub fn with_clip<R>(&mut self, path: &Path, f: impl FnOnce(&mut Canvas) -> R) -> R {
-        let mut mask = vec![0u8; W * H];
-        rasterize(&mut self.acc, self.xf, path, |idx, _, _, cov| mask[idx] = (cov * 255.0 + 0.5) as u8);
-        let saved = self.clip.replace(mask);
+        let mut pts: Vec<(u16, u16, u8)> = Vec::new();
+        rasterize(&mut self.acc, self.xf, path, |_, x, y, cov| pts.push((x as u16, y as u16, (cov * 255.0 + 0.5) as u8)));
+        let (mut x0, mut y0, mut x1, mut y1) = (W, H, 0, 0);
+        for &(x, y, _) in &pts {
+            x0 = x0.min(x as usize);
+            y0 = y0.min(y as usize);
+            x1 = x1.max(x as usize + 1);
+            y1 = y1.max(y as usize + 1);
+        }
+        let (w, h) = (x1.saturating_sub(x0), y1.saturating_sub(y0));
+        let mut mask = vec![0u8; w * h];
+        for (x, y, c) in pts {
+            mask[(y as usize - y0) * w + (x as usize - x0)] = c;
+        }
+        let saved = self.clip.replace(Clip { x0, y0, w, h, mask });
         let r = f(self);
         self.clip = saved;
         r
@@ -167,23 +251,27 @@ impl Canvas {
     }
 
     #[inline]
-    fn blend(&mut self, idx: usize, c: Rgb, mut a: f32) {
+    fn blend(&mut self, idx: usize, c: Rgb, a: f32) {
+        // Fixed-point alpha 0..=256.
+        let mut a = (a * 256.0) as u32;
         if let Some(m) = &self.clip {
-            a *= m[idx] as f32 / 255.0;
+            a = (a * m.at(idx)) / 255;
         }
-        if a <= 0.002 {
+        if a == 0 {
             return;
         }
-        if a >= 0.998 {
-            self.px[idx] = c.to_565();
+        let src = c.to_565();
+        if a >= 255 {
+            self.px[idx] = src;
             return;
         }
-        let (r, g, b) = unpack(self.px[idx]);
-        let mix = |d: u8, s: u8| (d as f32 + (s as f32 - d as f32) * a + 0.5) as u8;
-        self.px[idx] = Rgb(mix(r, c.0), mix(g, c.1), mix(b, c.2)).to_565();
+        self.px[idx] = mix565(self.px[idx], src, a);
     }
 
 }
+
+/// Diagnostics: fills, bbox pixels scanned.
+pub static STATS: [core::sync::atomic::AtomicU32; 2] = [const { core::sync::atomic::AtomicU32::new(0) }; 2];
 
 /// Scan-convert `path` (transformed by `xf`) and call `emit(idx, x, y,
 /// coverage)` for every covered pixel. `acc` is scratch space.
@@ -223,30 +311,73 @@ fn rasterize(acc: &mut Vec<f32>, xf: Xf, path: &Path, mut emit: impl FnMut(usize
         }
         let bw = bx1 - bx0;
         let bh = by1 - by0;
+        STATS[0].fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+        STATS[1].fetch_add((bw * bh) as u32, core::sync::atomic::Ordering::Relaxed);
         let stride = bw + 2;
-        acc.clear();
-        acc.resize(stride * bh, 0.0);
+        let band = (acc.capacity() / stride).clamp(1, bh);
         let (ox, oy) = (bx0 as f32, by0 as f32);
-        for c in &contours {
-            for i in 0..c.len() {
-                let a = c[i];
-                let b = c[(i + 1) % c.len()];
-                accumulate(acc, stride, bw, bh, (a.0 - ox, a.1 - oy), (b.0 - ox, b.1 - oy));
-            }
-        }
-        for row in 0..bh {
-            let mut sum = 0.0f32;
-            let line = &acc[row * stride..row * stride + stride];
-            for (col, &v) in line.iter().enumerate().take(bw) {
-                sum += v;
-                let cov = sum.abs().min(1.0);
-                if cov > 0.002 {
-                    let (x, y) = (bx0 + col, by0 + row);
-                    emit(y * W + x, x, y, cov);
+        // Per-row span of columns any edge touched: outside it the running
+        // sum is zero (left) or unchanged and zero (right, closed paths).
+        let mut spans = vec![(u16::MAX, 0u16); band];
+        let mut row0 = 0;
+        while row0 < bh {
+            let rows = band.min(bh - row0);
+            acc.clear();
+            acc.resize(stride * rows, 0.0);
+            spans[..rows].fill((u16::MAX, 0));
+            let oy = oy + row0 as f32;
+            for c in &contours {
+                for i in 0..c.len() {
+                    let a = c[i];
+                    let b = c[(i + 1) % c.len()];
+                    accumulate(acc, &mut spans, stride, bw, rows, (a.0 - ox, a.1 - oy), (b.0 - ox, b.1 - oy));
                 }
             }
+            for row in 0..rows {
+                let (lo, hi) = spans[row];
+                if lo > hi {
+                    continue;
+                }
+                let mut sum = 0.0f32;
+                let line = &acc[row * stride..row * stride + stride];
+                let hi = (hi as usize + 1).min(bw);
+                for (col, &v) in line.iter().enumerate().take(hi).skip(lo as usize) {
+                    sum += v;
+                    let cov = sum.abs().min(1.0);
+                    if cov > 0.002 {
+                        let (x, y) = (bx0 + col, by0 + row0 + row);
+                        emit(y * W + x, x, y, cov);
+                    }
+                }
+            }
+            row0 += rows;
         }
     }
+}
+
+/// `d + (s − d)·a/256`, per 565 channel.
+#[inline]
+fn mix565(d: u16, s: u16, a: u32) -> u16 {
+    let (d, s, a) = (d as i32, s as i32, a as i32);
+    let ch = |shift: u32, mask: i32| {
+        let dv = (d >> shift) & mask;
+        let sv = (s >> shift) & mask;
+        ((dv + (((sv - dv) * a) >> 8)) & mask) << shift
+    };
+    (ch(11, 0x1F) | ch(5, 0x3F) | ch(0, 0x1F)) as u16
+}
+
+/// Scale a 565 colour by `k`/255.
+#[inline]
+fn scale565(p: u16, k: u32) -> u16 {
+    if k >= 255 {
+        return p;
+    }
+    let p = p as u32;
+    let r = ((p >> 11) & 0x1F) * k / 255;
+    let g = ((p >> 5) & 0x3F) * k / 255;
+    let b = (p & 0x1F) * k / 255;
+    ((r << 11) | (g << 5) | b) as u16
 }
 
 pub fn unpack(p: u16) -> (u8, u8, u8) {
@@ -259,7 +390,7 @@ pub fn unpack(p: u16) -> (u8, u8, u8) {
 /// Signed-area accumulation of one edge into `acc` (row stride `stride`,
 /// usable width `w`). X is clamped per row, which is exact for fills because
 /// coverage left of the box is equivalent to coverage at column 0.
-fn accumulate(acc: &mut [f32], stride: usize, w: usize, h: usize, p0: (f32, f32), p1: (f32, f32)) {
+fn accumulate(acc: &mut [f32], spans: &mut [(u16, u16)], stride: usize, w: usize, h: usize, p0: (f32, f32), p1: (f32, f32)) {
     if (p0.1 - p1.1).abs() < 1e-6 {
         return;
     }
@@ -279,6 +410,9 @@ fn accumulate(acc: &mut [f32], stride: usize, w: usize, h: usize, p0: (f32, f32)
         let (xa, xb) = if x < xnext { (x, xnext) } else { (xnext, x) };
         let (xa, xb) = (xa.clamp(0.0, wf), xb.clamp(0.0, wf));
         let line = y * stride;
+        let sp = &mut spans[y];
+        sp.0 = sp.0.min(xa as u16);
+        sp.1 = sp.1.max((xb as u16 + 2).min(w as u16));
         let x0f = xa.floor();
         let x0i = x0f as usize;
         let x1c = xb.ceil();

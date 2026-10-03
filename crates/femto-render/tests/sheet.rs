@@ -154,3 +154,57 @@ fn matches_design_rasters() {
     }
     assert!(failures.is_empty(), "{failures:?}");
 }
+
+/// Long-running engine + renderer: caches must stop growing.
+#[test]
+fn caches_are_bounded() {
+    use femto_core::{Engine, Usage};
+    let cfg = Settings::default();
+    let mut e = Engine::new();
+    e.set_wall_clock(1_791_400_000, 7200);
+    e.set_usage(Usage { signed_in: true, ok: true, fetched_at: Some(1_791_400_000), session_pct: 38, week_pct: 61, ..Default::default() });
+    e.run_power_on_demo(false, &cfg);
+    let mut r = Renderer::new();
+    let mut c = Canvas::new();
+    let mut sizes = vec![];
+    for i in 0..3000 {
+        e.advance(40);
+        if i % 300 == 0 {
+            e.run_demo(&cfg);
+        }
+        r.render(&mut c, &e.frame(), &cfg);
+        if i % 500 == 0 {
+            sizes.push(r.fonts.cached());
+        }
+    }
+    eprintln!("glyph cache sizes: {sizes:?}");
+    assert_eq!(sizes[sizes.len() - 1], sizes[sizes.len() - 2], "glyph cache still growing");
+}
+
+#[test]
+fn work_per_face_frame() {
+    use std::sync::atomic::Ordering;
+    let mut r = Renderer::new();
+    let mut c = Canvas::new();
+    let f = &sheet()[3].1;
+    r.render(&mut c, f, &Settings::default());
+    for s in &femto_render::canvas::STATS {
+        s.store(0, Ordering::Relaxed);
+    }
+    r.render(&mut c, f, &Settings::default());
+    eprintln!("fills {} bbox px {}", femto_render::canvas::STATS[0].load(Ordering::Relaxed), femto_render::canvas::STATS[1].load(Ordering::Relaxed));
+}
+
+/// Banded rasterization (small scratch, as on the device) must match.
+#[test]
+fn banding_is_exact() {
+    let cfg = Settings::default();
+    for (_, f) in sheet() {
+        let mut a = Canvas::new();
+        let mut b = Canvas::new();
+        b.set_scratch(Vec::with_capacity((W + 2) * 7));
+        Renderer::new().render(&mut a, &f, &cfg);
+        Renderer::new().render(&mut b, &f, &cfg);
+        assert!(a.pixels() == b.pixels());
+    }
+}

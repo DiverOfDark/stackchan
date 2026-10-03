@@ -3,6 +3,7 @@
 //! The same code runs in the desktop simulator, in golden-image tests and on
 //! the device.
 
+pub mod bench;
 pub mod canvas;
 pub mod color;
 pub mod path;

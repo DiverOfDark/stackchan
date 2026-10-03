@@ -16,7 +16,12 @@ use crate::text::{Face, Fonts, Style};
 /// Draws frames. Holds the font cache and the palette for the current accent.
 pub struct Renderer {
     pub fonts: Fonts,
+    /// Microseconds spent in: background, content, chrome, overlay (last frame).
+    pub timings: [u32; 4],
     pal: Palette,
+    /// Background pre-rendered for the current accent.
+    bg: Option<Vec<u16>>,
+    shade: Vec<u8>,
     accent: femto_core::settings::Accent,
 }
 
@@ -53,18 +58,28 @@ impl Tag {
 impl Renderer {
     pub fn new() -> Renderer {
         let accent = Default::default();
-        Renderer { fonts: Fonts::new(), pal: Palette::new(accent), accent }
+        Renderer { fonts: Fonts::new(), timings: [0; 4], pal: Palette::new(accent), bg: None, shade: overlay_shade(), accent }
     }
 
     pub fn render(&mut self, c: &mut Canvas, frame: &Frame, cfg: &Settings) {
         if cfg.accent != self.accent {
             self.accent = cfg.accent;
             self.pal = Palette::new(cfg.accent);
+            self.bg = None;
         }
+        let pal = self.pal;
+        let bg = self.bg.get_or_insert_with(|| {
+            let mut tmp = Canvas::new();
+            background(&mut tmp, &pal);
+            tmp.pixels().to_vec()
+        });
         let mut x = Ctx { c, f: &mut self.fonts, p: self.pal, cfg };
         x.c.xf = Xf::ID;
         x.c.alpha = 1.0;
-        x.background();
+        let t0 = std::time::Instant::now();
+        x.c.pixels_mut().copy_from_slice(bg);
+        let t1 = std::time::Instant::now();
+        let mut t2 = t1;
         match &frame.screen {
             Screen::Ledger => x.ledger(&frame.usage),
             Screen::Boot => x.boot(frame.t, frame.progress),
@@ -73,6 +88,7 @@ impl Renderer {
             Screen::Wipe { secs_left } => x.wipe(frame.t, *secs_left),
             screen => {
                 x.face(&frame.p, frame.em, frame.t);
+                t2 = std::time::Instant::now();
                 let mood = match screen {
                     Screen::Speaking => cfg.name.to_uppercase(),
                     _ => frame.em.label().to_uppercase(),
@@ -88,9 +104,13 @@ impl Renderer {
                 }
             }
         }
-        if cfg.fx {
-            x.overlay();
+        let t3 = std::time::Instant::now();
+        // Vignette + scanlines are applied at scan-out (Canvas shade).
+        if cfg.fx != c_has_shade(x.c) {
+            x.c.set_shade(cfg.fx.then(|| self.shade.clone()));
         }
+        let us = |a: std::time::Instant, b: std::time::Instant| (b - a).as_micros() as u32;
+        self.timings = [us(t0, t1), us(t1, t2), us(t2, t3), us(t3, std::time::Instant::now())];
     }
 }
 
@@ -161,31 +181,6 @@ impl Ctx<'_> {
 
     // ---- layers -------------------------------------------------------------
 
-    fn background(&mut self) {
-        self.c.clear(self.p.bg);
-        let ad = self.p.ad;
-        let dots = move |x: usize, y: usize| {
-            let dx = (x as f32 + 0.5).rem_euclid(6.0) - 3.0;
-            let dy = (y as f32 + 0.5).rem_euclid(6.0) - 3.0;
-            let cov = (1.8 - (dx * dx + dy * dy).sqrt()).clamp(0.0, 1.0);
-            (cov > 0.0).then_some((ad, cov * 0.5))
-        };
-        self.c.fill_with(&Path::polygon(&[(200., 40.), (320., 40.), (320., 160.)]), dots);
-        self.c.fill_with(&Path::polygon(&[(0., 120.), (0., 240.), (120., 240.)]), dots);
-    }
-
-    fn overlay(&mut self) {
-        self.c.effect(0, 0, W, H, |x, y| {
-            let dx = (x as f32 + 0.5 - 160.0) / 208.0;
-            let dy = (y as f32 + 0.5 - 115.2) / 156.0;
-            let d = (dx * dx + dy * dy).sqrt();
-            let vig = ((d - 0.55) / 0.45).clamp(0.0, 1.0) * 0.75;
-            let scan = if y % 3 == 0 { 0.4 } else { 0.0 };
-            let a = 1.0 - (1.0 - vig) * (1.0 - scan);
-            (a > 0.0).then_some((Rgb::BLACK, a))
-        });
-    }
-
     // ---- face ---------------------------------------------------------------
 
     fn mini(&mut self, x: f32, y: f32, sc: f32, p: &Params, em: Emotion, t: u32) {
@@ -225,6 +220,12 @@ impl Ctx<'_> {
         let open = p.slp <= 0.5 && !blink;
         let pal = self.p;
 
+        let mut tp = std::time::Instant::now();
+        let mut lap = |i: usize| {
+            let n = std::time::Instant::now();
+            PROF[i].fetch_add((n - tp).as_micros() as u32, std::sync::atomic::Ordering::Relaxed);
+            tp = n;
+        };
         if self.cfg.corp {
             self.corp_marks(lx, rx, cy);
         } else {
@@ -255,13 +256,16 @@ impl Ctx<'_> {
             }
         }
 
+        lap(0);
         let mode = if p.slp > 0.5 { 2 } else if blink { 1 } else { 0 };
         if self.cfg.fx {
             self.c.with_xf(Xf { s: 1.0, tx: 2.5, ty: 0.0 }, |c| {
                 c.with_alpha(0.7, |c| ink_layer(c, p, pal.a, pal.panel, lx, rx, cy, mode))
             });
         }
+        lap(1);
         ink_layer(self.c, p, pal.ink, pal.panel, lx, rx, cy, mode);
+        lap(2);
 
         // Scar through the left brow.
         let (sx1, sy1, sx2, sy2) = (lx - 6.0, cy + p.blo - 12.0, lx + 6.0, cy + p.bli + 14.0);
@@ -273,7 +277,9 @@ impl Ctx<'_> {
             Eyewear::None => {}
             _ => self.eyewear(lx, rx, cy, p, em, t),
         }
+        lap(3);
         self.decorations(em, t);
+        lap(4);
         let _ = oy;
     }
 
@@ -584,6 +590,44 @@ impl Ctx<'_> {
     }
 }
 
+/// Profiling: µs spent in face sub-stages (corp+eyes, misreg ink, ink, scar+eyewear, decorations).
+pub static PROF: [std::sync::atomic::AtomicU32; 5] = [const { std::sync::atomic::AtomicU32::new(0) }; 5];
+
+fn c_has_shade(c: &Canvas) -> bool {
+    c.has_shade()
+}
+
+/// Soot ground with halftone corners (the design's `bgLayer`).
+fn background(c: &mut Canvas, pal: &Palette) {
+    c.clear(pal.bg);
+    let ad = pal.ad;
+    let dots = move |x: usize, y: usize| {
+        let dx = (x as f32 + 0.5).rem_euclid(6.0) - 3.0;
+        let dy = (y as f32 + 0.5).rem_euclid(6.0) - 3.0;
+        let cov = (1.8 - (dx * dx + dy * dy).sqrt()).clamp(0.0, 1.0);
+        (cov > 0.0).then_some((ad, cov * 0.5))
+    };
+    c.fill_with(&Path::polygon(&[(200., 40.), (320., 40.), (320., 160.)]), dots);
+    c.fill_with(&Path::polygon(&[(0., 120.), (0., 240.), (120., 240.)]), dots);
+}
+
+/// Vignette + scanlines (the design's `overlay`) as a keep factor per pixel.
+fn overlay_shade() -> Vec<u8> {
+    let mut m = vec![255u8; W * H];
+    for y in 0..H {
+        for x in 0..W {
+            let dx = (x as f32 + 0.5 - 160.0) / 208.0;
+            let dy = (y as f32 + 0.5 - 115.2) / 156.0;
+            let d = (dx * dx + dy * dy).sqrt();
+            let vig = ((d - 0.55) / 0.45).clamp(0.0, 1.0) * 0.75;
+            let scan = if y % 3 == 0 { 0.4 } else { 0.0 };
+            let keep = (1.0 - vig) * (1.0 - scan);
+            m[y * W + x] = (keep * 255.0 + 0.5) as u8;
+        }
+    }
+    m
+}
+
 fn eye_path(cx: f32, cy: f32, hw: f32, top: f32, bot: f32) -> Path {
     Path::new()
         .move_to(cx - hw, cy)
@@ -605,7 +649,10 @@ fn glow_ellipse(c: &mut Canvas, cx: f32, cy: f32, rx: f32, ry: f32, col: Rgb) {
         let dy = (y as f32 + 0.5 - dcy) / dry;
         let d = (dx * dx + dy * dy).sqrt();
         let dist = (d - 1.0) * drx.min(dry);
-        let a = 1.0 / (1.0 + (1.6 * dist / sigma).exp());
+        let z = 1.6 * dist / sigma;
+        // Logistic falloff, cheap rational approximation of 1/(1+e^z).
+        let a = 0.5 - 0.5 * z / (1.0 + z.abs() * 0.55);
+        let a = a.clamp(0.0, 1.0);
         Some((col, a * alpha))
     });
 }

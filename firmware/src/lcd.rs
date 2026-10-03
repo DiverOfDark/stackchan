@@ -122,23 +122,23 @@ impl Lcd {
         }
     }
 
-    /// Push a full 320×240 RGB565 frame.
-    pub fn push(&mut self, fb: &[u16]) -> Result<(), EspError> {
+    /// Push a full frame (shade applied, byte-swapped for the panel).
+    pub fn push(&mut self, canvas: &femto_render::Canvas) -> Result<(), EspError> {
         // Window = whole screen; RAMWR then RAMWRC for the remaining chunks.
         self.wait_done(self.queued);
         self.cmd(0x2A, &[0, 0, ((W - 1) >> 8) as u8, (W - 1) as u8])?;
         self.cmd(0x2B, &[0, 0, ((H - 1) >> 8) as u8, (H - 1) as u8])?;
-        for (k, chunk) in fb.chunks(CHUNK_PX).enumerate() {
+        for k in 0..(W * H).div_ceil(CHUNK_PX) {
+            let start = k * CHUNK_PX;
+            let len = CHUNK_PX.min(W * H - start);
             // Buffer k%2 was last used by transfer `queued - 1` (if any).
             if k >= 2 {
                 self.wait_done(self.queued - 1);
             }
-            let dst = unsafe { core::slice::from_raw_parts_mut(self.bufs[k % 2], chunk.len()) };
-            for (d, s) in dst.iter_mut().zip(chunk) {
-                *d = s.swap_bytes();
-            }
+            let dst = unsafe { core::slice::from_raw_parts_mut(self.bufs[k % 2], len) };
+            canvas.scanout(start, dst, true);
             let cmd = if k == 0 { 0x2C } else { 0x3C };
-            esp!(unsafe { sys::esp_lcd_panel_io_tx_color(self.io, cmd, dst.as_ptr() as *const _, chunk.len() * 2) })?;
+            esp!(unsafe { sys::esp_lcd_panel_io_tx_color(self.io, cmd, dst.as_ptr() as *const _, len * 2) })?;
             self.queued = self.queued.wrapping_add(1);
         }
         Ok(())

@@ -31,3 +31,13 @@ embedded-hal-bus = { version = "0.3", features = ["std"] }
 
 [build-dependencies]
 embuild = "0.33"
+
+# Hot per-pixel code: optimise for speed, the rest for size.
+[profile.release.package.femto-render]
+opt-level = 3
+
+[profile.release.package.femto-core]
+opt-level = 3
+
+[profile.release.package.fontdue]
+opt-level = 3

@@ -139,7 +139,7 @@ Each screen except S1–S3 has the **status band**: SESSION % and WEEK %, with 1
 ## 6. Functional requirements
 
 ### 6.1 Boot and connectivity
-- FR-0. At boot, read the LCD controller ID and pick the ILI9342C or ILI9342E init sequence. Configure the AXP2101 power key: long-press IRQ ≈ 2.5 s, hard-off 10 s, IRQs routed to the firmware.
+- FR-0. At boot, identify the LCD revision from the FT6336 touch controller's firmware/vendor id (0x12/0x11 = ILI9342E; the method M5's factory firmware uses) and pick the ILI9342C or ILI9342E init sequence. Configure the AXP2101 power key: long-press IRQ ≈ 2.5 s, hard-off 10 s, IRQs routed to the firmware.
 - FR-1. Cold boot shows S1 within 1.5 s of power-on. The boot animation runs for a minimum of 3.5 s and can be skipped once the device is ready.
 - FR-2. With saved credentials, the device tries Wi-Fi up to 3 times, showing S2 with the attempt counter. If all 3 fail, it shows S3 while continuing to retry in the background.
 - FR-3. Without credentials, it shows S3 and starts a SoftAP `<NAME>-SETUP` with a random WPA2 key shown on screen, plus a captive portal at 192.168.4.1.
@@ -385,10 +385,10 @@ All of them are ESP-IDF components. That one fact shapes every option below.
 stackchan/
 ├─ Cargo.toml                 workspace
 ├─ crates/
-│  ├─ femto-core/             no_std + alloc, pure. Mood/state machine (StateHub), expression table
+│  ├─ femto-core/             std, pure (no ESP-IDF deps). Mood/state machine (StateHub), expression table
 │  │                          and easing, gaze, usage model + countdowns, settings schema + validation,
 │  │                          voice event model. 100 % host-tested.
-│  ├─ femto-render/           no_std + alloc, pure. AA scanline rasterizer (quadratic Béziers,
+│  ├─ femto-render/           std, pure. AA scanline rasterizer (quadratic Béziers,
 │  │                          ellipses, polygons, thick lines), RGB565 blending, pre-baked layers,
 │  │                          bitmap font atlases generated in build.rs (fontdue) from TTFs in assets/.
 │  │                          Renders every screen. On the host, it writes PNGs for golden tests.

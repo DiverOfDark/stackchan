@@ -46,12 +46,40 @@ fn main() -> anyhow::Result<()> {
 
     let mut renderer = Renderer::new();
     let mut canvas = Canvas::new();
+    // Rasterizer scratch in internal RAM (20 KB).
+    canvas.set_scratch({
+        let n = (femto_render::W + 2) * 16;
+        // SAFETY: fresh internal allocation of n f32s, len 0; freed via free().
+        let ptr = unsafe { sys::heap_caps_malloc(n * 4, sys::MALLOC_CAP_INTERNAL | sys::MALLOC_CAP_8BIT) } as *mut f32;
+        assert!(!ptr.is_null(), "raster scratch");
+        unsafe { Vec::from_raw_parts(ptr, 0, n) }
+    });
+    for (name, us) in femto_render::bench::run(&mut canvas, &mut renderer.fonts) {
+        info!("bench {name:28} {us:>6} us");
+    }
     board.pmic.set_brightness(60).ok();
     info!("panel {:?}", board.panel);
     if let Some(body) = board.body.as_mut() {
         // Dim accent glow (PRD §5.6).
         body.fill_leds(24, 2, 2).ok();
     }
+
+    // LCD scan-out runs on its own thread so it overlaps the next render.
+    let (to_lcd, lcd_rx) = std::sync::mpsc::sync_channel::<Canvas>(1);
+    let (back_tx, from_lcd) = std::sync::mpsc::sync_channel::<(Canvas, u32)>(1);
+    let mut lcd = board.lcd;
+    std::thread::Builder::new().name("lcd".into()).stack_size(8192).spawn(move || {
+        for c in lcd_rx {
+            let t = Instant::now();
+            if let Err(e) = lcd.push(&c) {
+                warn!("lcd push: {e}");
+            }
+            if back_tx.send((c, t.elapsed().as_micros() as u32)).is_err() {
+                break;
+            }
+        }
+    })?;
+    let mut spare = Some(Canvas::new());
 
     let mut last = Instant::now();
     let mut touching = false;
@@ -105,15 +133,24 @@ fn main() -> anyhow::Result<()> {
 
         let t0 = Instant::now();
         renderer.render(&mut canvas, &engine.frame(), &cfg);
-        let t1 = Instant::now();
-        if let Err(e) = board.lcd.push(canvas.pixels()) {
-            warn!("lcd push: {e}");
-        }
-        render_us += (t1 - t0).as_micros() as u64;
-        push_us += t1.elapsed().as_micros() as u64;
+        render_us += t0.elapsed().as_micros() as u64;
+        // Hand the frame to the LCD thread; continue on the other buffer.
+        let next = match spare.take() {
+            Some(c) => c,
+            None => {
+                let (c, us) = from_lcd.recv()?;
+                push_us += us as u64;
+                c
+            }
+        };
+        let done = std::mem::replace(&mut canvas, next);
+        to_lcd.send(done)?;
         frames += 1;
-        if frames == 100 {
-            info!("render {:.1} ms, push {:.1} ms, mood {:?}", render_us as f32 / 100_000.0, push_us as f32 / 100_000.0, engine.resolve_emotion());
+        if frames == 10 {
+            let [bg, face, chrome, ov] = renderer.timings;
+            info!("render {:.1} ms (bg {bg} face {face} chrome {chrome} overlay {ov} us), push {:.1} ms, mood {:?}", render_us as f32 / 10_000.0, push_us as f32 / 10_000.0, engine.resolve_emotion());
+            let prof: Vec<u32> = femto_render::scene::PROF.iter().map(|a| a.swap(0, std::sync::atomic::Ordering::Relaxed) / 10).collect();
+            info!("face stages us: {prof:?}");
             report_memory();
             (render_us, push_us, frames) = (0, 0, 0);
         }

@@ -82,6 +82,11 @@ impl Fonts {
         })
     }
 
+    /// Cached glyph count (diagnostics).
+    pub fn cached(&self) -> usize {
+        self.cache.len()
+    }
+
     pub fn measure(&mut self, face: Face, size: f32, s: &str, letter_spacing: f32) -> f32 {
         s.chars().map(|c| self.glyph(face, size, c).advance + letter_spacing).sum()
     }
