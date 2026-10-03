@@ -30,5 +30,12 @@ data:
   WAKE_SAMPLE_DIR: {{ .Values.wakeSamples.dir | quote }}
   WAKE_SAMPLE_MAX: {{ .Values.wakeSamples.maxFiles | quote }}
   {{- end }}
+  {{- with .Values.stackchan }}
+  STACKCHAN_USAGE_URL: {{ .usageUrl | default "" | quote }}
+  {{- if .systemPrompt }}
+  STACKCHAN_SYSTEM_PROMPT: |-
+{{ .systemPrompt | indent 4 }}
+  {{- end }}
+  {{- end }}
   SYSTEM_PROMPT: |-
 {{ .Values.systemPrompt | indent 4 }}

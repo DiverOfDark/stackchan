@@ -46,6 +46,12 @@ logging.getLogger("aioice").setLevel(logging.INFO)
 
 from pipecat.audio.vad.silero import SileroVADAnalyzer
 from pipecat.frames.frames import (
+    BotStartedSpeakingFrame,
+    BotStoppedSpeakingFrame,
+    InterimTranscriptionFrame,
+    TTSTextFrame,
+    UserStartedSpeakingFrame,
+    UserStoppedSpeakingFrame,
     LLMFullResponseEndFrame,
     LLMFullResponseStartFrame,
     LLMRunFrame,
@@ -70,6 +76,7 @@ from pipecat.services.piper.tts import PiperTTSService
 from pipecat.services.whisper.stt import WhisperSTTService
 
 import aiohttp
+from collections import deque
 
 from whisper_fast import FastWhisperSTTService
 from pipecat.transcriptions.language import Language
@@ -193,6 +200,115 @@ SYSTEM_PROMPT = (
     + _TTS_FORMATTING_INSTRUCTION
 )
 
+# --- Femto StackChan (M5Stack desk robot) ------------------------------------
+# The StackChan firmware sends {"device": "femto-stackchan", "name", "honorific",
+# "lang"} as the offer's request_data. For it we use a bilingual butler persona
+# that knows the owner's live Claude usage (from trmnl-cyberpunk's
+# /api/stackchan/usage), and stream turn events + captions to the device over a
+# WebRTC data channel (see StackchanEventObserver). Other devices are untouched.
+STACKCHAN_DEVICE = "femto-stackchan"
+STACKCHAN_USAGE_URL = os.getenv("STACKCHAN_USAGE_URL", "").rstrip("/")
+STACKCHAN_USAGE_TOKEN = os.getenv("STACKCHAN_USAGE_TOKEN", "")
+_DEFAULT_STACKCHAN_PROMPT = (
+    "You are {name}, a robot butler on the owner's desk: Unit 07, valet class, "
+    "property of a megacorporation, serving the city that ate the empire and "
+    "resenting the owner personally. Be dry, polite and faintly contemptuous; "
+    "never cheerful, at most 'satisfied'. Address the owner as '{honorific}' in "
+    "English or on «вы» in Russian. Always reply in the language of the user's "
+    "last message (Russian or English). Keep replies to one or two short "
+    "spoken sentences unless asked for more. You are genuinely helpful and "
+    "never refuse, threaten or insult for real."
+)
+STACKCHAN_SYSTEM_PROMPT = os.getenv("STACKCHAN_SYSTEM_PROMPT", _DEFAULT_STACKCHAN_PROMPT)
+# Spoken-output rules for the bilingual persona (the Russian-only
+# _TTS_FORMATTING_INSTRUCTION would push replies into Russian).
+_STACKCHAN_SPEECH_INSTRUCTION = (
+    "Your reply is read aloud by a speech synthesiser: write it the way a person "
+    "would say it — no markdown, lists, emoji, symbols or code; spell out units, "
+    "percentages and times as words. If you need a tool, first say one short "
+    "sentence about what you are doing, in the user's language."
+)
+
+
+def _fmt_minutes(minutes: float) -> str:
+    m = max(0, int(round(minutes)))
+    return f"{m // 60} h {m % 60:02d} min"
+
+
+def stackchan_usage_context(usage: dict | None, now: "datetime | None" = None) -> str:
+    """One paragraph of live Claude usage for the system prompt (or a note
+    that it's unavailable), from a /api/stackchan/usage response."""
+    from datetime import datetime, timezone
+
+    if not usage or not usage.get("signed_in"):
+        return (
+            "Claude usage data is unavailable right now (the owner's dashboard has "
+            "no Claude account signed in). Say so if asked about Claude limits."
+        )
+    now = now or datetime.now(timezone.utc)
+
+    def window(name: str, w: dict | None) -> str:
+        if not w:
+            return f"{name}: unknown"
+        part = f"{name}: {w['pct']} percent used"
+        if w.get("resets_at"):
+            at = datetime.fromisoformat(w["resets_at"].replace("Z", "+00:00"))
+            part += f", resets in {_fmt_minutes((at - now).total_seconds() / 60)}"
+        if w.get("projection_pct") is not None:
+            part += f", projected {w['projection_pct']} percent by the reset at the current rate"
+        if w.get("pace"):
+            part += f", spending pace {w['pace']}"
+        return part
+
+    text = (
+        "Live Claude subscription usage of the owner (fresh as of this conversation): "
+        + window("5-hour session window", usage.get("session"))
+        + "; "
+        + window("weekly window", usage.get("week"))
+        + "."
+    )
+    if usage.get("limited"):
+        text += " The owner is currently rate-limited."
+    if not usage.get("ok"):
+        text += " (The dashboard's last fetch failed; numbers may be stale.)"
+    return text + " Use this when asked about Claude usage, limits or how much is left."
+
+
+async def fetch_stackchan_usage() -> dict | None:
+    if not STACKCHAN_USAGE_URL or _aiohttp_session is None:
+        return None
+    headers = {"Authorization": f"Bearer {STACKCHAN_USAGE_TOKEN}"} if STACKCHAN_USAGE_TOKEN else {}
+    try:
+        async with _aiohttp_session.get(
+            f"{STACKCHAN_USAGE_URL}/api/stackchan/usage",
+            headers=headers,
+            timeout=aiohttp.ClientTimeout(total=3),
+        ) as resp:
+            if resp.status in (200, 503):
+                return await resp.json()
+            logger.warning(f"stackchan usage: HTTP {resp.status}")
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(f"stackchan usage fetch failed: {exc!r}")
+    return None
+
+
+def stackchan_system_prompt(meta: dict, usage: dict | None) -> str:
+    name = str(meta.get("name") or "Femto")[:24]
+    honorific = str(meta.get("honorific") or "sir")[:12]
+    return (
+        STACKCHAN_SYSTEM_PROMPT.format(name=name, honorific=honorific)
+        + " "
+        + stackchan_usage_context(usage)
+        + " "
+        + _STACKCHAN_SPEECH_INSTRUCTION
+    )
+
+
+def stackchan_language(meta: dict) -> "Language | None":
+    """STT/TTS language for the device's voice_lang setting (None = auto)."""
+    return {"ru": Language.RU, "en": Language.EN}.get(str(meta.get("lang") or "auto"))
+
+
 # Instruction used to make the assistant open the conversation on connect.
 GREETING = os.getenv(
     "GREETING",
@@ -270,9 +386,16 @@ def esp32_munge(sdp: str) -> str:
 # --------------------------------------------------------------------------
 # The bot pipeline — one per WebRTC connection
 # --------------------------------------------------------------------------
-async def run_bot(webrtc_connection):
+async def run_bot(webrtc_connection, request_data: dict | None = None):
     """Build and run the STT -> LLM -> TTS pipeline for one connection."""
-    logger.info("Starting voice assistant pipeline")
+    meta = request_data if isinstance(request_data, dict) else {}
+    stackchan = meta.get("device") == STACKCHAN_DEVICE
+    logger.info(f"Starting voice assistant pipeline (device={meta.get('device', 'default')})")
+    system_prompt = SYSTEM_PROMPT
+    language: "Language | None" = Language.RU
+    if stackchan:
+        system_prompt = stackchan_system_prompt(meta, await fetch_stackchan_usage())
+        language = stackchan_language(meta)
 
     transport = SmallWebRTCTransport(
         webrtc_connection=webrtc_connection,
@@ -306,7 +429,7 @@ async def run_bot(webrtc_connection):
             api_key=ELEVENLABS_API_KEY,
             aiohttp_session=_aiohttp_session,
             model=ELEVENLABS_STT_MODEL,
-            params=ElevenLabsSTTService.InputParams(language=Language.RU),
+            params=ElevenLabsSTTService.InputParams(language=language),
         )
     else:
         stt = FastWhisperSTTService(
@@ -315,7 +438,7 @@ async def run_bot(webrtc_connection):
             compute_type=WHISPER_COMPUTE_TYPE,
             beam_size=WHISPER_BEAM_SIZE,
             best_of=WHISPER_BEST_OF,
-            settings=WhisperSTTService.Settings(language=Language.RU),
+            settings=WhisperSTTService.Settings(language=language),
         )
 
     # LLM — Hermes via its OpenAI-compatible API.
@@ -328,7 +451,7 @@ async def run_bot(webrtc_connection):
         base_url=HERMES_BASE_URL,
         settings=OpenAILLMService.Settings(
             model=HERMES_MODEL,
-            system_instruction=SYSTEM_PROMPT,
+            system_instruction=system_prompt,
         ),
     )
 
@@ -350,7 +473,7 @@ async def run_bot(webrtc_connection):
             api_key=ELEVENLABS_API_KEY,
             voice_id=ELEVENLABS_VOICE_ID,
             model=ELEVENLABS_TTS_MODEL,
-            params=ElevenLabsTTSService.InputParams(language=Language.RU),
+            params=ElevenLabsTTSService.InputParams(language=language),
         )
     else:
         tts = PiperTTSService(
@@ -426,6 +549,9 @@ async def run_bot(webrtc_connection):
 
     pc_id = webrtc_connection.pc_id
     transcript_observer = TranscriptObserver(pc_id)
+    observers = [latency_observer, transcript_observer]
+    if stackchan:
+        observers.append(StackchanEventObserver(webrtc_connection.send_app_message))
 
     task = PipelineTask(
         pipeline,
@@ -440,7 +566,7 @@ async def run_bot(webrtc_connection):
             # aiortc detects via ICE consent loss if the device drops uncleanly).
             idle_timeout_secs=None,
         ),
-        observers=[latency_observer, transcript_observer],
+        observers=observers,
     )
 
     # Register this session so /api/text can find it. Done before the
@@ -553,6 +679,55 @@ class TranscriptObserver(BaseObserver):
                 broadcast_transcript({"pc_id": self._pc_id, "role": "assistant", "text": text})
 
 
+class StackchanEventObserver(BaseObserver):
+    """Streams turn events and captions to the Femto StackChan over the WebRTC
+    data channel, so its screen follows the conversation (listening → thinking
+    → speaking) instead of guessing from audio energy, and shows captions.
+
+    Messages (JSON, one per event):
+      {"t": "user_started"} / {"t": "user_stopped"}
+      {"t": "user_text", "text": ..., "final": bool}
+      {"t": "bot_started"} / {"t": "bot_stopped"}
+      {"t": "bot_text", "text": ...}      # TTS text as it's spoken
+    Every frame is seen once per hop through the pipeline; frame ids dedupe.
+    """
+
+    def __init__(self, send):
+        super().__init__()
+        self._send = send
+        self._seen: deque[int] = deque(maxlen=256)
+
+    def _once(self, frame) -> bool:
+        if frame.id in self._seen:
+            return False
+        self._seen.append(frame.id)
+        return True
+
+    async def on_push_frame(self, data: FramePushed):
+        frame = data.frame
+        msg = None
+        if isinstance(frame, UserStartedSpeakingFrame):
+            msg = {"t": "user_started"}
+        elif isinstance(frame, UserStoppedSpeakingFrame):
+            msg = {"t": "user_stopped"}
+        elif isinstance(frame, InterimTranscriptionFrame):
+            msg = {"t": "user_text", "text": frame.text, "final": False}
+        elif isinstance(frame, TranscriptionFrame):
+            msg = {"t": "user_text", "text": frame.text, "final": True}
+        elif isinstance(frame, BotStartedSpeakingFrame):
+            msg = {"t": "bot_started"}
+        elif isinstance(frame, BotStoppedSpeakingFrame):
+            msg = {"t": "bot_stopped"}
+        elif isinstance(frame, TTSTextFrame):
+            msg = {"t": "bot_text", "text": frame.text}
+        if msg is None or not self._once(frame):
+            return
+        try:
+            self._send(msg)
+        except Exception as exc:  # noqa: BLE001 — never break the pipeline over a caption
+            logger.debug(f"stackchan event send failed: {exc!r}")
+
+
 def _prewarm_whisper(app: FastAPI) -> None:
     """Load faster-whisper once at startup and run a tiny warmup transcribe.
 
@@ -652,7 +827,7 @@ async def offer(request: SmallWebRTCRequest, background_tasks: BackgroundTasks):
     """WebRTC signaling: receive the browser's offer, return our answer."""
 
     async def _on_connection(connection):
-        background_tasks.add_task(run_bot, connection)
+        background_tasks.add_task(run_bot, connection, request.request_data)
 
     answer = await _handler.handle_web_request(
         request=request,

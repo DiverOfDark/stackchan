@@ -97,6 +97,18 @@ systemPrompt: |-
 # ── ESP32 forward-compat (see README ESP32 section) ──────────────────────
 esp32Compat: false
 
+# Femto StackChan (M5Stack desk robot, github.com/DiverOfDark/stackchan):
+# bilingual butler persona + live Claude usage from trmnl-cyberpunk, and turn
+# events/captions over the WebRTC data channel. Only applies to offers whose
+# request_data.device is "femto-stackchan".
+stackchan:
+  # trmnl-cyberpunk base URL (serves /api/stackchan/usage). Empty = no usage.
+  usageUrl: ""
+  # Optional override of the persona ({name}/{honorific} placeholders).
+  systemPrompt: ""
+  # Bearer token if trmnl-cyberpunk sets STACKCHAN_TOKEN: put
+  # STACKCHAN_USAGE_TOKEN in the existing secret (envFrom).
+
 # ── STUNner WebRTC gateway (per-app resources; operator must be installed
 #    separately — `helm install stunner stunner/stunner -n stunner-system`) ─
 stunner:
