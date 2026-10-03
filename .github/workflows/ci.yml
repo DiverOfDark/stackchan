@@ -1,0 +1,86 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  host:
+    name: Host crates (tests)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Simulator deps (minifb)
+        run: sudo apt-get update && sudo apt-get install -y libxkbcommon-dev libwayland-dev libx11-dev libxcursor-dev libxrandr-dev
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test --workspace --release
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: render-sheet
+          path: target/sheet/
+          if-no-files-found: ignore
+
+  web:
+    name: Web UI
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - run: npm ci
+      - run: npm run check
+      - run: npm run build
+
+  firmware:
+    name: Firmware (ESP32-S3)
+    runs-on: ubuntu-latest
+    needs: web
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - uses: esp-rs/xtensa-toolchain@v1.7.0
+        with:
+          default: true
+          buildtargets: esp32s3
+          ldproxy: true
+          version: 1.97.0.0
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: espflash
+      - uses: actions/cache@v4
+        with:
+          path: |
+            firmware/.embuild
+            firmware/target
+          key: firmware-${{ hashFiles('firmware/Cargo.lock', 'firmware/sdkconfig.defaults', 'firmware/components/**/CMakeLists.txt', 'firmware/components/**/idf_component.yml') }}
+          restore-keys: firmware-
+      - name: Build
+        working-directory: firmware
+        run: cargo build --release
+      - name: Image
+        working-directory: firmware
+        run: espflash save-image --chip esp32s3 --flash-size 16mb target/xtensa-esp32s3-espidf/release/femto target/femto.bin
+      - uses: actions/upload-artifact@v4
+        with:
+          name: femto-firmware
+          path: firmware/target/femto.bin
+      - name: Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: firmware/target/femto.bin

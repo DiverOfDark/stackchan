@@ -6,6 +6,19 @@ fn main() {
     // ESP-DL (face detection) is C++: link its runtime.
     println!("cargo:rustc-link-arg=-lstdc++");
 
+    // Private backend defaults (git-ignored KEY=VALUE file); real env wins.
+    let local = Path::new(env!("CARGO_MANIFEST_DIR")).join("femto.env");
+    println!("cargo:rerun-if-changed={}", local.display());
+    for line in std::fs::read_to_string(&local).unwrap_or_default().lines() {
+        let Some((k, v)) = line.trim().split_once('=') else { continue };
+        if k.starts_with("FEMTO_") && std::env::var_os(k).is_none() {
+            println!("cargo:rustc-env={k}={v}");
+        }
+    }
+    for k in ["FEMTO_USAGE_URL", "FEMTO_USAGE_TOKEN", "FEMTO_VOICE_URL"] {
+        println!("cargo:rerun-if-env-changed={k}");
+    }
+
     // Build and embed the web UI (web/dist/index.html.gz). Set
     // FEMTO_SKIP_WEB=1 to reuse whatever is already built.
     let web = Path::new(env!("CARGO_MANIFEST_DIR")).join("../web");

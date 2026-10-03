@@ -31,7 +31,7 @@ export function mockDevice(opts: { setup?: boolean } = {}): Plugin {
   let session: string | null = null;
   let wifi = { ssid: setup ? null : 'HomeNet', password: '' };
   let conn: Connections & { token: string } = {
-    usage_url: 'https://trmnl.kirillorlov.pro',
+    usage_url: 'https://trmnl.example.com',
     usage_token_set: false,
     token: '',
     voice_url: '',

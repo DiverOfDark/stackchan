@@ -23,11 +23,17 @@ use crate::hub::{HubRef, NetCmd, NetworkInfo};
 use crate::store;
 
 pub const WIFI_ATTEMPTS: u8 = 3;
-/// The owner's trmnl-cyberpunk; overridable in the setup UI or with
-/// `FEMTO_USAGE_URL` at build time.
-pub const DEFAULT_USAGE_URL: &str = "https://trmnl.kirillorlov.pro";
-/// The owner's pipecat backend; same override rules as the usage URL.
-pub const DEFAULT_VOICE_URL: &str = "https://voice-assistant.kirillorlov.pro";
+/// Backend defaults baked in at build time (`FEMTO_USAGE_URL` /
+/// `FEMTO_VOICE_URL`, or `firmware/femto.env`); empty means "set it in the
+/// setup UI". Public builds ship without them.
+pub const DEFAULT_USAGE_URL: &str = match option_env!("FEMTO_USAGE_URL") {
+    Some(u) => u,
+    None => "",
+};
+pub const DEFAULT_VOICE_URL: &str = match option_env!("FEMTO_VOICE_URL") {
+    Some(u) => u,
+    None => "",
+};
 const POLL: Duration = Duration::from_secs(60);
 
 #[derive(Debug)]
@@ -72,7 +78,7 @@ impl NetConfig {
             pass,
             usage_url: store
                 .get(store::KEY_USAGE_URL)
-                .unwrap_or_else(|| option_env!("FEMTO_USAGE_URL").unwrap_or(DEFAULT_USAGE_URL).to_owned()),
+                .unwrap_or_else(|| DEFAULT_USAGE_URL.to_owned()),
             usage_token: store.get(store::KEY_USAGE_TOKEN).or_else(|| option_env!("FEMTO_USAGE_TOKEN").map(str::to_owned)).unwrap_or_default(),
         }
     }

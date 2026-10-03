@@ -4,3 +4,4 @@ node_modules/
 firmware/.embuild/
 firmware/target/
 web/dist/
+firmware/femto.env

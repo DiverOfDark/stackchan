@@ -30,6 +30,10 @@ struct BackendEvent {
 }
 
 pub fn start(backend_url: &str, cfg: &Settings) -> Option<Voice> {
+    if backend_url.is_empty() {
+        info!("voice: no backend URL configured");
+        return None;
+    }
     let url = CString::new(backend_url).ok()?;
     let lang = match cfg.voice_lang {
         femto_core::settings::VoiceLang::Ru => "ru",
