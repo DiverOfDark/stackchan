@@ -4,3 +4,4 @@ app/.venv
 app/__pycache__
 app/*.pyc
 *.tgz
+__pycache__/
