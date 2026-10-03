@@ -129,7 +129,7 @@ Each screen except S1–S3 has the **status band**: SESSION % and WEEK %, with 1
 - Pan follows the face's horizontal offset over a ±22° range; tilt follows the vertical offset over ±12° around a neutral pitch.
 - Smoothing: critically damped. Deadband ±2° to avoid hunting. Speed limited.
 - Servo torque turns off (VM_EN low) after 10 s at rest in Standby, to stop buzzing and save power.
-- Processing: the head glances up-right (pan +10°, tilt +6°).
+- During a voice turn (Listening / Processing / Speaking) the head holds still; only the eyes follow. Servo noise next to the mics hurts recognition.
 - Scanning: the design's −5° roll can't be done with 2 axes. Substitute a small pan "double-take" wiggle.
 - Safety: soft limits stay inside the mechanical range. Every move is clamped. Commands to the servos are rate-limited.
 

@@ -309,12 +309,20 @@ fn main() -> anyhow::Result<()> {
             }
         }
         if let Some(head) = &head {
-            let (pan, tilt) = tracker.head(&engine, cfg.follow);
+            // During a voice turn the head holds still: servo noise next to
+            // the mics hurts recognition, and it reads as fidgeting. The eyes
+            // keep following.
+            let in_turn = engine.screen().is_voice();
             let mut m = head.lock().unwrap();
             let t = &mut m.target;
-            // Engine pan + = viewer's right = robot's left (yaw −).
-            t.yaw = -pan;
-            t.pitch = motion::PITCH_NEUTRAL + tilt;
+            if in_turn {
+                tracker.hold();
+            } else {
+                let (pan, tilt) = tracker.head(&engine, cfg.follow);
+                // Engine pan + = viewer's right = robot's left (yaw −).
+                t.yaw = -pan;
+                t.pitch = motion::PITCH_NEUTRAL + tilt;
+            }
             // Keep looking for faces even in Standby; rest only without a camera.
             t.may_rest = !cfg.camera && engine.resolve_emotion() == femto_core::Emotion::Sleepy;
         }
@@ -434,6 +442,12 @@ impl Tracker {
 
     fn epoch(&mut self) -> Instant {
         *self.started.get_or_insert_with(Instant::now)
+    }
+
+    /// Freeze: no integration while held, so tracking resumes from here
+    /// without a jump.
+    fn hold(&mut self) {
+        self.last_step = None;
     }
 
     fn last_face(&self) -> Option<(f32, f32)> {
