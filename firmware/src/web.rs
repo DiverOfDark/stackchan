@@ -131,7 +131,7 @@ fn connections_json(hub: &HubRef) -> Value {
     json!({
         "usage_url": h.store.get(store::KEY_USAGE_URL).unwrap_or_else(|| net::DEFAULT_USAGE_URL.to_owned()),
         "usage_token_set": h.store.get(store::KEY_USAGE_TOKEN).is_some(),
-        "voice_url": h.store.get(store::KEY_VOICE_URL).unwrap_or_default(),
+        "voice_url": h.store.get(store::KEY_VOICE_URL).unwrap_or_else(|| net::DEFAULT_VOICE_URL.to_owned()),
     })
 }
 
@@ -291,7 +291,7 @@ pub fn start(hub: &HubRef) -> Result<EspHttpServer<'static>> {
         let (url, token) = {
             let h = hub.lock().unwrap();
             if voice {
-                (h.store.get(store::KEY_VOICE_URL).unwrap_or_default(), String::new())
+                (h.store.get(store::KEY_VOICE_URL).unwrap_or_else(|| net::DEFAULT_VOICE_URL.to_owned()), String::new())
             } else {
                 (h.store.get(store::KEY_USAGE_URL).unwrap_or_else(|| net::DEFAULT_USAGE_URL.to_owned()), h.store.get(store::KEY_USAGE_TOKEN).unwrap_or_default())
             }

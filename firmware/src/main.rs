@@ -249,7 +249,7 @@ fn main() -> anyhow::Result<()> {
                     after_boot = Some(Screen::Face);
                     report_memory_tag("wifi connected");
                     if voice.is_none() {
-                        let url = hub.lock().unwrap().store.get(store::KEY_VOICE_URL).unwrap_or_default();
+                        let url = hub.lock().unwrap().store.get(store::KEY_VOICE_URL).unwrap_or_else(|| net::DEFAULT_VOICE_URL.to_owned());
                         voice = voice::start(&url, &cfg);
                     }
                 }

@@ -26,6 +26,8 @@ pub const WIFI_ATTEMPTS: u8 = 3;
 /// The owner's trmnl-cyberpunk; overridable in the setup UI or with
 /// `FEMTO_USAGE_URL` at build time.
 pub const DEFAULT_USAGE_URL: &str = "https://trmnl.kirillorlov.pro";
+/// The owner's pipecat backend; same override rules as the usage URL.
+pub const DEFAULT_VOICE_URL: &str = "https://voice-assistant.kirillorlov.pro";
 const POLL: Duration = Duration::from_secs(60);
 
 #[derive(Debug)]
