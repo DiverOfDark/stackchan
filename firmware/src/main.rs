@@ -22,6 +22,7 @@ use std::time::{Duration, Instant};
 
 use esp_idf_svc::hal::peripherals::Peripherals;
 use esp_idf_svc::sys;
+use femto_core::settings::HeadMotion;
 use femto_core::{Engine, Event, Screen, Settings};
 use femto_render::{Canvas, Renderer};
 use log::{info, warn};
@@ -92,7 +93,7 @@ fn main() -> anyhow::Result<()> {
     let mut servo_pins = Some((p.uart1, p.pins.gpio6, p.pins.gpio7));
     let mut head: Option<motion::MotionRef> = None;
     if let Some(body) = board.body.as_mut() {
-        head = attach_body(body, &mut servo_pins, &nvs);
+        head = attach_body(body, &mut servo_pins, &nvs, cfg.head_motion == HeadMotion::Still);
     }
     let mut body_probe_at = Instant::now();
     let led_state: leds::LedRef = Default::default();
@@ -329,7 +330,7 @@ fn main() -> anyhow::Result<()> {
                 match probe.version() {
                     Ok(Some(v)) if probe.init(false).is_ok() => {
                         info!("PY32 body expander v{v} found after {} s", boot_at.elapsed().as_secs());
-                        head = attach_body(&mut probe, &mut servo_pins, &nvs);
+                        head = attach_body(&mut probe, &mut servo_pins, &nvs, cfg.head_motion == HeadMotion::Still);
                         hub.lock().unwrap().motion = head.clone();
                         leds::spawn(probe, led_state.clone());
                     }
@@ -348,13 +349,17 @@ fn main() -> anyhow::Result<()> {
             if in_turn || handled {
                 tracker.hold();
             } else {
-                let (pan, tilt) = tracker.head(&engine, cfg.follow);
+                let (pan, tilt) = tracker.head(&engine, cfg.follow, cfg.head_motion);
                 // Engine pan + = viewer's right = robot's left (yaw −).
                 t.yaw = -pan;
                 t.pitch = motion::PITCH_NEUTRAL + tilt;
             }
-            // Keep looking for faces even in Standby; rest only without a camera.
-            t.may_rest = !cfg.camera && engine.resolve_emotion() == femto_core::Emotion::Sleepy;
+            // Lively keeps looking for faces even in Standby and rests only
+            // without a camera; otherwise any settled pose may rest.
+            t.may_rest = match cfg.head_motion {
+                HeadMotion::Lively => !cfg.camera && engine.resolve_emotion() == femto_core::Emotion::Sleepy,
+                _ => true,
+            };
         }
         let frame = engine.frame();
         {
@@ -468,10 +473,27 @@ struct Tracker {
     last_step: Option<Instant>,
     err: (f32, f32),
     started: Option<Instant>,
+    /// Calm: when the head last turned toward a face.
+    turned_at: Option<Instant>,
 }
 
 impl Tracker {
     const GAIN_DEG_S: f32 = 40.0;
+    /// Calm: a face this far off-centre (of the half frame) turns the head;
+    /// nearer than that, only the eyes follow.
+    const CALM_TURN_AT: (f32, f32) = (0.35, 0.4);
+    /// Calm: degrees per unit of face offset (about half the camera's field
+    /// of view, a bit short so a turn never overshoots).
+    const CALM_DEG: (f32, f32) = (24.0, 18.0);
+    /// Calm: the camera settles this long after a turn before the next.
+    const CALM_GAP: Duration = Duration::from_secs(2);
+    /// Calm: seconds between glances when nobody's around, and how many
+    /// before settling at home.
+    const CALM_GLANCE_S: u64 = 20;
+    const CALM_GLANCES: u64 = 3;
+    /// A face lost nearer the centre than this (of the half frame) didn't
+    /// walk out of view.
+    const EDGE: f32 = 0.55;
 
     fn seen(&mut self, nx: f32, ny: f32) {
         self.last_seen = Some(Instant::now());
@@ -492,18 +514,51 @@ impl Tracker {
         self.last_seen.map(|_| self.err)
     }
 
+    /// The face was last seen well inside the frame: it was lost there
+    /// (looked away, detector miss), so looking about won't find it.
+    fn lost_in_view(&self) -> bool {
+        self.last_seen.is_some() && self.err.0.abs() < Self::EDGE && self.err.1.abs() < Self::EDGE
+    }
+
     fn lost_for(&self) -> Duration {
         self.last_seen.map_or(Duration::MAX, |t| t.elapsed())
     }
 
     /// (pan, tilt) in engine convention (pan + = viewer's right, tilt + = up).
-    fn head(&mut self, engine: &Engine, follow: bool) -> (f32, f32) {
+    fn head(&mut self, engine: &Engine, follow: bool, mode: HeadMotion) -> (f32, f32) {
         let now = Instant::now();
         let dt = self.last_step.map_or(0.0, |t| (now - t).as_secs_f32()).min(0.2);
         self.last_step = Some(now);
         let em = engine.resolve_emotion();
         let tracking = follow && self.lost_for() < Duration::from_millis(1200) && !matches!(em, femto_core::Emotion::Sleepy | femto_core::Emotion::Thinking);
-        if tracking {
+        if mode == HeadMotion::Still {
+            // Only the eyes move; the head eases home and stays there.
+            let k = (dt * 1.5).min(1.0);
+            self.yaw -= self.yaw * k;
+            self.pitch -= self.pitch * k;
+            (self.yaw, self.pitch)
+        } else if tracking && mode == HeadMotion::Calm {
+            // Eyes lead: a face well off-centre gets one turn that roughly
+            // centres it, then the head holds while the camera settles.
+            let (ex, ey) = self.err;
+            if self.turned_at.is_none_or(|t| t.elapsed() > Self::CALM_GAP) {
+                let mut turned = false;
+                if ex.abs() > Self::CALM_TURN_AT.0 {
+                    self.yaw += ex * Self::CALM_DEG.0;
+                    turned = true;
+                }
+                if ey.abs() > Self::CALM_TURN_AT.1 {
+                    self.pitch -= ey * Self::CALM_DEG.1;
+                    turned = true;
+                }
+                if turned {
+                    self.turned_at = Some(now);
+                }
+            }
+            self.yaw = self.yaw.clamp(-45.0, 45.0);
+            self.pitch = self.pitch.clamp(-20.0, 30.0);
+            (self.yaw, self.pitch)
+        } else if tracking {
             // Deadband so the head doesn't hunt around a centred face.
             let (ex, ey) = self.err;
             if ex.abs() > 0.12 {
@@ -526,12 +581,19 @@ impl Tracker {
             self.yaw -= self.yaw * k;
             self.pitch -= self.pitch * k;
             (self.yaw, self.pitch)
-        } else if self.lost_for() > Duration::from_secs(6) {
-            // Nobody around: look about for a face (the camera only sees
-            // where the head points). A new glance every ~4 s.
+        } else if self.lost_for() > Duration::from_secs(6) && !self.lost_in_view() {
+            // Nobody around (the face left through an edge, or none yet):
+            // look about for it (the camera only sees where the head points). A new glance every ~4 s.
+            // Calm: a few glances, far apart, then home.
             const GLANCES: [(f32, f32); 6] = [(0.0, 6.0), (-25.0, 10.0), (20.0, 2.0), (0.0, 15.0), (25.0, 10.0), (-15.0, 0.0)];
-            let slot = (now.duration_since(self.epoch()).as_secs() / 4) as usize % GLANCES.len();
-            let (gy, gp) = GLANCES[slot];
+            let up = now.duration_since(self.epoch()).as_secs();
+            let (gy, gp) = if mode == HeadMotion::Lively {
+                GLANCES[(up / 4) as usize % GLANCES.len()]
+            } else {
+                let alone = (self.lost_for().as_secs() - 6).min(up);
+                let slot = alone / Self::CALM_GLANCE_S;
+                if slot < Self::CALM_GLANCES { GLANCES[1 + slot as usize] } else { (0.0, 0.0) }
+            };
             let k = (dt * 1.5).min(1.0);
             self.yaw += (gy - self.yaw) * k;
             self.pitch += (gp - self.pitch) * k;
@@ -586,11 +648,12 @@ fn attach_body(
     body: &mut femto_drivers::py32::Py32<board::Bus>,
     pins: &mut Option<(esp_idf_svc::hal::uart::UART1<'static>, esp_idf_svc::hal::gpio::Gpio6<'static>, esp_idf_svc::hal::gpio::Gpio7<'static>)>,
     nvs: &esp_idf_svc::nvs::EspDefaultNvsPartition,
+    still: bool,
 ) -> Option<motion::MotionRef> {
     body.set_servo_power(true).ok();
     std::thread::sleep(Duration::from_millis(200));
     let (uart, tx, rx) = pins.take()?;
-    match motion::start(uart, tx, rx, nvs.clone()) {
+    match motion::start(uart, tx, rx, nvs.clone(), still) {
         Ok(t) => Some(t),
         Err(e) => {
             warn!("motion: {e}");

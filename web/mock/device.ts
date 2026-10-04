@@ -12,6 +12,7 @@ const defaults: Settings = {
   accent: 'signal-red',
   fx: true,
   follow: true,
+  head_motion: 'calm',
   camera: true,
   brightness: null,
   volume: 60,
@@ -37,7 +38,7 @@ export function mockDevice(opts: { setup?: boolean } = {}): Plugin {
     voice_url: '',
   };
   let screen = 'face';
-  let motion = { yaw: 0, pitch: 25, zero: { yaw: 478, pitch: 544 }, torque: true, limits: { yaw: 60, pitch_min: 0, pitch_max: 60 } };
+  let motion = { yaw: 0, pitch: 25, zero: { yaw: 478, pitch: 544 }, torque: true, move_ms: 60, stiffness: 80, max_speed: 60, rest_pitch: false, limits: { yaw: 60, pitch_min: 0, pitch_max: 60 } };
 
   // A small gradient BMP standing in for camera/screen frames.
   const bmp = (w: number, h: number, hue: number) => {
@@ -196,6 +197,7 @@ export function mockDevice(opts: { setup?: boolean } = {}): Plugin {
             const b = await body(req);
             if (b.jog) [motion.yaw, motion.pitch] = b.jog;
             if (b.torque !== undefined) motion.torque = b.torque;
+            for (const k of ['move_ms', 'stiffness', 'max_speed', 'rest_pitch'] as const) if (b[k] !== undefined) (motion as any)[k] = b[k];
             return send(res, 204);
           }
           case 'POST /motion/zero':

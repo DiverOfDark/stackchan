@@ -59,6 +59,20 @@ pub enum LedMode {
     Off,
 }
 
+/// How much the head moves on its own (servos are noisy).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize), serde(rename_all = "lowercase"))]
+pub enum HeadMotion {
+    /// Head stays home; only the eyes move.
+    Still,
+    /// Eyes lead; the head turns only for faces well off-centre, glances
+    /// about rarely, and lets go of torque when idle.
+    #[default]
+    Calm,
+    /// Head follows continuously and looks about every few seconds.
+    Lively,
+}
+
 #[derive(Clone, Debug, PartialEq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize), serde(default))]
 pub struct Settings {
@@ -72,6 +86,7 @@ pub struct Settings {
     pub fx: bool,
     /// Eyes + servos follow faces.
     pub follow: bool,
+    pub head_motion: HeadMotion,
     pub camera: bool,
     /// 10–100, or `None` for auto (ambient light sensor).
     pub brightness: Option<u8>,
@@ -97,6 +112,7 @@ impl Default for Settings {
             accent: Accent::SignalRed,
             fx: true,
             follow: true,
+            head_motion: HeadMotion::Calm,
             camera: true,
             brightness: None,
             volume: 60,
