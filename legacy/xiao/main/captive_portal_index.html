@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>pipecat-voice setup</title>
+  <style>
+    body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+           max-width: 28rem; margin: 2rem auto; padding: 0 1rem; color: #222; }
+    h1 { font-size: 1.25rem; margin-bottom: 0.25rem; }
+    .sub { color: #666; margin-top: 0; font-size: 0.85rem; }
+    label { display: block; margin-top: 1rem; font-size: 0.85rem; color: #444; }
+    input { width: 100%; padding: 0.6rem; font-size: 1rem; border: 1px solid #ccc;
+            border-radius: 4px; box-sizing: border-box; }
+    button { margin-top: 1.5rem; width: 100%; padding: 0.8rem; font-size: 1rem;
+             background: #2563eb; color: white; border: 0; border-radius: 4px; }
+    button:active { background: #1d4ed8; }
+    .ok { color: #16a34a; }
+    .err { color: #dc2626; }
+  </style>
+</head>
+<body>
+  <h1>pipecat-voice setup</h1>
+  <p class="sub">Wi-Fi credentials and backend URL are stored on the device.</p>
+  <form method="POST" action="/save">
+    <label>Wi-Fi SSID
+      <input name="ssid" required maxlength="31" autocomplete="off">
+    </label>
+    <label>Wi-Fi password
+      <input name="psk" type="password" maxlength="63" autocomplete="off">
+    </label>
+    <label>Backend URL
+      <input name="backend" required maxlength="127"
+             placeholder="https://pipecat.example.com" autocomplete="off">
+    </label>
+    <button type="submit">Save &amp; reboot</button>
+  </form>
+</body>
+</html>

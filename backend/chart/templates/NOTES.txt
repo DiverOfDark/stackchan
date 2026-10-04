@@ -1,0 +1,25 @@
+{{ .Chart.Name }} {{ .Chart.AppVersion }} installed as release {{ .Release.Name }} in namespace {{ .Release.Namespace }}.
+
+Web client (HTTPS):
+{{- if .Values.ingress.enabled }}
+  https://{{ .Values.ingress.host }}
+{{- else }}
+  Ingress is disabled. The web client + signaling are on the Service
+  "{{ include "voice-assistant.fullname" . }}:{{ .Values.service.port }}".
+  Browser microphone access requires a secure context — front it with
+  HTTPS yourself.
+{{- end }}
+
+STUNner gateway:
+  kubectl -n {{ .Release.Namespace }} get gateway,udproute
+  kubectl -n {{ .Release.Namespace }} get svc -l stunner.l7mp.io/owned-by
+
+Reminders:
+  • The STUNner operator must be running (separate install).
+  • Seed the API key + TURN credentials before pods become Ready.
+{{- if .Values.hermes.apiKey.externalSecret.enabled }}
+  • Hermes API key — OpenBao path: {{ .Values.hermes.apiKey.externalSecret.remoteKey }} (property: {{ .Values.hermes.apiKey.externalSecret.property }}).
+{{- end }}
+{{- if .Values.stunner.auth.externalSecret.enabled }}
+  • TURN credentials — OpenBao path: {{ .Values.stunner.auth.externalSecret.remoteKey }} (properties: {{ .Values.stunner.auth.externalSecret.usernameProperty }}, {{ .Values.stunner.auth.externalSecret.passwordProperty }}).
+{{- end }}

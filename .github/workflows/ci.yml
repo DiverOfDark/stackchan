@@ -25,6 +25,68 @@ jobs:
           path: target/sheet/
           if-no-files-found: ignore
 
+  backend:
+    name: Voice backend (pytest)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+          cache-dependency-glob: backend/uv.lock
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      # faster-whisper + Piper downloads for the integration tests.
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/huggingface
+            ~/.cache/pipecat-tests
+          key: models-${{ runner.os }}-whisper-tiny-piper-ru_RU-irina-medium
+      - run: uv sync --group dev
+      - run: uv run pytest -v
+
+  image:
+    name: Voice backend image
+    needs: backend
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        if: github.event_name != 'pull_request'
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      # Built on every main push, whatever changed: homelab's Argo app pulls
+      # sha-<short commit of this repo>, so every commit needs its image.
+      - id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/diverofdark/stackchan-voice
+          tags: |
+            type=raw,value=latest,enable={{is_default_branch}}
+            type=ref,event=branch
+            type=ref,event=pr
+            type=sha,format=short
+      - uses: docker/build-push-action@v6
+        with:
+          context: ./backend
+          push: ${{ github.event_name != 'pull_request' }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
   web:
     name: Web UI
     runs-on: ubuntu-latest
@@ -69,6 +131,8 @@ jobs:
             firmware/target
           key: firmware-${{ hashFiles('firmware/Cargo.lock', 'firmware/sdkconfig.defaults', 'firmware/components/**/CMakeLists.txt', 'firmware/components/**/idf_component.yml') }}
           restore-keys: firmware-
+      - name: Wake-word model embedded
+        run: python3 tools/wake-word/embed.py --check
       - name: Build
         working-directory: firmware
         run: cargo build --release
