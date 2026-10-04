@@ -181,8 +181,8 @@ Two strips of 6 (LEDs 0–5 left, 6–11 right), driven through the PY32 at 25 H
   - The LLM replies in the language of the user's turn.
   - TTS uses the multilingual `eleven_flash_v2_5` with the same voice for both languages.
   - The `voice_lang` setting (auto / ru / en) can force one language.
-- FR-17. On wake: show S6 and connect to the pipecat backend over WebRTC (libpeer, G.722 16 kHz, the same signalling as today). Audio is buffered during the connect, as in the existing firmware.
-- FR-18. The backend sends state and text over a **WebRTC data channel** (§7.2). The device drives S6 → S7 → S8 from those events, not from guessing at audio energy.
+- FR-17. On wake: show S6 and open a WebSocket to the backend (`wss://…/ws/femto`, raw 16 kHz PCM both ways; no TURN relay). Audio is buffered during the connect, as in the existing firmware. *(Was WebRTC/libpeer/G.722 until 2026-10-04; replaced because the TURN relay was the least reliable part, and TCP turns packet loss into a short delay instead of a gap.)*
+- FR-18. The backend sends state and text as **JSON text frames** on the same WebSocket (§7.2). The device drives S6 → S7 → S8 from those events, not from guessing at audio energy.
 - FR-19. Captions:
   - The user's live (interim) transcript appears under the YOU tag.
   - The bot's text appears under the name tag, shown sentence by sentence as the TTS speaks it.
@@ -332,8 +332,8 @@ Authorization: Bearer <STACKCHAN_TOKEN>      # new env var; 401 if set and misma
 │   NetTask   Wi-Fi, SNTP, mDNS, HTTP+WS (SPA + /api), OTA           │
 │   UsageTask poll /api/stackchan/usage → UsageState                 │
 │   VisionTask camera → face detect → PresenceState                  │
-│   AudioTask I2S full-duplex (ES7210/AW88298), wake word, G.722     │
-│   VoiceTask WebRTC (libpeer) + data channel → VoiceState           │
+│   AudioTask I2S full-duplex (ES7210/AW88298), wake word, PCM       │
+│   VoiceTask WebSocket (PCM + JSON events) → VoiceState             │
 │   MotionTask SCS0009 UART bus, smoothing, torque mgmt              │
 │   InputTask touch (FT6336U, Si12T), IMU, proximity                 │
 │ StateHub: single mood/state machine; tasks publish events, render  │

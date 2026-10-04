@@ -1,8 +1,10 @@
 // Adapted from pipecat-voice-assistant pv_app/session.cpp @ f9fd4e7.
-// Unchanged: onPeerState, onLocalSdp, onInboundAudio, buildAndOffer,
-// mainLoopTask and the capture/turn logic. Changed: CoreS3 mono audio in
-// place of the XVF3800 32-bit stereo stream, no LED ring/button/wake-sample
-// upload, push-to-talk, and a state/level output for the Rust UI.
+// Kept: the on-demand turn model (connect on wake, hang up after the
+// reply), the bring-up backlog, echo guard, reconnect budget and turn
+// timeouts. Changed: CoreS3 mono audio in place of the XVF3800 stream, no
+// LED ring/button/wake-sample upload, push-to-talk, a state/level output
+// for the Rust UI, and a WebSocket (raw PCM + JSON events) instead of
+// WebRTC/G.722 — see backend/femto_ws.py for the other end.
 #include "session.hpp"
 
 #include <algorithm>
@@ -15,351 +17,205 @@
 #include "domain/gain.hpp"
 #include "domain/led_fsm.hpp"
 #include "esp_heap_caps.h"
-#include "freertos/idf_additions.h"
 #include "esp_log.h"
-#include "transport/wake_engine.hpp"
+#include "esp_wifi.h"
+#include "freertos/idf_additions.h"
+
+extern "C" {
+#include "wake_word.h"
+}
 
 namespace {
 constexpr const char* kTag = "voice";
-// Tuning constants — same values that the legacy webrtc_session.c
-// settled on after the energy-gate + watchdog series of fixes.
-constexpr int  kRetryIntervalMs       = 5000;
-constexpr int  kSessionIdleTimeoutMs  = 10'000;
-// On-demand connect: give up bring-up if relay/ICE/DTLS doesn't reach
-// Completed within this window, so a failed connect doesn't strand the turn.
+// Give up bring-up (DNS + TCP + TLS + upgrade) after this long, so a failed
+// connect doesn't strand the turn.
 constexpr int  kConnectTimeoutMs      = 12'000;
-// A healthy backend streams downlink audio continuously (~50 pkts/s, silence
-// between TTS). No inbound packet for this long while connected ⇒ the media
-// path is dead even if ICE consent still trickles through the relay — trigger
-// a reconnect. Generous so brief jitter never false-triggers it.
-constexpr int  kMediaDeadMs           = 5'000;
 // Reconnect attempts within one turn before giving up and ending the session.
-// Bounds a flapping/broken relay so it can't loop forever.
 constexpr int  kMaxReconnectsPerTurn  = 3;
 constexpr int  kSpeakingPcmThreshold  = 1000;     // ~ -30 dBFS
-// Drives the TALKING LED only — NOT uplink gating. Turn detection lives on
-// the backend (Silero VAD); a device-side energy gate on top of it just
-// clipped the quiet start of commands and starved STT.
+// Drives the "user talking" state only — NOT uplink gating. Turn detection
+// lives on the backend (Silero VAD).
 constexpr int  kMicActiveRmsThreshold = 4000;     // ~ -18 dBFS (post boost)
 
 // Mic input gain (linear), applied with a soft-knee limiter via
 // domain::scale_to_i16 so loud speech saturates smoothly instead of
-// hard-clipping. gain 1.0 == the old `raw >> 16`.
+// hard-clipping.
 constexpr float kUplinkGain           = 4.0f;     // +12 dB — healthy STT level
 constexpr float kWakeGain             = 8.0f;     // +18 dB — what the model trained on
 
-// Wake-trigger capture: how much mic audio (mono_uplink, 16 kHz int16) to keep
-// rolling so a fire can be snapshotted with the audio that caused it. The fire
-// lands at the END of this buffer, so it holds the triggering phrase (positive
-// clips are a 1.5 s window) plus ~1.5 s of lead-in context — useful for both
-// labelling and the training slide-window (clip 1.5 s / aug 3.2 s).
-constexpr int          kWakeSampleRate      = 16000;
-constexpr std::size_t  kWakeCaptureSamples  = kWakeSampleRate * 3;   // 3 s = 96 KB PSRAM
-
-
-
-// Half-duplex echo guard: how long after the last inbound TTS frame to keep
-// the mic uplink muted. Must outlast the playback-buffer tail (~200 ms) so the
-// speaker has gone quiet before we listen again. Prevents the bot hearing
-// itself and self-interrupting. See the capture task.
+// Half-duplex echo guard: how long after the last loud frame *played* to
+// keep the mic uplink muted, so the bot doesn't hear itself and
+// self-interrupt.
 constexpr int  kEchoGuardMs           = 400;
 
-// Conversation turn timeouts. Two regimes so the silence countdown only runs
-// AFTER the bot has answered — not during the (variable, sometimes multi-second)
-// STT+LLM+TTS round-trip, which used to end the turn before the reply arrived:
-//   - while awaiting/receiving the bot's reply (user spoke most recently, or
-//     just woke), keep the turn open this long — a safety net for a slow or
-//     dead backend, and it bridges gaps between TTS chunks / tool-call pauses;
-//   - once the bot's reply finishes, end the turn after this much user silence.
-// Each bot TTS frame and each user-speech frame pushes the deadline, so the
-// short window only elapses when both have genuinely gone quiet post-reply.
-// Window to wait for the bot's first reply. On-demand connect adds ~4-5 s of
-// relay/ICE/DTLS bring-up plus the buffered-utterance flush before the backend
-// even hears the question, then STT+LLM+TTS — the first audio can land ~13 s
-// after connect. Generous so we don't tear the turn down right before the
-// answer; reset when the peer reaches Completed (see onPeerState) so the clock
-// starts at connect, not at the user's speech during bring-up.
-constexpr int  kAwaitResponseMs       = 20000;   // user/bot still expected
-// Gap tolerance after a bot TTS chunk. The reply is multi-part — narration →
-// tool call → answer sentences — with 4-5 s (sometimes much longer) silent gaps
-// while a tool runs. At 5 s the device tore the session down inside those gaps
-// and lost the rest of the answer (confirmed: hung up exactly 5 s after the last
-// loud frame). 15 s comfortably bridges inter-sentence + typical tool gaps and
-// doubles as a hands-free follow-up window. (A backend end-of-turn signal over a
-// data channel would let us shorten this — see CLAUDE.md open items.)
-constexpr int  kPostResponseSilenceMs = 15000;   // bridge tool/inter-sentence gaps + follow-up
+// Turn timeouts. While awaiting the bot's reply the turn stays open this long
+// (a safety net for a slow or dead backend); each played bot frame then
+// pushes a shorter post-reply window, which also serves as a hands-free
+// follow-up window. Tool calls can leave multi-second gaps mid-answer.
+constexpr int  kAwaitResponseMs       = 20000;
+constexpr int  kPostResponseSilenceMs = 15000;
 
+constexpr std::size_t kFrameBytes     = domain::kFramesPerPacket * sizeof(int16_t);  // 20 ms
+// Uplink backlog: speech during bring-up (and any network stall) waits here,
+// in PSRAM. ~8 s.
+constexpr std::size_t kUplinkBytes    = kFrameBytes * 400;
+// Frames per WebSocket message once connected (catch-up after bring-up).
+constexpr std::size_t kSendBatch      = 4;
+// Downlink: the backend runs up to 300 ms ahead of real time; the buffer
+// holds that plus any Wi-Fi stall. Playback starts once kPrefill is queued.
+constexpr std::size_t kPlaybackBytes  = domain::kSampleRateHz * 2 * 3 / 2;   // 1.5 s
+constexpr std::size_t kPrefillBytes   = domain::kSampleRateHz * 2 * 12 / 100; // 120 ms
+// The tail of a reply shorter than the prefill plays once this quiet.
+constexpr int  kPrefillQuietMs        = 80;
 
-constexpr int  kMainStack             = 16 * 1024;
+constexpr int  kMainStack             = 8 * 1024;
 constexpr int  kCapStack              = 24 * 1024;
 constexpr int  kPlayStack             = 8 * 1024;
+constexpr int  kSendStack             = 6 * 1024;
 constexpr int  kMainPrio              = 7;
 constexpr int  kCapPrio               = 8;
 constexpr int  kPlayPrio              = 8;
+constexpr int  kSendPrio              = 7;
 constexpr int  kMainCore              = 0;
 constexpr int  kAvCore                = 1;
-constexpr std::size_t kPlaybackBufBytes = domain::kSampleRateHz * 2 / 5;
-constexpr std::size_t kPlaybackBufTrig  = domain::kFramesPerPacket * sizeof(int16_t);
+constexpr UBaseType_t kPsram          = MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT;
 }  // namespace
 
 namespace femto {
-using namespace ::transport;
-namespace transport = ::transport;
+
+// ---------- Backlog ----------------------------------------------------------
+
+bool Backlog::init(std::size_t capacity)
+{
+    buf_ = static_cast<uint8_t*>(heap_caps_malloc(capacity, kPsram));
+    cap_ = buf_ ? capacity : 0;
+    return buf_ != nullptr;
+}
+
+void Backlog::push(const void* data, std::size_t len)
+{
+    std::lock_guard<std::mutex> lk(mtx_);
+    const auto* p = static_cast<const uint8_t*>(data);
+    for (std::size_t i = 0; i < len && cap_; ++i) {
+        buf_[(head_ + count_) % cap_] = p[i];
+        if (count_ < cap_) count_++;
+        else head_ = (head_ + 1) % cap_;   // full: drop the oldest byte
+    }
+}
+
+std::size_t Backlog::pop(void* out, std::size_t max)
+{
+    std::lock_guard<std::mutex> lk(mtx_);
+    const std::size_t n = std::min(max, count_);
+    auto* o = static_cast<uint8_t*>(out);
+    for (std::size_t i = 0; i < n; ++i) o[i] = buf_[(head_ + i) % cap_];
+    head_ = cap_ ? (head_ + n) % cap_ : 0;
+    count_ -= n;
+    return n;
+}
+
+void Backlog::clear()
+{
+    std::lock_guard<std::mutex> lk(mtx_);
+    head_ = count_ = 0;
+}
+
+// ---------- Session ----------------------------------------------------------
 
 Session::Session(std::string backend_url, AudioCores3& audio)
-    : backend_url_(std::move(backend_url)), audio_(audio), signaling_(backend_url_) {}
+    : backend_url_(std::move(backend_url)), audio_(audio) {}
 
 void Session::start()
 {
     if (running_.exchange(true)) return;
-    if (transport::Peer::initLibpeerOnce() != ESP_OK) {
-        ESP_LOGE(kTag, "libpeer init failed");
+    playback_buf_ = xStreamBufferCreateWithCaps(kPlaybackBytes, kFrameBytes, kPsram);
+    if (!playback_buf_ || !uplink_.init(kUplinkBytes)) {
+        ESP_LOGE(kTag, "audio buffers: out of PSRAM");
         running_ = false;
         return;
     }
-    playback_buf_ = xStreamBufferCreate(kPlaybackBufBytes, kPlaybackBufTrig);
-    transport::WakeEngine::initOnce();
+    wake_word_init();
     // Stacks in PSRAM: internal RAM is spoken for (Wi-Fi, camera, display).
     // None of these tasks touch flash, so the stacks stay reachable.
-    constexpr UBaseType_t kStackCaps = MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT;
-    BaseType_t a = xTaskCreatePinnedToCoreWithCaps(mainLoopTaskEntry, "rtc_loop", kMainStack, this, kMainPrio, nullptr, kMainCore, kStackCaps);
-    BaseType_t b = xTaskCreatePinnedToCoreWithCaps(captureTaskEntry, "rtc_cap", kCapStack, this, kCapPrio, nullptr, kAvCore, kStackCaps);
-    BaseType_t c = xTaskCreatePinnedToCoreWithCaps(playbackTaskEntry, "rtc_play", kPlayStack, this, kPlayPrio, nullptr, kAvCore, kStackCaps);
-    if (a != pdPASS || b != pdPASS || c != pdPASS)
-        ESP_LOGE(kTag, "task create failed (internal RAM?) main=%d cap=%d play=%d", (int)a, (int)b, (int)c);
+    BaseType_t a = xTaskCreatePinnedToCoreWithCaps(mainLoopTaskEntry, "voice_loop", kMainStack, this, kMainPrio, nullptr, kMainCore, kPsram);
+    BaseType_t b = xTaskCreatePinnedToCoreWithCaps(captureTaskEntry, "voice_cap", kCapStack, this, kCapPrio, nullptr, kAvCore, kPsram);
+    BaseType_t c = xTaskCreatePinnedToCoreWithCaps(playbackTaskEntry, "voice_play", kPlayStack, this, kPlayPrio, nullptr, kAvCore, kPsram);
+    BaseType_t d = xTaskCreatePinnedToCoreWithCaps(senderTaskEntry, "voice_send", kSendStack, this, kSendPrio, nullptr, kMainCore, kPsram);
+    if (a != pdPASS || b != pdPASS || c != pdPASS || d != pdPASS)
+        ESP_LOGE(kTag, "task create failed main=%d cap=%d play=%d send=%d", (int)a, (int)b, (int)c, (int)d);
 }
 
-bool Session::buildAndOffer()
+std::shared_ptr<WsLink> Session::link()
 {
-    // The STUNner TURN credentials are fetched once at boot. If that fetch
-    // failed (e.g. the backend was restarting), ice_ is empty — and with no
-    // relay the device can't reach the in-cluster backend (its pod IP isn't
-    // LAN-routable), so ICE never completes and the connect times out. Re-fetch
-    // lazily here so a bad boot fetch / backend restart self-heals on the next
-    // wake instead of stranding the device until a reboot. Only when empty, so
-    // the happy path adds no latency.
-    if (ice_.empty()) {
-        ESP_LOGW(kTag, "no ICE servers cached — re-fetching from backend");
-        auto raw = signaling_.fetchIceServers();
-        ice_.clear();
-        ice_.reserve(raw.size());
-        for (auto& s : raw)
-            ice_.push_back({std::move(s.url), std::move(s.username), std::move(s.credential)});
-        ESP_LOGI(kTag, "ICE: %u server(s) after re-fetch", (unsigned)ice_.size());
-    }
+    std::lock_guard<std::mutex> lk(link_mtx_);
+    return link_;
+}
 
-    peer_.reset();
-    peer_ = transport::Peer::create(ice_);
-    if (!peer_) return false;
-
-    // Fresh inbound G.722 stream for this connection. (The uplink encoder is
-    // reset by the capture task when the wake word starts a new utterance, so
-    // the buffered head-start and the live audio stay one continuous stream.)
-    domain::g722_init(g722_dec_);
-
-    peer_->setOnStateChange([this](transport::PeerState s) { onPeerState(s); });
-    peer_->setOnLocalSdp   ([this](std::string sdp)        { onLocalSdp(std::move(sdp)); });
-    peer_->setOnAudio      ([this](const uint8_t* d, std::size_t n) { onInboundAudio(d, n); });
-    peer_->setOnData([this](const char* d, std::size_t n) {
-        std::lock_guard<std::mutex> lk(events_mtx_);
-        if (events_.size() >= 64) events_.pop_front();
-        events_.emplace_back(d, n);
-    });
-
-    const char* offer = peer_->createOffer();
-    if (!offer) {
-        ESP_LOGE(kTag, "createOffer returned null");
-        return false;
-    }
-    // createOffer fires the on_local_sdp callback synchronously — by
-    // now pending_offer_for_signaling_ is populated. Drain on the
-    // main loop next tick.
+bool Session::connect()
+{
+    auto l = std::make_shared<WsLink>(
+        [this](const int16_t* pcm, std::size_t n) { onInboundAudio(pcm, n); },
+        [this](std::string json) { onText(std::move(json)); });
+    const std::string url = ws_url_for(backend_url_);
+    ESP_LOGI(kTag, "connecting %s", url.c_str());
+    if (!l->start(url)) return false;
+    std::lock_guard<std::mutex> lk(link_mtx_);
+    link_ = std::move(l);
     return true;
 }
 
-void Session::onPeerState(transport::PeerState s)
+void Session::disconnect()
 {
-    // NOTE: don't introduce a `using PS = ...` alias here — `PS` is a
-    // hardware register name in xtensa/config/specreg.h and the
-    // macros from that header clash with any local PS identifier.
-    using transport::PeerState;
-    last_peer_state_ = static_cast<int>(s);
-    switch (s) {
-    case PeerState::New:
-    case PeerState::Checking:
-    case PeerState::Connected:
-        break;
-    case PeerState::Completed:
-        // We only ever connect *because* the wake word armed a turn, so the
-        // conversation is already active — leave conversation_active_ alone and
-        // go straight to Listening. The capture task flushes the buffered
-        // utterance now that connected_ is true.
-        connected_          = true;
-        last_rx_frame_tick_ = 0;
-        last_rx_pkt_tick_   = xTaskGetTickCount();   // liveness baseline
-        peer_dead_          = false;
-        // Restart the turn clock at connect: bring-up may have eaten most of the
-        // window the wake word set, and the user's speech (buffered during
-        // bring-up) won't bump it again — so give the backend a full window from
-        // here to deliver the first reply.
-        turn_deadline_      = xTaskGetTickCount() + pdMS_TO_TICKS(kAwaitResponseMs);
-        // Don't force a state here — the playback tick's resolveLedState picks
-        // the right one next tick (Thinking if the user already asked during
-        // bring-up, Listening if they only woke it). Forcing Listening caused a
-        // one-tick green flash before it flipped to amber.
-        fsm_.onEvent(domain::SessionEvent::PeerLive);
-        break;
-    case PeerState::Failed:
-    case PeerState::Disconnected:
-    case PeerState::Closed:
-        // libpeer detected the path dropped. Flag it but DON'T end the turn
-        // here — mainLoop decides whether to reconnect (mid-conversation) or
-        // give up, the same way it handles a silent media death. Don't touch
-        // peer_ from this callback: it runs inside peer_->tick().
-        connected_ = false;
-        peer_dead_ = true;
-        reconnects_.fetch_add(1);
-        fsm_.onEvent(domain::SessionEvent::PeerLost);
-        break;
+    connected_ = false;
+    std::shared_ptr<WsLink> old;
+    {
+        std::lock_guard<std::mutex> lk(link_mtx_);
+        old = std::move(link_);
     }
+    // Destroyed here or, if the sender still holds it mid-send, right after.
 }
 
-void Session::onLocalSdp(std::string sdp)
+void Session::onLinkUp()
 {
-    // Fired synchronously from libpeer inside createOffer(), before
-    // any worker task runs. Do the signaling POST RIGHT HERE so the
-    // answer is parked on the Peer before the main loop starts —
-    // otherwise libpeer spends ~2 s spinning without a remote
-    // description, which we discovered crashes the SRTP path in
-    // unexpected ways the first time DTLS state advances.
-    auto resp = signaling_.sendOffer(sdp);
-    if (!resp || !peer_) {
-        ESP_LOGE(kTag, "signaling.sendOffer failed; abandoning this turn");
-        conversation_active_ = false;   // mainLoop tears the half-built peer down
+    // Session metadata first: the backend builds the pipeline from it.
+    auto l = link();
+    if (!l || !l->sendText(hello_, 2000)) {
+        link_dead_ = true;
         return;
     }
-    peer_->publishAnswer(std::move(resp->remote_sdp));
+    connected_          = true;
+    last_rx_frame_tick_ = 0;
+    last_rx_pkt_tick_   = xTaskGetTickCount();
+    // Restart the turn clock at connect: bring-up may have eaten part of the
+    // window the wake word set, and speech buffered during bring-up won't bump
+    // it again.
+    turn_deadline_      = xTaskGetTickCount() + pdMS_TO_TICKS(kAwaitResponseMs);
+    fsm_.onEvent(domain::SessionEvent::PeerLive);
+    ESP_LOGI(kTag, "session up");
 }
 
-void Session::onInboundAudio(const uint8_t* data, std::size_t size)
+void Session::onInboundAudio(const int16_t* pcm, std::size_t samples)
 {
-    if (!data || size == 0 || !playback_buf_) return;
-
-    // Liveness: any inbound packet (incl. silence keep-alive) proves the media
-    // path is alive. mainLoop watches this to detect a dead path mid-session.
     last_rx_pkt_tick_ = xTaskGetTickCount();
-
-    // Inbound is G.722: each octet decodes to two 16 kHz samples, ready for the
-    // I2S DAC with no resampling. Cap the payload so 2× expansion can't
-    // overflow pcm[]. The decoder is stateful (g722_dec_), reset per connection
-    // in buildAndOffer().
-    static int16_t pcm[domain::kMaxDecodedSamples];
-    constexpr std::size_t kMaxBytes = (sizeof(pcm) / sizeof(pcm[0])) / 2;
-    if (size > kMaxBytes) size = kMaxBytes;
-
-    const std::size_t samples = domain::g722_decode(g722_dec_, data, size, pcm);  // = size*2
-
-    const std::size_t sent = xStreamBufferSend(playback_buf_, pcm, samples * sizeof(int16_t), 0);
-    const int32_t peak = domain::peak_abs_i16(pcm, static_cast<int>(samples));
-
-    // Downlink visibility: count every inbound audio packet (regardless of
-    // level) so /diag shows whether the backend's TTS is reaching us at all,
-    // and the WS log shows it live (rate-limited).
-    const uint32_t n = rx_audio_pkts_.fetch_add(1) + 1;
-    rx_audio_last_peak_ = peak;
-    if (peak > rx_audio_max_peak_.load()) rx_audio_max_peak_ = peak;
-    if ((n % 100) == 1) {
-        ESP_LOGI(kTag, "rx audio: pkt#%u bytes=%u peak=%ld queued=%u/%u",
-                 (unsigned)n, (unsigned)size, (long)peak,
-                 (unsigned)sent, (unsigned)(samples * sizeof(int16_t)));
-    }
-
-    if (peak >= kSpeakingPcmThreshold) {
-        const TickType_t now = xTaskGetTickCount();
-        last_rx_frame_tick_ = now;
-        bot_replied_ = true;   // first reply landed: switch to post-reply timing
-        // The bot is answering: keep the turn open, and start the (short)
-        // post-reply silence countdown from this frame. Each frame pushes it,
-        // so it only elapses once the reply has actually stopped.
-        turn_deadline_ = now + pdMS_TO_TICKS(kPostResponseSilenceMs);
-    }
+    const uint32_t n = rx_audio_chunks_.fetch_add(1) + 1;
+    if ((n % 200) == 1)
+        ESP_LOGI(kTag, "rx audio: chunk#%u queued=%u", (unsigned)n, (unsigned)xStreamBufferBytesAvailable(playback_buf_));
+    // Blocks only if 1.5 s is already queued — backpressure onto TCP.
+    xStreamBufferSend(playback_buf_, pcm, samples * sizeof(int16_t), pdMS_TO_TICKS(200));
 }
 
-
-void Session::mainLoopTaskEntry(void* arg) { static_cast<Session*>(arg)->mainLoopTask(); }
-void Session::captureTaskEntry (void* arg) { static_cast<Session*>(arg)->captureTask(); }
-void Session::playbackTaskEntry(void* arg) { static_cast<Session*>(arg)->playbackTask(); }
-
-void Session::mainLoopTask()
+void Session::onText(std::string json)
 {
-    TickType_t connect_started = 0;
-    bool       prev_want       = false;
-    int        reconnects      = 0;   // mid-talk reconnects used this turn
-
-    while (running_.load()) {
-        const TickType_t now  = xTaskGetTickCount();
-        const bool       want = conversation_active_.load();
-        const bool       have = (peer_ != nullptr);
-        if (want && !prev_want) reconnects = 0;   // a fresh turn resets the budget
-        prev_want = want;
-
-        if (want && !have) {
-            // Bring up a session — a fresh wake, or a rebuild after a mid-talk
-            // drop. The capture task is already buffering the user's speech into
-            // the backlog ring, so nothing spoken during bring-up is lost.
-            ESP_LOGI(kTag, "%s", reconnects ? "reconnecting" : "wake → connecting");
-            connect_started = now;
-            peer_dead_      = false;
-            if (!buildAndOffer()) {
-                ESP_LOGE(kTag, "buildAndOffer failed; abandoning turn");
-                conversation_active_ = false;
-                std::lock_guard<std::mutex> lk(peer_mtx_);
-                peer_.reset();
-            }
-        } else if (!want && have) {
-            // Conversation ended (or we've given up) → tear the session down and
-            // go idle. The backend sees the peer drop and reaps its pipeline;
-            // the next wake word starts clean. The lock + connected_=false here
-            // pair with the capture task's send guard so we never destroy peer_
-            // out from under an in-flight sendAudio.
-            ESP_LOGI(kTag, "conversation ended → disconnecting");
-            {
-                std::lock_guard<std::mutex> lk(peer_mtx_);
-                connected_ = false;
-                peer_.reset();
-            }
-        } else if (want && have) {
-            // A turn is live. Detect a dropped connection two ways: libpeer
-            // flagged it (peer_dead_, e.g. ICE consent lost), or — the silent
-            // case where consent survives but media stopped — no inbound audio
-            // for kMediaDeadMs while connected. Either way reconnect (the user
-            // is mid-talk), up to a cap, then give up and end the session.
-            const bool media_dead =
-                connected_.load() && (now - last_rx_pkt_tick_.load()) > pdMS_TO_TICKS(kMediaDeadMs);
-            if (peer_dead_.load() || media_dead) {
-                if (reconnects < kMaxReconnectsPerTurn) {
-                    ++reconnects;
-                    ESP_LOGW(kTag, "connection lost mid-talk (%s) → reconnect %d/%d",
-                             peer_dead_.load() ? "peer" : "media", reconnects, kMaxReconnectsPerTurn);
-                    std::lock_guard<std::mutex> lk(peer_mtx_);
-                    connected_ = false;
-                    peer_.reset();   // next iteration rebuilds (want && !have)
-                } else {
-                    ESP_LOGW(kTag, "connection lost; reconnects exhausted → ending session");
-                    conversation_active_ = false;
-                }
-            } else if (!connected_.load() &&
-                       (now - connect_started) > pdMS_TO_TICKS(kConnectTimeoutMs)) {
-                // Still negotiating and stalled → abandon the turn.
-                ESP_LOGW(kTag, "connect timed out; abandoning turn");
-                conversation_active_ = false;
-            }
-        }
-
-        if (peer_) peer_->tick();
-        vTaskDelay(pdMS_TO_TICKS(10));
+    if (json.find("\"interrupted\"") != std::string::npos) {
+        // Barge-in: the queued reply is stale. Safe to reset here: the
+        // playback task never blocks on the buffer, and this task is its only
+        // writer.
+        xStreamBufferReset(playback_buf_);
+        last_rx_frame_tick_ = 0;
     }
-    vTaskDelete(nullptr);
+    std::lock_guard<std::mutex> lk(events_mtx_);
+    if (events_.size() >= 64) events_.pop_front();
+    events_.push_back(std::move(json));
 }
 
 bool Session::nextEvent(std::string& out)
@@ -371,6 +227,89 @@ bool Session::nextEvent(std::string& out)
     return true;
 }
 
+void Session::mainLoopTaskEntry(void* arg) { static_cast<Session*>(arg)->mainLoopTask(); }
+void Session::captureTaskEntry (void* arg) { static_cast<Session*>(arg)->captureTask(); }
+void Session::playbackTaskEntry(void* arg) { static_cast<Session*>(arg)->playbackTask(); }
+void Session::senderTaskEntry  (void* arg) { static_cast<Session*>(arg)->senderTask(); }
+
+void Session::mainLoopTask()
+{
+    TickType_t connect_started = 0;
+    bool       prev_want       = false;
+    int        reconnects      = 0;   // reconnects used this turn
+
+    while (running_.load()) {
+        const TickType_t now  = xTaskGetTickCount();
+        const bool       want = conversation_active_.load();
+        auto             l    = link();
+        if (want && !prev_want) {
+            reconnects = 0;
+            // Radio power save adds ~100 ms latency spikes; off for the turn.
+            esp_wifi_set_ps(WIFI_PS_NONE);
+        } else if (!want && prev_want) {
+            esp_wifi_set_ps(WIFI_PS_MIN_MODEM);
+        }
+        prev_want = want;
+
+        if (want && !l) {
+            // A fresh wake, or a rebuild after a drop. The capture task is
+            // already buffering the user's speech into the backlog.
+            ESP_LOGI(kTag, "%s", reconnects ? "reconnecting" : "wake → connecting");
+            connect_started = now;
+            link_dead_      = false;
+            if (!connect()) {
+                ESP_LOGE(kTag, "connect failed; abandoning turn");
+                conversation_active_ = false;
+                disconnect();
+            }
+        } else if (!want && l) {
+            // Turn over → hang up; the backend reaps its pipeline on close.
+            ESP_LOGI(kTag, "conversation ended → disconnecting");
+            disconnect();
+        } else if (want && l) {
+            if (!connected_.load() && l->open()) onLinkUp();
+            if (link_dead_.load() || l->dead()) {
+                if (reconnects < kMaxReconnectsPerTurn) {
+                    ++reconnects;
+                    ESP_LOGW(kTag, "connection lost → reconnect %d/%d", reconnects, kMaxReconnectsPerTurn);
+                    disconnect();   // next iteration rebuilds
+                } else {
+                    ESP_LOGW(kTag, "connection lost; reconnects exhausted → ending session");
+                    conversation_active_ = false;
+                }
+            } else if (!connected_.load() && (now - connect_started) > pdMS_TO_TICKS(kConnectTimeoutMs)) {
+                ESP_LOGW(kTag, "connect timed out; abandoning turn");
+                conversation_active_ = false;
+            }
+        }
+        vTaskDelay(pdMS_TO_TICKS(10));
+    }
+    vTaskDelete(nullptr);
+}
+
+// ---------- Sender task: backlog → WebSocket ---------------------------------
+
+void Session::senderTask()
+{
+    uint8_t* batch = static_cast<uint8_t*>(heap_caps_malloc(kFrameBytes * kSendBatch, kPsram));
+    while (running_.load()) {
+        auto l = connected_.load() ? link() : nullptr;
+        const std::size_t n = l ? uplink_.pop(batch, kFrameBytes * kSendBatch) : 0;
+        if (n == 0) {
+            vTaskDelay(pdMS_TO_TICKS(10));
+            continue;
+        }
+        // A stall here only delays the uplink: the capture task keeps filling
+        // the backlog, so no microphone audio is lost.
+        if (!l->sendBinary(batch, n, 3000)) {
+            ESP_LOGW(kTag, "uplink send failed");
+            link_dead_ = true;
+        }
+    }
+    heap_caps_free(batch);
+    vTaskDelete(nullptr);
+}
+
 // ---------- Capture task (CoreS3 mono mic) ---------------------------------
 
 void Session::captureTask()
@@ -378,29 +317,7 @@ void Session::captureTask()
     static int16_t raw[domain::kFramesPerPacket];
     static int16_t mono_wake[domain::kFramesPerPacket];
     static int16_t mono_uplink[domain::kFramesPerPacket];
-    static uint8_t wire_buf[domain::kFramesPerPacket / 2];
     static const int16_t zero_pcm[domain::kFramesPerPacket] = {0};
-
-    // Uplink backlog: speech during WebRTC bring-up is buffered and flushed
-    // once connected (≈ 8 s), in PSRAM.
-    const std::size_t kPktBytes = domain::kFramesPerPacket / 2;
-    const std::size_t kRingPkts = 400;
-    uint8_t* ring = static_cast<uint8_t*>(heap_caps_malloc(kRingPkts * kPktBytes, MALLOC_CAP_SPIRAM));
-    std::size_t r_head = 0, r_count = 0;
-    auto ring_push = [&](const uint8_t* p) {
-        if (!ring) return;
-        const std::size_t idx = (r_head + r_count) % kRingPkts;
-        std::memcpy(ring + idx * kPktBytes, p, kPktBytes);
-        if (r_count < kRingPkts) r_count++;
-        else r_head = (r_head + 1) % kRingPkts;
-    };
-    auto ring_pop = [&](uint8_t* out) -> bool {
-        if (!ring || r_count == 0) return false;
-        std::memcpy(out, ring + r_head * kPktBytes, kPktBytes);
-        r_head = (r_head + 1) % kRingPkts;
-        r_count--;
-        return true;
-    };
 
     while (running_.load()) {
         if (audio_.read(raw, domain::kFramesPerPacket) != ESP_OK) {
@@ -427,13 +344,12 @@ void Session::captureTask()
                 turn_deadline_ = now + pdMS_TO_TICKS(kAwaitResponseMs);
         }
 
-        transport::WakeEngine::process(mono_wake, domain::kFramesPerPacket);
-        const bool woke = transport::WakeEngine::detected() || ptt_.exchange(false);
+        wake_word_process(mono_wake, domain::kFramesPerPacket);
+        const bool woke = wake_word_detected() || ptt_.exchange(false);
         if (woke) {
             if (!conversation_active_.exchange(true)) {
                 ESP_LOGI(kTag, "wake → turn armed");
-                domain::g722_init(g722_enc_);
-                r_head = r_count = 0;
+                uplink_.clear();
                 bot_replied_ = false;
                 chirp_pending_ = static_cast<int>(domain::Chirp::Wake);
             }
@@ -447,20 +363,10 @@ void Session::captureTask()
         }
         if (!conversation_active_.load()) continue;
 
-        const int16_t* src = bot_speaking ? zero_pcm : mono_uplink;
-        domain::g722_encode(g722_enc_, src, domain::kFramesPerPacket, wire_buf);
-        ring_push(wire_buf);
-
-        if (connected_.load()) {
-            std::lock_guard<std::mutex> lk(peer_mtx_);
-            if (peer_) {
-                uint8_t pkt[domain::kFramesPerPacket / 2];
-                int budget = (r_count > 1) ? 3 : 1;
-                while (budget-- > 0 && ring_pop(pkt)) peer_->sendAudio(pkt, sizeof pkt);
-            }
-        }
+        // Silence while the bot talks (echo guard), so the stream stays
+        // continuous for the backend's VAD.
+        uplink_.push(bot_speaking ? zero_pcm : mono_uplink, kFrameBytes);
     }
-    if (ring) heap_caps_free(ring);
     vTaskDelete(nullptr);
 }
 
@@ -469,7 +375,8 @@ void Session::captureTask()
 void Session::playbackTask()
 {
     static int16_t mono[domain::kFramesPerPacket];
-    int16_t* chirp = static_cast<int16_t*>(heap_caps_malloc(domain::kChirpMaxSamples * sizeof(int16_t), MALLOC_CAP_SPIRAM));
+    int16_t* chirp = static_cast<int16_t*>(heap_caps_malloc(domain::kChirpMaxSamples * sizeof(int16_t), kPsram));
+    bool primed = false;
 
     while (running_.load()) {
         const int ch = chirp_pending_.exchange(-1);
@@ -477,13 +384,30 @@ void Session::playbackTask()
             const std::size_t cn = domain::synth_chirp(static_cast<domain::Chirp>(ch), chirp, domain::kChirpMaxSamples);
             audio_.write(chirp, cn);
         }
-        std::size_t got = playback_buf_ ? xStreamBufferReceive(playback_buf_, mono, sizeof(mono), pdMS_TO_TICKS(50)) : 0;
-        std::size_t frames = got / sizeof(int16_t);
-        if (frames < domain::kFramesPerPacket) {
-            std::memset(mono + frames, 0, sizeof(mono) - frames * sizeof(int16_t));
+        // Never block on the buffer (onText may reset it); the I2S write
+        // below paces this loop at real time.
+        const TickType_t now = xTaskGetTickCount();
+        if (!primed) {
+            const std::size_t avail = xStreamBufferBytesAvailable(playback_buf_);
+            const bool quiet = (now - last_rx_pkt_tick_.load()) > pdMS_TO_TICKS(kPrefillQuietMs);
+            primed = avail >= kPrefillBytes || (avail > 0 && quiet);
+        }
+        const std::size_t got = primed ? xStreamBufferReceive(playback_buf_, mono, sizeof(mono), 0) : 0;
+        if (got < sizeof(mono)) {
+            std::memset(reinterpret_cast<uint8_t*>(mono) + got, 0, sizeof(mono) - got);
+            primed = false;   // ran dry: re-buffer before playing on
+        }
+
+        const int32_t peak_raw = domain::peak_abs_i16(mono, domain::kFramesPerPacket);
+        if (peak_raw >= kSpeakingPcmThreshold) {
+            // The bot is audibly answering (what's played, not what's
+            // queued): feeds the echo guard and keeps the turn open.
+            last_rx_frame_tick_ = now;
+            bot_replied_ = true;
+            turn_deadline_ = now + pdMS_TO_TICKS(kPostResponseSilenceMs);
         }
         // Mouth envelope: fast attack, slower release.
-        const float peak = domain::peak_abs_i16(mono, domain::kFramesPerPacket) / 12000.0f;
+        const float peak = peak_raw / 12000.0f;
         const float prev = level_.load();
         level_ = std::min(1.0f, peak > prev ? peak : prev * 0.8f + peak * 0.2f);
         audio_.write(mono, domain::kFramesPerPacket);

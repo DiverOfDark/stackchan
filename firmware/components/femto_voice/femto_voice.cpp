@@ -14,7 +14,7 @@ extern "C" esp_err_t femto_voice_start(const char *backend_url, int i2c_port, in
     if (s_session) return ESP_OK;
     esp_err_t err = s_audio.init(i2c_port, volume);
     if (err != ESP_OK) return err;
-    // Lives for the program's lifetime (libpeer keeps pointers into it).
+    // Lives for the program's lifetime (its tasks never exit).
     s_session = new femto::Session(backend_url ? backend_url : "", s_audio);
     if (request_data_json) s_session->setRequestData(request_data_json);
     s_session->start();

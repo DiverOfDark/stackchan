@@ -11,6 +11,6 @@ build-std = ["std", "panic_abort"]
 
 [env]
 MCU = "esp32s3"
-# Pinned (PRD §8.2): libpeer breaks on IDF 6 / mbedTLS 4.
+# Pinned (PRD §8.2); bump deliberately (IDF 6 moves to mbedTLS 4).
 ESP_IDF_VERSION = "v5.5.5"
 ESP_IDF_SDKCONFIG_DEFAULTS = "sdkconfig.defaults"

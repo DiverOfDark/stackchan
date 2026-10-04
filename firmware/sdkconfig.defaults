@@ -53,26 +53,19 @@ CONFIG_SPIRAM_ALLOW_STACK_EXTERNAL_MEMORY=y
 CONFIG_ESP_WIFI_STATIC_RX_BUFFER_NUM=8
 CONFIG_ESP_WIFI_DYNAMIC_RX_BUFFER_NUM=24
 
-# --- voice: WebRTC (libpeer DTLS-SRTP) and audio — from pipecat-voice-assistant ---
+# --- voice: TLS to the backend (WebSocket) and audio ---
 CONFIG_MBEDTLS_CERTIFICATE_BUNDLE=y
 CONFIG_MBEDTLS_CERTIFICATE_BUNDLE_DEFAULT_FULL=y
-CONFIG_MBEDTLS_SSL_PROTO_DTLS=y
-CONFIG_MBEDTLS_SSL_DTLS_SRTP=y
-CONFIG_MBEDTLS_SSL_DTLS_ANTI_REPLAY=y
-CONFIG_MBEDTLS_SSL_DTLS_HELLO_VERIFY=y
-CONFIG_MBEDTLS_SSL_VARIABLE_BUFFER_LENGTH=y
+# No variable-length record buffers: shrinking them broke streaming reads
+# (mbedTLS -0x7100 a few seconds into reply audio). The buffers live in
+# PSRAM (EXTERNAL_MEM_ALLOC), so fixed 16 KB costs no internal RAM.
+CONFIG_MBEDTLS_SSL_VARIABLE_BUFFER_LENGTH=n
 CONFIG_MBEDTLS_HAVE_TIME=y
 CONFIG_MBEDTLS_HAVE_TIME_DATE=y
-CONFIG_MBEDTLS_SSL_KEEP_PEER_CERTIFICATE=y
-CONFIG_MBEDTLS_X509_CSR_WRITE_C=y
-CONFIG_MBEDTLS_X509_CRT_WRITE_C=y
-CONFIG_MBEDTLS_X509_CREATE_C=y
-CONFIG_MBEDTLS_PEM_WRITE_C=y
-CONFIG_MBEDTLS_ECP_C=y
-CONFIG_MBEDTLS_ECDSA_C=y
-CONFIG_MBEDTLS_ECDH_C=y
-CONFIG_MBEDTLS_ECP_DP_SECP256R1_ENABLED=y
-CONFIG_MBEDTLS_KEY_EXCHANGE_ECDHE_ECDSA=y
+# WebSocket client: keep the single send/receive lock (the default). A
+# separate TX lock lets the uplink sender write while the client task reads,
+# and one mbedTLS context can't do both: reads fail with -0x7100 as soon as
+# reply audio arrives mid-uplink. Sends just wait; the backlog absorbs it.
 CONFIG_CODEC_I2C_BACKWARD_COMPATIBLE=y
 
 # --- internal RAM: keep driver code in flash (IRAM shares SRAM with the heap) ---

@@ -12,7 +12,7 @@ extern "C" {
 
 typedef enum {
     FEMTO_VOICE_IDLE = 0,       // waiting for the wake word
-    FEMTO_VOICE_CONNECTING = 1, // woke; WebRTC coming up
+    FEMTO_VOICE_CONNECTING = 1, // woke; connecting to the backend
     FEMTO_VOICE_LISTENING = 2,  // the user may speak / is speaking
     FEMTO_VOICE_THINKING = 3,   // user stopped, waiting for the reply
     FEMTO_VOICE_SPEAKING = 4,   // TTS playing

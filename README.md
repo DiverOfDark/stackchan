@@ -15,7 +15,7 @@ See [`docs/PRD.md`](docs/PRD.md) for the full spec.
 | `crates/` | Host-testable Rust: face engine, renderer, drivers, desktop simulator |
 | `firmware/` | ESP32-S3 binary (Xtensa `esp` toolchain) and C components |
 | `web/` | Web UI, embedded in the firmware image |
-| `backend/` | Voice backend (pipecat: STT → LLM → TTS over WebRTC), Dockerfile, Helm chart |
+| `backend/` | Voice backend (pipecat: STT → LLM → TTS; Femto over a WebSocket, the XIAO over WebRTC), Dockerfile, Helm chart |
 | `tools/` | OTA upload, stock-firmware restore, font/design export, wake-word training (`tools/wake-word/`) |
 | `legacy/xiao/` | The original XIAO ESP32-S3 voice device firmware (frozen) |
 
