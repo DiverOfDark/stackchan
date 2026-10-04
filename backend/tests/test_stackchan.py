@@ -13,6 +13,7 @@ from pipecat.frames.frames import (
     UserStartedSpeakingFrame,
     UserStoppedSpeakingFrame,
 )
+from pipecat.processors.frame_processor import FrameDirection
 from pipecat.transcriptions.language import Language
 
 import bot
@@ -80,7 +81,10 @@ def test_event_observer_maps_frames_once():
         for f in frames:
             # Each frame passes several processors; it must be sent once.
             for _ in range(3):
-                await obs.on_push_frame(SimpleNamespace(frame=f))
+                await obs.on_push_frame(SimpleNamespace(frame=f, direction=FrameDirection.DOWNSTREAM))
+            # Broadcast frames also have an upstream twin: ignored.
+            twin = type(f)(**{k: getattr(f, k) for k in ("text", "user_id", "timestamp", "aggregated_by") if hasattr(f, k)})
+            await obs.on_push_frame(SimpleNamespace(frame=twin, direction=FrameDirection.UPSTREAM))
 
     asyncio.run(push_all())
     assert [m["t"] for m in sent] == [
@@ -96,7 +100,7 @@ def test_event_observer_survives_send_errors():
         raise RuntimeError("data channel closed")
 
     obs = bot.StackchanEventObserver(boom)
-    asyncio.run(obs.on_push_frame(SimpleNamespace(frame=BotStartedSpeakingFrame())))
+    asyncio.run(obs.on_push_frame(SimpleNamespace(frame=BotStartedSpeakingFrame(), direction=FrameDirection.DOWNSTREAM)))
 
 
 def test_wake_phrase_is_not_a_question():

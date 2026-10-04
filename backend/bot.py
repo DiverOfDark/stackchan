@@ -62,7 +62,7 @@ from pipecat.frames.frames import (
     TranscriptionFrame,
 )
 from pipecat.observers.base_observer import BaseObserver, FramePushed
-from pipecat.processors.frame_processor import FrameProcessor
+from pipecat.processors.frame_processor import FrameDirection, FrameProcessor
 from pipecat.observers.user_bot_latency_observer import UserBotLatencyObserver
 from pipecat.services.stt_service import STTService
 from pipecat.pipeline.pipeline import Pipeline
@@ -790,6 +790,10 @@ class StackchanEventObserver(BaseObserver):
 
     async def on_push_frame(self, data: FramePushed):
         frame = data.frame
+        # Speaking frames are broadcast both ways as two separate frames;
+        # count the downstream copy only, or the device gets every event twice.
+        if data.direction != FrameDirection.DOWNSTREAM:
+            return
         msg = None
         if isinstance(frame, UserStartedSpeakingFrame):
             msg = {"t": "user_started"}
