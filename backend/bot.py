@@ -13,6 +13,7 @@ import inspect
 import json
 import logging
 import os
+import random
 import re
 import time
 import uuid
@@ -846,7 +847,6 @@ class FillerSpeech(FrameProcessor):
         super().__init__(**kwargs)
         self._lang = lang
         self._timer: asyncio.Task | None = None
-        self._n = 0
 
     async def _disarm(self):
         if self._timer:
@@ -856,9 +856,7 @@ class FillerSpeech(FrameProcessor):
     async def _fire(self):
         await asyncio.sleep(self.DELAY)
         self._timer = None
-        phrases = FILLERS[self._lang.russian]
-        self._n += 1
-        text = phrases[self._n % len(phrases)]
+        text = random.choice(FILLERS[self._lang.russian])
         logger.info(f"LLM silent {self.DELAY:.0f}s: filler {text!r}")
         await self.push_frame(TTSSpeakFrame(text))
 
