@@ -781,12 +781,15 @@ class ScribeSTTService(ElevenLabsSTTService):
 # The wake word fires on the device, but the phrase itself (and anything the
 # speaker played) can still reach STT. "Эй, Фемто" alone is not a question.
 _WAKE_PREFIX = re.compile(r"^\s*(эй|хей|hey|hi|ay)[\s,.!?-]+(ф|f)\w*[\s,.!?-]*", re.IGNORECASE)
+# The name alone ("Фемто."): a call, not a question. STT biased toward the
+# name also turns short sounds ("хм") into it.
+_NAME_ONLY = re.compile(r"^\s*(фем|femt)\w*[\s,.!?-]*$", re.IGNORECASE)
 _SOUND_TAG = re.compile(r"^\s*[\[(][^\])]*[\])]\s*$")
 
 
 def strip_wake_phrase(text: str) -> str:
     """Remove a leading wake phrase; '' when nothing else was said."""
-    if _SOUND_TAG.match(text or ""):
+    if _SOUND_TAG.match(text or "") or _NAME_ONLY.match(text or ""):
         return ""
     rest = _WAKE_PREFIX.sub("", text or "", count=1)
     return rest.strip()

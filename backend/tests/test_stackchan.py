@@ -120,7 +120,7 @@ def test_event_observer_survives_send_errors():
 
 
 def test_wake_phrase_is_not_a_question():
-    for said in ["Эй, Фемто!", "эй фемто", "Hey, filmta", "Hey Femto.", "[chime]", "(laughter)", ""]:
+    for said in ["Эй, Фемто!", "эй фемто", "Hey, filmta", "Hey Femto.", "[chime]", "(laughter)", "", "Фемто", "Фемто?", "femto"]:
         assert bot.strip_wake_phrase(said) == "", said
 
 
@@ -130,6 +130,7 @@ def test_wake_phrase_prefix_is_stripped():
     # A sentence that merely starts with "эй" stays.
     assert bot.strip_wake_phrase("эй ты как дела") == "эй ты как дела"
     assert bot.strip_wake_phrase("Сколько осталось?") == "Сколько осталось?"
+    assert bot.strip_wake_phrase("Фемто, сколько осталось?") == "Фемто, сколько осталось?"
 
 
 class _FakeResp:
