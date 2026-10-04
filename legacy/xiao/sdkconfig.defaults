@@ -1,0 +1,98 @@
+# Target
+CONFIG_IDF_TARGET="esp32s3"
+
+# CPU @ 240 MHz
+CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_240=y
+
+# 8 MB flash (XIAO ESP32-S3)
+CONFIG_ESPTOOLPY_FLASHSIZE_8MB=y
+CONFIG_ESPTOOLPY_FLASHMODE_QIO=y
+CONFIG_ESPTOOLPY_FLASHFREQ_80M=y
+
+# 8 MB octal PSRAM (XIAO ESP32-S3)
+CONFIG_SPIRAM=y
+CONFIG_SPIRAM_MODE_OCT=y
+CONFIG_SPIRAM_SPEED_80M=y
+CONFIG_SPIRAM_USE_MALLOC=y
+CONFIG_SPIRAM_TRY_ALLOCATE_WIFI_LWIP=y
+CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL=16384
+CONFIG_SPIRAM_MALLOC_RESERVE_INTERNAL=32768
+
+# Custom partition table
+CONFIG_PARTITION_TABLE_CUSTOM=y
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
+
+# OTA rollback: a freshly-OTA'd image boots as "pending verify" and the app
+# must call esp_ota_mark_app_valid_cancel_rollback() once it's confirmed good
+# (we do that after the web server is up). If it crashes before then, the
+# bootloader reverts to the previous slot — so a bad OTA can't brick the device.
+CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y
+
+# Logging
+CONFIG_LOG_DEFAULT_LEVEL_INFO=y
+CONFIG_LOG_COLORS=y
+
+# Console on the native USB-Serial-JTAG (the /dev/ttyACM port), NOT UART0.
+# The default UART0 console pins on the ESP32-S3 are GPIO43/44 — which this
+# board uses for the I2S data lines (see hal/audio_io.cpp). With the UART
+# console as primary, every ESP_LOG line is muxed onto pins driven by the
+# audio bus and never reaches a serial adapter, so the device looks silent.
+# Routing the console over USB-Serial-JTAG gives a working log on the same
+# USB cable used for flashing.
+# CONFIG_ESP_CONSOLE_UART_DEFAULT is not set
+CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y
+
+# WebSocket support in esp_http_server — for the /ws/logs live-log stream that
+# mirrors the console over the network (the USB-JTAG console resets the chip on
+# host open, so it's unusable for long-running debugging).
+CONFIG_HTTPD_WS_SUPPORT=y
+
+# FreeRTOS — bump task stack a bit; the WebRTC + DTLS handshake path needs headroom
+CONFIG_ESP_MAIN_TASK_STACK_SIZE=8192
+
+# Compiler — favour speed (-O2); TFLM wake inference and the DTLS path benefit
+CONFIG_COMPILER_OPTIMIZATION_PERF=y
+
+# TLS — bundle the standard public-CA roots so HTTPS to the backend works
+# without per-deployment cert pinning. Full bundle is ~80 KB.
+CONFIG_MBEDTLS_CERTIFICATE_BUNDLE=y
+CONFIG_MBEDTLS_CERTIFICATE_BUNDLE_DEFAULT_FULL=y
+
+# mbedTLS DTLS-SRTP — required by libpeer for WebRTC media encryption.
+CONFIG_MBEDTLS_SSL_PROTO_DTLS=y
+CONFIG_MBEDTLS_SSL_DTLS_SRTP=y
+CONFIG_MBEDTLS_SSL_DTLS_ANTI_REPLAY=y
+CONFIG_MBEDTLS_SSL_DTLS_HELLO_VERIFY=y
+CONFIG_MBEDTLS_SSL_VARIABLE_BUFFER_LENGTH=y
+CONFIG_MBEDTLS_HAVE_TIME=y
+CONFIG_MBEDTLS_HAVE_TIME_DATE=y
+
+# Allocate mbedTLS buffers from PSRAM rather than internal RAM. Without
+# this, libpeer's DTLS handshake (cert chain + ECDHE state) is at risk of
+# OOM in internal SRAM with Wi-Fi + LWIP + the rest of the stack loaded.
+# Recommended by pipecat-esp32's reference sdkconfig for the same reason.
+CONFIG_MBEDTLS_EXTERNAL_MEM_ALLOC=y
+
+# Keep the peer's certificate in ssl->session->peer_cert after handshake.
+# Without this, mbedtls_ssl_get_peer_cert() returns NULL after a
+# successful DTLS handshake, and libpeer's post-handshake fingerprint
+# check ("no remote fingerprint" error) bounces the connection forever.
+# WebRTC DTLS-SRTP REQUIRES post-handshake fingerprint matching against
+# the SDP a=fingerprint: line, so we need the cert.
+CONFIG_MBEDTLS_SSL_KEEP_PEER_CERTIFICATE=y
+
+# X.509 cert generation — libpeer mints a self-signed ECDSA P-256 cert
+# per session for the DTLS handshake fingerprint that goes into the SDP.
+# (CONFIG_DTLS_USE_ECDSA=1 in the libpeer shim CMakeLists forces ECDSA;
+# aiortc rejects RSA.)
+CONFIG_MBEDTLS_X509_CSR_WRITE_C=y
+CONFIG_MBEDTLS_X509_CRT_WRITE_C=y
+CONFIG_MBEDTLS_X509_CREATE_C=y
+CONFIG_MBEDTLS_PEM_WRITE_C=y
+
+# ECC primitives — required for the cert + ECDHE key exchange.
+CONFIG_MBEDTLS_ECP_C=y
+CONFIG_MBEDTLS_ECDSA_C=y
+CONFIG_MBEDTLS_ECDH_C=y
+CONFIG_MBEDTLS_ECP_DP_SECP256R1_ENABLED=y
+CONFIG_MBEDTLS_KEY_EXCHANGE_ECDHE_ECDSA=y

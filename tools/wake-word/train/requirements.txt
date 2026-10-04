@@ -1,0 +1,7 @@
+# Corpus generation only — training itself needs microWakeWord (cloned
+# separately) plus tensorflow / pytorch which we don't pin here so the
+# training repo can stay current.
+piper-tts>=1.2.0
+numpy>=1.26
+scipy>=1.13          # WAV I/O + light DSP for augmentations
+soundfile>=0.12      # robust WAV writer

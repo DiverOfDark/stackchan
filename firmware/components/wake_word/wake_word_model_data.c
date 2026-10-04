@@ -1,4 +1,4 @@
-/* Auto-generated from main/models/wake_word_ru.tflite — regenerate via tools/embed_tflite.py. */
+/* Auto-generated from tools/wake-word/wake_word_ru.tflite — regenerate via tools/wake-word/embed.py. */
 #include <stddef.h>
 
 /* TFLite Micro requires the model buffer to be 16-byte-aligned. */

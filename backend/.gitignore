@@ -1,0 +1,6 @@
+# Local secrets / scratch — never commit.
+config.env
+.venv
+__pycache__/
+*.pyc
+*.tgz

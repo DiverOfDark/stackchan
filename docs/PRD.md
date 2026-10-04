@@ -6,7 +6,7 @@
 | Owner | diverofdark |
 | Device | M5Stack StackChan (StackChan Core = CoreS3 variant, StackChan Body) |
 | Design | `design/Femto Dystopia.dc.html` (variant E, "Dystopian anime") |
-| Related repos | [trmnl-cyberpunk](https://github.com/DiverOfDark/trmnl-cyberpunk) (usage data), [pipecat-voice-assistant](https://github.com/DiverOfDark/pipecat-voice-assistant) (voice backend) |
+| Related repos | [trmnl-cyberpunk](https://github.com/DiverOfDark/trmnl-cyberpunk) (usage data), voice backend in `backend/` (formerly pipecat-voice-assistant) |
 
 ---
 

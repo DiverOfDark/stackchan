@@ -1,0 +1,81 @@
+# STUNner WebRTC gateway resources for this release.
+# The STUNner OPERATOR must be installed separately:
+#   helm repo add stunner https://l7mp.io/stunner
+#   helm install stunner stunner/stunner --create-namespace -n stunner-system
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: GatewayClass
+metadata:
+  name: {{ include "voice-assistant.gatewayClassName" . }}
+  labels:
+    {{- include "voice-assistant.labels" . | nindent 4 }}
+spec:
+  controllerName: "stunner.l7mp.io/gateway-operator"
+  parametersRef:
+    group: stunner.l7mp.io
+    kind: GatewayConfig
+    name: {{ include "voice-assistant.fullname" . }}
+    namespace: {{ .Release.Namespace }}
+  description: "STUNner WebRTC gateway for {{ .Release.Name }}"
+---
+apiVersion: stunner.l7mp.io/v1
+kind: GatewayConfig
+metadata:
+  name: {{ include "voice-assistant.fullname" . }}
+  labels:
+    {{- include "voice-assistant.labels" . | nindent 4 }}
+spec:
+  realm: {{ .Values.stunner.realm }}
+  # Static TURN credentials come from this Secret (keys: type, username, password).
+  authRef:
+    name: {{ include "voice-assistant.turnSecretName" . }}
+    namespace: {{ .Release.Namespace }}
+  {{- if or .Values.stunner.loadBalancerIP .Values.stunner.loadBalancerServiceAnnotations }}
+  # Annotations applied to the LoadBalancer Service STUNner creates for the Gateway.
+  loadBalancerServiceAnnotations:
+    {{- if .Values.stunner.loadBalancerIP }}
+    metallb.universe.tf/loadBalancerIPs: {{ .Values.stunner.loadBalancerIP | quote }}
+    {{- end }}
+    {{- with .Values.stunner.loadBalancerServiceAnnotations }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+  {{- end }}
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata:
+  # NOTE: must differ from the app's Deployment name. The STUNner operator
+  # creates the TURN dataplane Deployment with the Gateway's name; using
+  # plain "{{ include "voice-assistant.fullname" . }}" collides with the
+  # chart's own Deployment of the same name.
+  name: {{ include "voice-assistant.fullname" . }}-stunner
+  labels:
+    {{- include "voice-assistant.labels" . | nindent 4 }}
+spec:
+  gatewayClassName: {{ include "voice-assistant.gatewayClassName" . }}
+  listeners:
+    - name: turn-udp
+      port: 3478
+      protocol: TURN-UDP
+---
+apiVersion: stunner.l7mp.io/v1
+kind: UDPRoute
+metadata:
+  name: {{ include "voice-assistant.fullname" . }}
+  labels:
+    {{- include "voice-assistant.labels" . | nindent 4 }}
+spec:
+  parentRefs:
+    # group/kind are defaulted by the CRD; declaring them explicitly keeps
+    # ArgoCD from seeing a drift on every reconcile.
+    - group: gateway.networking.k8s.io
+      kind: Gateway
+      name: {{ include "voice-assistant.fullname" . }}-stunner
+  rules:
+    - backendRefs:
+        # Permit the TURN relay to reach this app's pods (peer IPs come from
+        # the Service's endpoints).
+        - group: ""
+          kind: Service
+          name: {{ include "voice-assistant.fullname" . }}
+          namespace: {{ .Release.Namespace }}

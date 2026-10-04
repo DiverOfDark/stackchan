@@ -1,0 +1,41 @@
+{{- include "voice-assistant.validate" . -}}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "voice-assistant.fullname" . }}
+  labels:
+    {{- include "voice-assistant.labels" . | nindent 4 }}
+data:
+  HERMES_BASE_URL: {{ .Values.hermes.baseUrl | quote }}
+  HERMES_MODEL: {{ .Values.hermes.model | quote }}
+  WHISPER_MODEL: {{ .Values.whisper.model | quote }}
+  WHISPER_COMPUTE_TYPE: {{ .Values.whisper.computeType | quote }}
+  WHISPER_BEAM_SIZE: {{ .Values.whisper.beamSize | quote }}
+  WHISPER_BEST_OF: {{ .Values.whisper.bestOf | quote }}
+  OMP_NUM_THREADS: {{ .Values.whisper.ompThreads | quote }}
+  PIPER_VOICE: {{ .Values.piper.voice | quote }}
+  STT_PROVIDER: {{ .Values.stt.provider | quote }}
+  TTS_PROVIDER: {{ .Values.tts.provider | quote }}
+  ELEVENLABS_VOICE_ID: {{ .Values.elevenlabs.voiceId | quote }}
+  ELEVENLABS_TTS_MODEL: {{ .Values.elevenlabs.ttsModel | quote }}
+  ELEVENLABS_STT_MODEL: {{ .Values.elevenlabs.sttModel | quote }}
+  ELEVENLABS_STABILITY: {{ .Values.elevenlabs.stability | quote }}
+  ELEVENLABS_SIMILARITY: {{ .Values.elevenlabs.similarity | quote }}
+  HF_HOME: "/models/hf"
+  PIPER_DOWNLOAD_DIR: "/models/piper"
+  HTTP_PORT: "7860"
+  ESP32_COMPAT: {{ .Values.esp32Compat | quote }}
+  STUNNER_TURN_URI: {{ .Values.stunner.turnUri | quote }}
+  {{- if .Values.wakeSamples.enabled }}
+  WAKE_SAMPLE_DIR: {{ .Values.wakeSamples.dir | quote }}
+  WAKE_SAMPLE_MAX: {{ .Values.wakeSamples.maxFiles | quote }}
+  {{- end }}
+  {{- with .Values.stackchan }}
+  STACKCHAN_USAGE_URL: {{ .usageUrl | default "" | quote }}
+  {{- if .systemPrompt }}
+  STACKCHAN_SYSTEM_PROMPT: |-
+{{ .systemPrompt | indent 4 }}
+  {{- end }}
+  {{- end }}
+  SYSTEM_PROMPT: |-
+{{ .Values.systemPrompt | indent 4 }}
