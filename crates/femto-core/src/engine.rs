@@ -2,7 +2,7 @@
 
 use crate::demo::{Demo, Step};
 use crate::expr::{Emotion, Params};
-use crate::settings::Settings;
+use crate::settings::{HeadMotion, Settings};
 use crate::text;
 use crate::usage::{Usage, UsageView};
 use crate::TICK_MS;
@@ -98,6 +98,7 @@ pub struct Engine {
     last_seen_ms: u64,
     presence: bool,
     follow: bool,
+    head_motion: HeadMotion,
     override_em: Option<Emotion>,
     event_em: Option<(Emotion, u64)>,
     caption: String,
@@ -129,6 +130,7 @@ impl Engine {
             last_seen_ms: 0,
             presence: true,
             follow: true,
+            head_motion: HeadMotion::Calm,
             override_em: None,
             event_em: None,
             caption: String::new(),
@@ -143,6 +145,7 @@ impl Engine {
 
     pub fn apply_settings(&mut self, s: &Settings) {
         self.follow = s.follow;
+        self.head_motion = s.head_motion;
         self.presence = s.camera;
     }
 
@@ -376,7 +379,7 @@ impl Engine {
         match self.resolve_emotion() {
             Emotion::Sleepy | Emotion::Dormant => (0.0, 0.0),
             Emotion::Thinking => (10.0, 6.0),
-            Emotion::Curious => {
+            Emotion::Curious if self.head_motion == HeadMotion::Lively => {
                 // Pan double-take in place of the design's head roll.
                 let wiggle = if (self.t / 6) % 2 == 0 { 3.0 } else { -3.0 };
                 (self.gaze.0 * 22.0 + wiggle, -self.gaze.1 * 12.0)

@@ -13,9 +13,11 @@ use esp_idf_svc::nvs::{EspDefaultNvsPartition, EspNvs, NvsDefault};
 use femto_drivers::scs::{self, ScsBus, ID_PITCH, ID_YAW};
 use log::{info, warn};
 
-/// Spring from M5's BSP motion (stiffness 170, damping 26, 50 Hz).
-const STIFFNESS: f32 = 170.0;
-const DAMPING: f32 = 26.0;
+/// Critically damped spring, softer than M5's BSP motion (stiffness 170):
+/// slower moves are quieter. Tunable live, as is the speed cap.
+pub const STIFFNESS: f32 = 80.0;
+/// Top head speed, degrees per second.
+pub const MAX_SPEED: f32 = 60.0;
 const DT: f32 = 0.02;
 /// Neutral pitch: slightly up, so following can look down a little.
 /// Neutral pitch: the camera sits in the head, so look up at a seated face.
@@ -70,6 +72,12 @@ pub struct Motion {
     pub grabbed: bool,
     /// Duration of each setpoint move (see [`MOVE_MS`]); tunable live.
     pub move_ms: u16,
+    /// Spring stiffness and speed cap (see [`STIFFNESS`], [`MAX_SPEED`]).
+    pub stiffness: f32,
+    pub max_speed: f32,
+    /// Pitch may lose torque at rest too (it carries the head and may sag);
+    /// yaw always does.
+    pub rest_pitch: bool,
 }
 
 impl Motion {
@@ -125,9 +133,9 @@ struct Axis {
 }
 
 impl Axis {
-    fn step(&mut self, target: f32) {
-        let acc = STIFFNESS * (target - self.pos) - DAMPING * self.vel;
-        self.vel += acc * DT;
+    fn step(&mut self, target: f32, stiffness: f32, max_speed: f32) {
+        let acc = stiffness * (target - self.pos) - 2.0 * stiffness.sqrt() * self.vel;
+        self.vel = (self.vel + acc * DT).clamp(-max_speed, max_speed);
         self.pos += self.vel * DT;
     }
 
@@ -140,8 +148,9 @@ impl Axis {
     }
 }
 
-/// Start the motion task. Servo power must already be on.
-pub fn start(uart: UART1<'static>, tx: Gpio6<'static>, rx: Gpio7<'static>, nvs: EspDefaultNvsPartition) -> Result<MotionRef> {
+/// Start the motion task. Servo power must already be on. `still`: skip
+/// the boot stretch.
+pub fn start(uart: UART1<'static>, tx: Gpio6<'static>, rx: Gpio7<'static>, nvs: EspDefaultNvsPartition, still: bool) -> Result<MotionRef> {
     let driver = UartDriver::new(uart, tx, rx, Option::<esp_idf_svc::hal::gpio::AnyIOPin>::None, Option::<esp_idf_svc::hal::gpio::AnyIOPin>::None, &Config::new().baudrate(Hertz(scs::BAUD)))?;
     let mut bus = ScsBus::new(Uart(driver));
 
@@ -179,10 +188,14 @@ pub fn start(uart: UART1<'static>, tx: Gpio6<'static>, rx: Gpio7<'static>, nvs: 
         freeze_until: None,
         grabbed: false,
         move_ms: MOVE_MS,
+        stiffness: STIFFNESS,
+        max_speed: MAX_SPEED,
+        rest_pitch: false,
     }));
     let shared = target.clone();
     crate::psram_stack_thread("motion", 6144, move || {
-        let mut torque = false;
+        // Torque on per axis: (yaw, pitch).
+        let mut torque = (false, false);
         let mut resting_since: Option<Instant> = None;
         let mut errors = 0u32;
         let started = Instant::now();
@@ -197,7 +210,7 @@ pub fn start(uart: UART1<'static>, tx: Gpio6<'static>, rx: Gpio7<'static>, nvs: 
         let mut sent_raw: (Option<u16>, Option<u16>) = (None, None);
         loop {
             tick = tick.wrapping_add(1);
-            let (mut t, allowed, frozen, move_ms) = {
+            let (mut t, allowed, frozen, move_ms, stiffness, max_speed, rest_pitch) = {
                 let mut m = shared.lock().unwrap();
                 if std::mem::take(&mut m.rezero) {
                     // Current pose becomes the new centre (raw zero), so the
@@ -236,10 +249,10 @@ pub fn start(uart: UART1<'static>, tx: Gpio6<'static>, rx: Gpio7<'static>, nvs: 
                 }
                 m.grabbed = grabbed;
                 let frozen = m.freeze_until.is_some_and(|u| now < u);
-                (t, m.torque_allowed, frozen, m.move_ms)
+                (t, m.torque_allowed, frozen, m.move_ms, m.stiffness, m.max_speed, m.rest_pitch)
             };
             // Servo feedback: is a hand forcing the head, or has it let go?
-            if torque || grabbed {
+            if torque.0 || torque.1 || grabbed {
                 if tick % FEEDBACK_EVERY == 0 {
                     let read = |bus: &mut ScsBus<Uart>, a: &Axis| bus.read_pos(a.id).ok().map(|raw| scs::decidegrees_from_raw(a.zero, raw) as f32 / 10.0);
                     if let (Some(ay), Some(ap)) = (read(&mut bus, &yaw), read(&mut bus, &pitch)) {
@@ -258,7 +271,9 @@ pub fn start(uart: UART1<'static>, tx: Gpio6<'static>, rx: Gpio7<'static>, nvs: 
                                 grabbed = false;
                                 strikes = 0;
                             }
-                        } else if (ay - yaw.pos).abs() > GRAB_DEG || (ap - pitch.pos).abs() > GRAB_DEG {
+                        } else if (torque.0 && (ay - yaw.pos).abs() > GRAB_DEG) || (torque.1 && (ap - pitch.pos).abs() > GRAB_DEG) {
+                            // Only an axis under torque can be forced; a
+                            // resting one may just have sagged.
                             strikes += 1;
                             if strikes >= 2 {
                                 info!("head grabbed (driven {:.1}°/{:.1}°, at {ay:.1}°/{ap:.1}°): going limp", yaw.pos, pitch.pos);
@@ -280,49 +295,60 @@ pub fn start(uart: UART1<'static>, tx: Gpio6<'static>, rx: Gpio7<'static>, nvs: 
             }
             // Boot stretch: glance left, right, then hand over to the engine.
             match started.elapsed().as_millis() {
-                _ if frozen || grabbed => {}
+                _ if frozen || grabbed || still => {}
                 0..700 => t = Target { yaw: -20.0, pitch: PITCH_NEUTRAL + 8.0, may_rest: false },
                 700..1400 => t = Target { yaw: 20.0, pitch: PITCH_NEUTRAL + 8.0, may_rest: false },
                 _ => {}
             }
             let ty = t.yaw.clamp(-YAW_LIMIT, YAW_LIMIT);
             let tp = t.pitch.clamp(PITCH_MIN, PITCH_MAX);
-            yaw.step(ty);
-            pitch.step(tp);
+            yaw.step(ty, stiffness, max_speed);
+            pitch.step(tp, stiffness, max_speed);
             let settled = yaw.settled(ty) && pitch.settled(tp);
             resting_since = match (settled && t.may_rest, resting_since) {
                 (true, None) => Some(Instant::now()),
                 (true, s) => s,
                 (false, _) => None,
             };
-            let rest = !allowed || grabbed || resting_since.is_some_and(|s| s.elapsed() > REST_TORQUE_OFF);
-            if rest == torque {
-                for axis in [&yaw, &pitch] {
-                    // The goal register may be stale (limp, re-zero): aim at
-                    // the current pose before torque comes back.
-                    if !rest {
-                        bus.write_pos(axis.id, axis.raw(), 0, 0).ok();
-                    }
-                    sent_raw = (None, None);
-                    if let Err(e) = bus.torque(axis.id, !rest) {
-                        errors += 1;
-                        if errors % 100 == 1 {
-                            warn!("servo {} torque: {e:?}", axis.id);
-                        }
+            let limp = !allowed || grabbed;
+            let idle = resting_since.is_some_and(|s| s.elapsed() > REST_TORQUE_OFF);
+            let want = (!(limp || idle), !(limp || (idle && rest_pitch)));
+            for (axis, on, want, sent) in [(&mut yaw, &mut torque.0, want.0, &mut sent_raw.0), (&mut pitch, &mut torque.1, want.1, &mut sent_raw.1)] {
+                if *on == want {
+                    continue;
+                }
+                if want && allowed && !grabbed {
+                    // Resting, the axis may have sagged or been nudged:
+                    // the spring starts from where it really is.
+                    if let Ok(raw) = bus.read_pos(axis.id) {
+                        axis.pos = scs::decidegrees_from_raw(axis.zero, raw) as f32 / 10.0;
+                        axis.vel = 0.0;
                     }
                 }
-                torque = !rest;
+                // The goal register may be stale (limp, re-zero): aim at
+                // the current pose before torque comes back.
+                if want {
+                    bus.write_pos(axis.id, axis.raw(), 0, 0).ok();
+                }
+                *sent = None;
+                if let Err(e) = bus.torque(axis.id, want) {
+                    errors += 1;
+                    if errors % 100 == 1 {
+                        warn!("servo {} torque: {e:?}", axis.id);
+                    }
+                }
+                *on = want;
             }
             if !allowed {
                 // Limp: follow the target in software so re-enabling is smooth.
                 yaw.pos = ty;
                 pitch.pos = tp;
             }
-            if torque && !settled {
-                for (axis, sent) in [(&yaw, &mut sent_raw.0), (&pitch, &mut sent_raw.1)] {
+            if !settled {
+                for (axis, sent, on) in [(&yaw, &mut sent_raw.0, torque.0), (&pitch, &mut sent_raw.1, torque.1)] {
                     // Same goal as last time: nothing new to tell the servo.
                     let raw = axis.raw();
-                    if *sent == Some(raw) {
+                    if !on || *sent == Some(raw) {
                         continue;
                     }
                     *sent = Some(raw);

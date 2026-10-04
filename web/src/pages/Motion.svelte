@@ -56,6 +56,18 @@
     <button onclick={() => ((yaw = 0), (pitch = 0), jog())}>Centre</button>
     <button onclick={() => attempt(api.setTorque(!m!.torque))}>{m.torque ? 'Go limp' : 'Torque on'}</button>
   </div>
+  <h2>Smoothness</h2>
+  <p class="muted">Live tuning for servo noise; resets on reboot.</p>
+  <label class="field"><span class="label">Top speed {m.max_speed}°/s</span>
+    <input type="range" min="10" max="400" value={m.max_speed} onchange={(e) => attempt(api.tuneMotion({ max_speed: +e.currentTarget.value }))} />
+  </label>
+  <label class="field"><span class="label">Stiffness {m.stiffness}</span>
+    <input type="range" min="10" max="300" value={m.stiffness} onchange={(e) => attempt(api.tuneMotion({ stiffness: +e.currentTarget.value }))} />
+  </label>
+  <label class="field"><span class="label">Move time {m.move_ms} ms</span>
+    <input type="range" min="20" max="200" value={m.move_ms} onchange={(e) => attempt(api.tuneMotion({ move_ms: +e.currentTarget.value }))} />
+  </label>
+  <label class="row"><input type="checkbox" checked={m.rest_pitch} onchange={(e) => attempt(api.tuneMotion({ rest_pitch: e.currentTarget.checked }))} /> Pitch rests too (torque off when idle; the head may sag)</label>
   <h2>Calibrate</h2>
   <p class="muted">Jog (or go limp and move the head by hand) until Femto looks straight ahead and level, then save it as the centre. Stored where M5's firmware keeps it.</p>
   <button class="danger" onclick={zero}>Save as centre</button>

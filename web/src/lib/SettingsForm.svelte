@@ -74,6 +74,13 @@
 
   <h2>Behaviour</h2>
   <label class="row"><input type="checkbox" checked={s.follow} onchange={(e) => onchange({ follow: e.currentTarget.checked })} /> Follow me (eyes + head)</label>
+  <div class="label" style="margin-top:10px">Head movement</div>
+  <div class="chips">
+    {#each [['still', 'Still'], ['calm', 'Calm'], ['lively', 'Lively']] as const as [v, label]}
+      <button class:on={s.head_motion === v} onclick={() => onchange({ head_motion: v })}>{label}</button>
+    {/each}
+  </div>
+  <p class="muted">Servos are noisy. Still: only the eyes move. Calm: the head turns only for faces well off-centre and rarely looks about. Lively: follows continuously, looks about every few seconds.</p>
   <label class="row" style="margin-top:10px"><input type="checkbox" checked={s.camera} onchange={(e) => onchange({ camera: e.currentTarget.checked })} /> Camera (face tracking, standby when alone)</label>
 
   <h2>Voice</h2>

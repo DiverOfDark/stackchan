@@ -16,6 +16,7 @@ export interface Settings {
   accent: Accent;
   fx: boolean;
   follow: boolean;
+  head_motion: 'still' | 'calm' | 'lively';
   camera: boolean;
   /** 10–100, or null for auto. */
   brightness: number | null;
@@ -79,6 +80,11 @@ export interface MotionState {
   pitch: number;
   zero: { yaw: number; pitch: number };
   torque: boolean;
+  move_ms: number;
+  stiffness: number;
+  /** °/s */
+  max_speed: number;
+  rest_pitch: boolean;
   limits: { yaw: number; pitch_min: number; pitch_max: number };
 }
 
@@ -136,6 +142,7 @@ export const api = {
   motion: () => call<MotionState>('GET', '/motion'),
   jog: (yaw: number, pitch: number) => call<void>("PUT", "/motion", { jog: [Math.round(yaw), Math.round(pitch)] }),
   setTorque: (on: boolean) => call<void>('PUT', '/motion', { torque: on }),
+  tuneMotion: (t: Partial<Pick<MotionState, 'move_ms' | 'stiffness' | 'max_speed' | 'rest_pitch'>>) => call<void>('PUT', '/motion', t),
   nod: () => call<void>('PUT', '/motion', { nod: true }),
   setZero: () => call<{ yaw: number; pitch: number }>('POST', '/motion/zero'),
   talk: () => call<void>('POST', '/voice/talk'),

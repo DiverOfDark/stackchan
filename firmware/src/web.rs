@@ -492,6 +492,9 @@ pub fn start(hub: &HubRef) -> Result<EspHttpServer<'static>> {
             "zero": { "yaw": m.zero.0, "pitch": m.zero.1 },
             "torque": m.torque_allowed,
             "move_ms": m.move_ms,
+            "stiffness": m.stiffness,
+            "max_speed": m.max_speed,
+            "rest_pitch": m.rest_pitch,
             "limits": { "yaw": crate::motion::YAW_LIMIT, "pitch_min": crate::motion::PITCH_MIN, "pitch_max": crate::motion::PITCH_MAX },
         });
         drop(m);
@@ -506,6 +509,11 @@ pub fn start(hub: &HubRef) -> Result<EspHttpServer<'static>> {
             nod: Option<bool>,
             /// Servo move time per setpoint (noise tuning).
             move_ms: Option<u16>,
+            /// Spring stiffness and speed cap (°/s), whole numbers.
+            stiffness: Option<u16>,
+            max_speed: Option<u16>,
+            /// Pitch may lose torque at rest too (it may sag).
+            rest_pitch: Option<bool>,
         }
         let p: Patch = json_body(&mut req)?;
         let m = hub.lock().unwrap().motion.clone();
@@ -519,6 +527,15 @@ pub fn start(hub: &HubRef) -> Result<EspHttpServer<'static>> {
         }
         if let Some(ms) = p.move_ms {
             m.move_ms = ms.clamp(20, 200);
+        }
+        if let Some(k) = p.stiffness {
+            m.stiffness = k.clamp(10, 300) as f32;
+        }
+        if let Some(v) = p.max_speed {
+            m.max_speed = v.clamp(10, 400) as f32;
+        }
+        if let Some(r) = p.rest_pitch {
+            m.rest_pitch = r;
         }
         if p.nod == Some(true) {
             m.nod_until = Some(Instant::now() + Duration::from_millis(2500));
