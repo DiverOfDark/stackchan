@@ -110,3 +110,49 @@ def test_wake_phrase_prefix_is_stripped():
     # A sentence that merely starts with "эй" stays.
     assert bot.strip_wake_phrase("эй ты как дела") == "эй ты как дела"
     assert bot.strip_wake_phrase("Сколько осталось?") == "Сколько осталось?"
+
+
+class _FakeResp:
+    status = 200
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *a):
+        return False
+
+    async def json(self):
+        return {"text": "сколько осталось", "language_code": "rus"}
+
+
+class _FakeSession:
+    def __init__(self):
+        self.fields = None
+
+    def post(self, url, data, headers):
+        self.fields = {f[0]["name"]: f[2] for f in data._fields}
+        return _FakeResp()
+
+
+async def _stt_fields(language, keyterms):
+    session = _FakeSession()
+    stt = bot.ScribeSTTService(
+        api_key="k",
+        aiohttp_session=session,
+        settings=bot.ScribeSTTService.Settings(model="scribe_v2", language=language, tag_audio_events=False, keyterms=keyterms),
+    )
+    result = await stt._transcribe_audio(b"RIFF")
+    return session.fields, result
+
+
+async def test_scribe_auto_language_omits_language_code():
+    fields, result = await _stt_fields(None, ["Фемто", "Femto"])
+    assert "language_code" not in fields
+    assert fields["model_id"] == "scribe_v2"
+    assert fields["tag_audio_events"] == "false"
+    assert result["text"] == "сколько осталось"
+
+
+async def test_scribe_fixed_language_is_sent():
+    fields, _ = await _stt_fields(Language.RU, None)
+    assert fields["language_code"] == "rus"  # ElevenLabs code, converted by the service

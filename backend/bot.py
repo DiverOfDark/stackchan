@@ -8,6 +8,7 @@
 # Everything (STT, LLM, TTS, VAD) runs locally — no cloud calls in the hot path.
 #
 import asyncio
+import io
 import inspect
 import json
 import logging
@@ -73,6 +74,7 @@ from pipecat.processors.aggregators.llm_response_universal import (
     LLMUserAggregatorParams,
 )
 from pipecat.services.elevenlabs.stt import ElevenLabsSTTService
+from pipecat.services.settings import is_given
 from pipecat.services.elevenlabs.tts import ElevenLabsTTSService
 from pipecat.services.openai.llm import OpenAILLMService
 from pipecat.services.piper.tts import PiperTTSService
@@ -442,7 +444,7 @@ async def run_pipeline(transport, session_id: str, request_data: dict | None, se
     if STT_PROVIDER == "elevenlabs":
         # ElevenLabs Scribe (cloud, batch). Runs on VAD-segmented utterances —
         # which we already wait for — and frees the local ~1.5 GB Whisper + CPU.
-        stt = ElevenLabsSTTService(
+        stt = ScribeSTTService(
             api_key=ELEVENLABS_API_KEY,
             aiohttp_session=_aiohttp_session,
             settings=ElevenLabsSTTService.Settings(
@@ -702,6 +704,35 @@ class TranscriptObserver(BaseObserver):
             self._assistant_buffer = []
             if text:
                 broadcast_transcript({"pc_id": self._pc_id, "role": "assistant", "text": text})
+
+
+class ScribeSTTService(ElevenLabsSTTService):
+    """ElevenLabs Scribe with real language auto-detect.
+
+    The stock service always sends language_code: a None language raises
+    "Can not serialize value type NoneType", and leaving it unset falls back
+    to English. Here language=None omits the field, so Scribe detects it
+    (Femto's "auto" — Russian and English).
+    """
+
+    async def _transcribe_audio(self, audio_data: bytes) -> dict:
+        data = aiohttp.FormData()
+        data.add_field("file", io.BytesIO(audio_data), filename="audio.wav", content_type="audio/x-wav")
+        data.add_field("model_id", self._settings.model)
+        if self._settings.language:
+            data.add_field("language_code", str(self._settings.language))
+        if self._settings.tag_audio_events is not None:
+            data.add_field("tag_audio_events", str(self._settings.tag_audio_events).lower())
+        keyterms = self._settings.keyterms
+        if is_given(keyterms) and keyterms:
+            for term in keyterms:
+                data.add_field("keyterms", term)
+        url = f"{self._base_url}/v1/speech-to-text"
+        async with self._session.post(url, data=data, headers={"xi-api-key": self._api_key}) as resp:
+            if resp.status != 200:
+                text = await resp.text()
+                raise Exception(f"Transcription failed with status {resp.status}: {text}")
+            return await resp.json()
 
 
 # The wake word fires on the device, but the phrase itself (and anything the
