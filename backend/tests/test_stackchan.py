@@ -200,7 +200,11 @@ def test_only_words_interrupt():
         # Noise transcribed as nothing: still no interruption.
         await s.process_frame(TranscriptionFrame(text="  ", user_id="u", timestamp="t"))
         assert broadcast == []
-        # Real words: now the bot is interrupted.
+        # The question's own transcript (its reply is starting): no interruption.
+        await s.process_frame(TranscriptionFrame(text="какая погода", user_id="u", timestamp="t"))
+        assert broadcast == []
+        # Words while the bot is speaking: interrupt.
+        await s.process_frame(BotStartedSpeakingFrame())
         await s.process_frame(TranscriptionFrame(text="стоп хватит", user_id="u", timestamp="t"))
         assert broadcast == [InterruptionFrame]
 

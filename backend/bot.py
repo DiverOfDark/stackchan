@@ -718,7 +718,9 @@ class TranscriptObserver(BaseObserver):
 class InterruptOnWordsStart(BaseUserTurnStartStrategy):
     """User turn start for Femto: voice activity starts the turn (so the
     screen and turn tracking react at once) but does NOT interrupt the bot;
-    the first transcript with words does.
+    words transcribed while the bot is speaking do. (A transcript of the
+    current turn arrives after its reply has started — interrupting then
+    would cancel the answer to the question just asked.)
 
     Pipecat's default interrupts on any VAD blip. With the device's echo
     guard muting the mic while Femto talks, real barge-in can't happen
@@ -729,15 +731,21 @@ class InterruptOnWordsStart(BaseUserTurnStartStrategy):
 
     def __init__(self, **kwargs):
         super().__init__(enable_interruptions=False, **kwargs)
+        self._bot_speaking = False
 
     async def process_frame(self, frame: Frame) -> ProcessFrameResult:
-        if isinstance(frame, VADUserStartedSpeakingFrame):
+        if isinstance(frame, BotStartedSpeakingFrame):
+            self._bot_speaking = True
+        elif isinstance(frame, BotStoppedSpeakingFrame):
+            self._bot_speaking = False
+        elif isinstance(frame, VADUserStartedSpeakingFrame):
             await self.trigger_user_turn_started()
             return ProcessFrameResult.STOP
-        if isinstance(frame, TranscriptionFrame) and frame.text.strip():
+        elif isinstance(frame, TranscriptionFrame) and frame.text.strip():
             # Starts the turn if VAD missed it (a no-op mid-turn).
             await self.trigger_user_turn_started()
-            await self.broadcast_frame(InterruptionFrame)
+            if self._bot_speaking:
+                await self.broadcast_frame(InterruptionFrame)
         return ProcessFrameResult.CONTINUE
 
 
