@@ -17,6 +17,10 @@ from pipecat.processors.frame_processor import FrameDirection
 from pipecat.transcriptions.language import Language
 
 import bot
+from pipecat.transports.base_output import BaseOutputTransport
+
+# Stands in for the pipeline's output transport (only isinstance matters).
+OUTPUT = object.__new__(BaseOutputTransport)
 
 USAGE = {
     "signed_in": True,
@@ -81,10 +85,10 @@ def test_event_observer_maps_frames_once():
         for f in frames:
             # Each frame passes several processors; it must be sent once.
             for _ in range(3):
-                await obs.on_push_frame(SimpleNamespace(frame=f, direction=FrameDirection.DOWNSTREAM))
+                await obs.on_push_frame(SimpleNamespace(frame=f, direction=FrameDirection.DOWNSTREAM, source=OUTPUT))
             # Broadcast frames also have an upstream twin: ignored.
             twin = type(f)(**{k: getattr(f, k) for k in ("text", "user_id", "timestamp", "aggregated_by") if hasattr(f, k)})
-            await obs.on_push_frame(SimpleNamespace(frame=twin, direction=FrameDirection.UPSTREAM))
+            await obs.on_push_frame(SimpleNamespace(frame=twin, direction=FrameDirection.UPSTREAM, source=OUTPUT))
 
     asyncio.run(push_all())
     assert [m["t"] for m in sent] == [
@@ -93,6 +97,18 @@ def test_event_observer_maps_frames_once():
     assert sent[1] == {"t": "user_text", "text": "how much", "final": False}
     assert sent[2]["final"] is True
     assert sent[5] == {"t": "bot_text", "text": "Thirty-eight"}
+
+
+def test_bot_text_follows_the_output_transport():
+    sent = []
+    obs = bot.StackchanEventObserver(sent.append)
+    word = TTSTextFrame(text="Тридцать", aggregated_by="word")
+    # Leaving the TTS service (seconds before it's spoken): not yet...
+    asyncio.run(obs.on_push_frame(SimpleNamespace(frame=word, direction=FrameDirection.DOWNSTREAM, source=object())))
+    assert sent == []
+    # ...released by the output transport with its audio: now.
+    asyncio.run(obs.on_push_frame(SimpleNamespace(frame=word, direction=FrameDirection.DOWNSTREAM, source=OUTPUT)))
+    assert sent == [{"t": "bot_text", "text": "Тридцать"}]
 
 
 def test_event_observer_survives_send_errors():

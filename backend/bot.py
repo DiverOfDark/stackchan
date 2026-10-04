@@ -86,6 +86,7 @@ from collections import deque
 from whisper_fast import FastWhisperSTTService
 from femto_ws import FemtoTransport, femto_params
 from pipecat.transcriptions.language import Language
+from pipecat.transports.base_output import BaseOutputTransport
 from pipecat.transports.base_transport import TransportParams
 from pipecat.transports.smallwebrtc.request_handler import (
     SmallWebRTCPatchRequest,
@@ -808,6 +809,11 @@ class StackchanEventObserver(BaseObserver):
         elif isinstance(frame, BotStoppedSpeakingFrame):
             msg = {"t": "bot_stopped"}
         elif isinstance(frame, TTSTextFrame):
+            # The TTS emits words well ahead of the audio; the output
+            # transport passes each one on when its audio is due. Caption
+            # from that hop so the screen follows the voice.
+            if not isinstance(data.source, BaseOutputTransport):
+                return
             msg = {"t": "bot_text", "text": frame.text}
         if msg is None or not self._once(frame):
             return
