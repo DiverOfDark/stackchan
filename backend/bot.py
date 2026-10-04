@@ -51,6 +51,9 @@ from pipecat.audio.vad.silero import SileroVADAnalyzer
 from pipecat.frames.frames import (
     BotStartedSpeakingFrame,
     BotStoppedSpeakingFrame,
+    Frame,
+    InterruptionFrame,
+    VADUserStartedSpeakingFrame,
     InterimTranscriptionFrame,
     TTSTextFrame,
     UserStartedSpeakingFrame,
@@ -63,6 +66,9 @@ from pipecat.frames.frames import (
 )
 from pipecat.observers.base_observer import BaseObserver, FramePushed
 from pipecat.processors.frame_processor import FrameDirection, FrameProcessor
+from pipecat.turns.types import ProcessFrameResult
+from pipecat.turns.user_start.base_user_turn_start_strategy import BaseUserTurnStartStrategy
+from pipecat.turns.user_turn_strategies import UserTurnStrategies
 from pipecat.observers.user_bot_latency_observer import UserBotLatencyObserver
 from pipecat.services.stt_service import STTService
 from pipecat.pipeline.pipeline import Pipeline
@@ -524,6 +530,8 @@ async def run_pipeline(transport, session_id: str, request_data: dict | None, se
         user_params=LLMUserAggregatorParams(
             vad_analyzer=SileroVADAnalyzer(),
             user_idle_timeout=CONTEXT_IDLE_RESET_SECS,
+            # Femto: only words interrupt a reply (see InterruptOnWordsStart).
+            **({"user_turn_strategies": UserTurnStrategies(start=[InterruptOnWordsStart()])} if stackchan else {}),
         ),
     )
 
@@ -705,6 +713,32 @@ class TranscriptObserver(BaseObserver):
             self._assistant_buffer = []
             if text:
                 broadcast_transcript({"pc_id": self._pc_id, "role": "assistant", "text": text})
+
+
+class InterruptOnWordsStart(BaseUserTurnStartStrategy):
+    """User turn start for Femto: voice activity starts the turn (so the
+    screen and turn tracking react at once) but does NOT interrupt the bot;
+    the first transcript with words does.
+
+    Pipecat's default interrupts on any VAD blip. With the device's echo
+    guard muting the mic while Femto talks, real barge-in can't happen
+    anyway, so the only interruptions were noise — e.g. 0.5 s after a
+    question, cancelling the reply before it started, with nothing (no
+    transcript) to replace it.
+    """
+
+    def __init__(self, **kwargs):
+        super().__init__(enable_interruptions=False, **kwargs)
+
+    async def process_frame(self, frame: Frame) -> ProcessFrameResult:
+        if isinstance(frame, VADUserStartedSpeakingFrame):
+            await self.trigger_user_turn_started()
+            return ProcessFrameResult.STOP
+        if isinstance(frame, TranscriptionFrame) and frame.text.strip():
+            # Starts the turn if VAD missed it (a no-op mid-turn).
+            await self.trigger_user_turn_started()
+            await self.broadcast_frame(InterruptionFrame)
+        return ProcessFrameResult.CONTINUE
 
 
 class ScribeSTTService(ElevenLabsSTTService):

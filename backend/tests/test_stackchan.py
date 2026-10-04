@@ -176,3 +176,32 @@ async def test_scribe_auto_language_omits_language_code():
 async def test_scribe_fixed_language_is_sent():
     fields, _ = await _stt_fields(Language.RU, None)
     assert fields["language_code"] == "rus"  # ElevenLabs code, converted by the service
+
+
+def test_only_words_interrupt():
+    from pipecat.frames.frames import InterruptionFrame, VADUserStartedSpeakingFrame
+
+    s = bot.InterruptOnWordsStart()
+    started, broadcast = [], []
+
+    async def on_started(_s, params):
+        started.append(params.enable_interruptions)
+
+    async def on_broadcast(_s, cls, **kw):
+        broadcast.append(cls)
+
+    s.add_event_handler("on_user_turn_started", on_started)
+    s.add_event_handler("on_broadcast_frame", on_broadcast)
+
+    async def run():
+        # Speech detected (or noise): the turn starts, nothing is interrupted.
+        await s.process_frame(VADUserStartedSpeakingFrame())
+        assert started == [False] and broadcast == []
+        # Noise transcribed as nothing: still no interruption.
+        await s.process_frame(TranscriptionFrame(text="  ", user_id="u", timestamp="t"))
+        assert broadcast == []
+        # Real words: now the bot is interrupted.
+        await s.process_frame(TranscriptionFrame(text="стоп хватит", user_id="u", timestamp="t"))
+        assert broadcast == [InterruptionFrame]
+
+    asyncio.run(run())
