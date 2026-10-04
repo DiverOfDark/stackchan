@@ -51,6 +51,8 @@ from pipecat.audio.vad.silero import SileroVADAnalyzer
 from pipecat.frames.frames import (
     BotStartedSpeakingFrame,
     BotStoppedSpeakingFrame,
+    CancelFrame,
+    EndFrame,
     Frame,
     InterruptionFrame,
     VADUserStartedSpeakingFrame,
@@ -820,13 +822,38 @@ class StackchanEventObserver(BaseObserver):
       {"t": "user_text", "text": ..., "final": bool}
       {"t": "bot_started"} / {"t": "bot_stopped"}
       {"t": "bot_text", "text": ...}      # TTS text as it's spoken
+      {"t": "thinking"}                   # every THINKING_EVERY s while the
+                                          # LLM works and nothing is spoken yet
     Every frame is seen once per hop through the pipeline; frame ids dedupe.
     """
+
+    # The agent LLM can take 15–40 s on a tool call (weather, search) before
+    # any text; the heartbeat keeps the device's turn open meanwhile.
+    THINKING_EVERY = 3.0
 
     def __init__(self, send):
         super().__init__()
         self._send = send
         self._seen: deque[int] = deque(maxlen=256)
+        self._heartbeat: asyncio.Task | None = None
+
+    async def _emit(self, msg: dict) -> None:
+        try:
+            res = self._send(msg)
+            if inspect.isawaitable(res):
+                await res
+        except Exception as exc:  # noqa: BLE001 — never break the pipeline over a caption
+            logger.debug(f"stackchan event send failed: {exc!r}")
+
+    async def _beat(self) -> None:
+        while True:
+            await self._emit({"t": "thinking"})
+            await asyncio.sleep(self.THINKING_EVERY)
+
+    def _stop_heartbeat(self) -> None:
+        if self._heartbeat:
+            self._heartbeat.cancel()
+            self._heartbeat = None
 
     def _once(self, frame) -> bool:
         if frame.id in self._seen:
@@ -840,6 +867,12 @@ class StackchanEventObserver(BaseObserver):
         # count the downstream copy only, or the device gets every event twice.
         if data.direction != FrameDirection.DOWNSTREAM:
             return
+        if isinstance(frame, LLMFullResponseStartFrame) and self._once(frame):
+            self._stop_heartbeat()
+            self._heartbeat = asyncio.create_task(self._beat())
+            return
+        if isinstance(frame, (LLMFullResponseEndFrame, BotStartedSpeakingFrame, InterruptionFrame, EndFrame, CancelFrame)):
+            self._stop_heartbeat()
         msg = None
         if isinstance(frame, UserStartedSpeakingFrame):
             msg = {"t": "user_started"}
@@ -862,12 +895,7 @@ class StackchanEventObserver(BaseObserver):
             msg = {"t": "bot_text", "text": frame.text}
         if msg is None or not self._once(frame):
             return
-        try:
-            res = self._send(msg)
-            if inspect.isawaitable(res):
-                await res
-        except Exception as exc:  # noqa: BLE001 — never break the pipeline over a caption
-            logger.debug(f"stackchan event send failed: {exc!r}")
+        await self._emit(msg)
 
 
 def _prewarm_whisper(app: FastAPI) -> None:

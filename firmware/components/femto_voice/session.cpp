@@ -209,6 +209,12 @@ void Session::onInboundAudio(const int16_t* pcm, std::size_t samples)
 
 void Session::onText(std::string json)
 {
+    if (json.find("\"thinking\"") != std::string::npos) {
+        // The backend is still working on a reply (the agent LLM can take
+        // 15–40 s on a tool call): keep the turn open while it says so.
+        const TickType_t until = xTaskGetTickCount() + pdMS_TO_TICKS(kAwaitResponseMs);
+        if (until > turn_deadline_.load()) turn_deadline_ = until;
+    }
     if (json.find("\"interrupted\"") != std::string::npos) {
         // Barge-in: the queued reply is stale. Safe to reset here: the
         // playback task never blocks on the buffer, and this task is its only

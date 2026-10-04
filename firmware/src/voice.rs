@@ -133,6 +133,13 @@ impl Voice {
                 }
             }
             "user_stopped" => engine.voice(VoiceState::Thinking),
+            // Backend heartbeat while the LLM works: stay on the thinking
+            // screen (and amber LEDs) however long the tool call takes.
+            "thinking" => {
+                if !matches!(engine.screen(), femto_core::Screen::Speaking | femto_core::Screen::Listening) {
+                    engine.voice(VoiceState::Thinking);
+                }
+            }
             "bot_started" => {
                 self.bot_caption_until = None;
                 self.bot_text.clear();

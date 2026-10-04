@@ -210,3 +210,24 @@ def test_only_words_interrupt():
         assert broadcast == [InterruptionFrame]
 
     asyncio.run(run())
+
+
+def test_thinking_heartbeat_while_llm_works():
+    from pipecat.frames.frames import LLMFullResponseEndFrame, LLMFullResponseStartFrame
+
+    sent = []
+    obs = bot.StackchanEventObserver(sent.append)
+    obs.THINKING_EVERY = 0.05
+    down = lambda f: SimpleNamespace(frame=f, direction=FrameDirection.DOWNSTREAM, source=OUTPUT)
+
+    async def run():
+        await obs.on_push_frame(down(LLMFullResponseStartFrame()))
+        await asyncio.sleep(0.18)
+        # First words are spoken: the heartbeat stops.
+        await obs.on_push_frame(down(BotStartedSpeakingFrame()))
+        n = sum(m["t"] == "thinking" for m in sent)
+        await asyncio.sleep(0.15)
+        assert sum(m["t"] == "thinking" for m in sent) == n
+        return n
+
+    assert asyncio.run(run()) >= 3
