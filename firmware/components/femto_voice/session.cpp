@@ -47,6 +47,9 @@ constexpr float kWakeGain             = 8.0f;     // +18 dB — what the model t
 // keep the mic uplink muted, so the bot doesn't hear itself and
 // self-interrupt.
 constexpr int  kEchoGuardMs           = 400;
+// Same for Femto's own chirps (the wake "online" sound): without it the
+// backend hears the chirp as speech ("[chime]") and answers it.
+constexpr int  kChirpTailMs           = 150;
 
 // Turn timeouts. While awaiting the bot's reply the turn stays open this long
 // (a safety net for a slow or dead backend); each played bot frame then
@@ -334,7 +337,8 @@ void Session::captureTask()
 
         const TickType_t now = xTaskGetTickCount();
         const TickType_t rx = last_rx_frame_tick_.load();
-        const bool bot_speaking = rx != 0 && (now - rx) < pdMS_TO_TICKS(kEchoGuardMs);
+        const bool bot_speaking = (rx != 0 && (now - rx) < pdMS_TO_TICKS(kEchoGuardMs)) ||
+                                  now < chirp_mute_until_.load();
 
         const uint32_t rms = domain::rms_i16(mono_wake, domain::kFramesPerPacket);
         mic_level_ = std::min(1.0f, rms / 8000.0f);
@@ -382,6 +386,7 @@ void Session::playbackTask()
         const int ch = chirp_pending_.exchange(-1);
         if (ch >= 0 && chirp) {
             const std::size_t cn = domain::synth_chirp(static_cast<domain::Chirp>(ch), chirp, domain::kChirpMaxSamples);
+            chirp_mute_until_ = xTaskGetTickCount() + pdMS_TO_TICKS(cn * 1000 / domain::kSampleRateHz + kChirpTailMs);
             audio_.write(chirp, cn);
         }
         // Never block on the buffer (onText may reset it); the I2S write

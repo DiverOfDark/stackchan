@@ -29,6 +29,11 @@ data:
   {{- if .Values.wakeSamples.enabled }}
   WAKE_SAMPLE_DIR: {{ .Values.wakeSamples.dir | quote }}
   WAKE_SAMPLE_MAX: {{ .Values.wakeSamples.maxFiles | quote }}
+  {{- if .Values.deviceLogs.enabled }}
+  DEVICE_LOG_DIR: {{ .Values.deviceLogs.dir | quote }}
+  DEVICE_LOG_KEEP_DAYS: {{ .Values.deviceLogs.keepDays | quote }}
+  DEVICE_LOG_MAX_MB_PER_DAY: {{ .Values.deviceLogs.maxMBPerDay | quote }}
+  {{- end }}
   {{- end }}
   {{- with .Values.stackchan }}
   STACKCHAN_USAGE_URL: {{ .usageUrl | default "" | quote }}

@@ -20,7 +20,7 @@ from pathlib import Path
 
 import uvicorn
 from fastapi import BackgroundTasks, FastAPI, Request, WebSocket
-from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
+from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, StreamingResponse
 from loguru import logger
 from pydantic import BaseModel
 
@@ -61,6 +61,7 @@ from pipecat.frames.frames import (
     TranscriptionFrame,
 )
 from pipecat.observers.base_observer import BaseObserver, FramePushed
+from pipecat.processors.frame_processor import FrameProcessor
 from pipecat.observers.user_bot_latency_observer import UserBotLatencyObserver
 from pipecat.services.stt_service import STTService
 from pipecat.pipeline.pipeline import Pipeline
@@ -149,6 +150,10 @@ STUNNER_TURN_PASSWORD = os.getenv("STUNNER_TURN_PASSWORD", "")
 # level, so the only fix is collecting the actual audio. Empty dir = disabled.
 WAKE_SAMPLE_DIR = os.getenv("WAKE_SAMPLE_DIR", "")
 WAKE_SAMPLE_MAX = int(os.getenv("WAKE_SAMPLE_MAX", "1000"))   # keep newest N, rotate older
+# Device log upload (POST /api/device-logs): one file per device per UTC day.
+DEVICE_LOG_DIR = os.getenv("DEVICE_LOG_DIR", "")
+DEVICE_LOG_KEEP_DAYS = int(os.getenv("DEVICE_LOG_KEEP_DAYS", "14"))
+DEVICE_LOG_MAX_MB_PER_DAY = int(os.getenv("DEVICE_LOG_MAX_MB_PER_DAY", "50"))
 
 _DEFAULT_SYSTEM_PROMPT = (
     "Ты — голосовой помощник по имени Фемто. Держись в манере агента Смита из "
@@ -440,8 +445,15 @@ async def run_pipeline(transport, session_id: str, request_data: dict | None, se
         stt = ElevenLabsSTTService(
             api_key=ELEVENLABS_API_KEY,
             aiohttp_session=_aiohttp_session,
-            model=ELEVENLABS_STT_MODEL,
-            params=ElevenLabsSTTService.InputParams(language=language),
+            settings=ElevenLabsSTTService.Settings(
+                model=ELEVENLABS_STT_MODEL,
+                language=language,
+                # No "[chime]"/"(laughter)" tags: a device sound or a cough
+                # must not become a question for the LLM.
+                tag_audio_events=False,
+                # The robot's name is not a dictionary word ("filmta").
+                keyterms=["Фемто", "Femto"] if stackchan else None,
+            ),
         )
     else:
         stt = FastWhisperSTTService(
@@ -537,6 +549,7 @@ async def run_pipeline(transport, session_id: str, request_data: dict | None, se
         [
             transport.input(),
             stt,
+            *([WakePhraseFilter()] if stackchan else []),
             user_aggregator,
             llm,
             tts,
@@ -689,6 +702,35 @@ class TranscriptObserver(BaseObserver):
             self._assistant_buffer = []
             if text:
                 broadcast_transcript({"pc_id": self._pc_id, "role": "assistant", "text": text})
+
+
+# The wake word fires on the device, but the phrase itself (and anything the
+# speaker played) can still reach STT. "Эй, Фемто" alone is not a question.
+_WAKE_PREFIX = re.compile(r"^\s*(эй|хей|hey|hi|ay)[\s,.!?-]+(ф|f)\w*[\s,.!?-]*", re.IGNORECASE)
+_SOUND_TAG = re.compile(r"^\s*[\[(][^\])]*[\])]\s*$")
+
+
+def strip_wake_phrase(text: str) -> str:
+    """Remove a leading wake phrase; '' when nothing else was said."""
+    if _SOUND_TAG.match(text or ""):
+        return ""
+    rest = _WAKE_PREFIX.sub("", text or "", count=1)
+    return rest.strip()
+
+
+class WakePhraseFilter(FrameProcessor):
+    """Between STT and the user aggregator: drop transcripts that are only the
+    wake phrase or a sound tag, and strip a leading wake phrase otherwise."""
+
+    async def process_frame(self, frame, direction):
+        await super().process_frame(frame, direction)
+        if isinstance(frame, (TranscriptionFrame, InterimTranscriptionFrame)):
+            text = strip_wake_phrase(frame.text)
+            if not text:
+                logger.info(f"dropped transcript {frame.text!r} (wake phrase / sound)")
+                return
+            frame.text = text
+        await self.push_frame(frame, direction)
 
 
 class StackchanEventObserver(BaseObserver):
@@ -947,6 +989,78 @@ def _rotate_wake_samples(directory: str, keep: int) -> None:
                 f.unlink()
             except OSError:
                 pass
+
+
+# --------------------------------------------------------------------------
+# Device logs — the Femto firmware ships its log here in batches, so a bad
+# turn can be read afterwards (GET /api/device-logs/<device>/<date>).
+# --------------------------------------------------------------------------
+_DEVICE_RE = re.compile(r"^[a-z0-9-]{1,32}$")
+_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+_device_log_pruned: dict[str, float] = {}
+
+
+def _prune_device_logs(device_dir: Path) -> None:
+    """Delete day files older than DEVICE_LOG_KEEP_DAYS (at most hourly)."""
+    now = time.time()
+    if now - _device_log_pruned.get(str(device_dir), 0) < 3600:
+        return
+    _device_log_pruned[str(device_dir)] = now
+    cutoff = time.strftime("%Y-%m-%d", time.gmtime(now - DEVICE_LOG_KEEP_DAYS * 86400))
+    for f in device_dir.glob("*.log"):
+        if f.stem < cutoff:
+            f.unlink(missing_ok=True)
+
+
+@app.post("/api/device-logs")
+async def device_logs_upload(request: Request, device: str = "device", boot: str = "-"):
+    """Append a batch of device log lines, each prefixed with the arrival
+    time (UTC) and the device's boot id."""
+    if not DEVICE_LOG_DIR:
+        return JSONResponse({"error": "device log storage disabled"}, status_code=503)
+    if not _DEVICE_RE.match(device) or not re.match(r"^[0-9a-f-]{1,16}$", boot):
+        return JSONResponse({"error": "bad device or boot id"}, status_code=400)
+    body = (await request.body())[: 256 * 1024].decode("utf-8", errors="replace")
+    day_dir = Path(DEVICE_LOG_DIR) / device
+    day_dir.mkdir(parents=True, exist_ok=True)
+    _prune_device_logs(day_dir)
+    path = day_dir / f"{time.strftime('%Y-%m-%d', time.gmtime())}.log"
+    if path.exists() and path.stat().st_size > DEVICE_LOG_MAX_MB_PER_DAY * 1024 * 1024:
+        return JSONResponse({"status": "dropped", "reason": "daily cap"}, status_code=202)
+    stamp = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    lines = [l for l in body.splitlines() if l.strip()]
+    with path.open("a", encoding="utf-8") as f:
+        f.writelines(f"{stamp} {boot} {l}\n" for l in lines)
+    return {"status": "ok", "lines": len(lines)}
+
+
+@app.get("/api/device-logs")
+async def device_logs_index():
+    """Devices and their stored days (newest first), with sizes."""
+    if not DEVICE_LOG_DIR or not Path(DEVICE_LOG_DIR).is_dir():
+        return {}
+    return {
+        d.name: [{"date": f.stem, "bytes": f.stat().st_size} for f in sorted(d.glob("*.log"), reverse=True)]
+        for d in sorted(Path(DEVICE_LOG_DIR).iterdir())
+        if d.is_dir()
+    }
+
+
+@app.get("/api/device-logs/{device}/{date}")
+async def device_logs_day(device: str, date: str, tail: int = 0, grep: str = ""):
+    """One day's log as text; `tail` keeps the last N lines, `grep` filters
+    (case-insensitive substring)."""
+    if not DEVICE_LOG_DIR or not _DEVICE_RE.match(device) or not _DATE_RE.match(date):
+        return JSONResponse({"error": "not found"}, status_code=404)
+    path = Path(DEVICE_LOG_DIR) / device / f"{date}.log"
+    if not path.exists():
+        return JSONResponse({"error": "not found"}, status_code=404)
+    lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+    if grep:
+        lines = [l for l in lines if grep.lower() in l.lower()]
+    if tail > 0:
+        lines = lines[-tail:]
+    return PlainTextResponse("\n".join(lines) + "\n")
 
 
 @app.post("/wake-sample")

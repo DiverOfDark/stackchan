@@ -412,10 +412,6 @@ pub fn start(hub: &HubRef) -> Result<EspHttpServer<'static>> {
                 let fd = ws.session();
                 let mut v = viewers.lock().unwrap();
                 v.retain(|s| s.session() != fd);
-                if v.is_empty() {
-                    // SAFETY: plain flag set.
-                    unsafe { esp_idf_svc::sys::logtap::femto_logtap_enable(false) };
-                }
                 return Ok(());
             }
             let mut buf = [0u8; 64];
@@ -426,8 +422,6 @@ pub fn start(hub: &HubRef) -> Result<EspHttpServer<'static>> {
                 return Err(anyhow!("bad ticket"));
             }
             viewers.lock().unwrap().push(ws.create_detached_sender()?);
-            // SAFETY: plain flag set.
-            unsafe { esp_idf_svc::sys::logtap::femto_logtap_enable(true) };
             info!("log viewer connected");
             Ok(())
         })?;
@@ -440,6 +434,7 @@ pub fn start(hub: &HubRef) -> Result<EspHttpServer<'static>> {
             if n == 0 {
                 continue;
             }
+            crate::logship::append(&buf[..n]);
             // Send outside the lock: a detached send waits on the httpd task,
             // which needs this lock to process a viewer's close → deadlock.
             let mut senders: Vec<EspHttpWsDetachedSender> = viewers.lock().unwrap().clone();
@@ -448,12 +443,7 @@ pub fn start(hub: &HubRef) -> Result<EspHttpServer<'static>> {
                 .filter_map(|s| s.send(FrameType::Text(false), &buf[..n]).is_err().then(|| s.session()))
                 .collect();
             if !dead.is_empty() {
-                let mut v = viewers.lock().unwrap();
-                v.retain(|s| !dead.contains(&s.session()));
-                if v.is_empty() {
-                    // SAFETY: plain flag set.
-                    unsafe { esp_idf_svc::sys::logtap::femto_logtap_enable(false) };
-                }
+                viewers.lock().unwrap().retain(|s| !dead.contains(&s.session()));
             }
         }
     })?;

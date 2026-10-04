@@ -84,6 +84,8 @@ private:
     std::atomic<int> chirp_pending_{-1};
     std::atomic<TickType_t> turn_deadline_{0};
     std::atomic<TickType_t> last_rx_frame_tick_{0};
+    /// Mic uplink is silenced until this tick while a chirp plays.
+    std::atomic<TickType_t> chirp_mute_until_{0};
     std::atomic<TickType_t> last_rx_pkt_tick_{0};
     std::atomic<TickType_t> last_mic_active_tick_{0};
     std::atomic<femto_voice_state_t> state_{FEMTO_VOICE_IDLE};

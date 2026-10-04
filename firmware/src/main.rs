@@ -8,6 +8,7 @@ mod board;
 mod dns;
 mod hub;
 mod leds;
+mod logship;
 mod logtap;
 mod store;
 mod tz;
@@ -36,6 +37,11 @@ fn main() -> anyhow::Result<()> {
     // SAFETY: installs a log tap; call once, before other tasks log.
     unsafe { sys::logtap::femto_logtap_install() };
     logtap::init();
+    // Always collecting: lines feed the web viewer and the backend upload.
+    // SAFETY: plain flag set.
+    unsafe { sys::logtap::femto_logtap_enable(true) };
+    // SAFETY: plain FFI getter.
+    info!("boot: femto {} (reset reason {})", env!("CARGO_PKG_VERSION"), unsafe { sys::esp_reset_reason() });
     info!("femto {} booting", env!("CARGO_PKG_VERSION"));
 
     let p = Peripherals::take()?;
@@ -69,6 +75,7 @@ fn main() -> anyhow::Result<()> {
     let mut voice: Option<voice::Voice> = None;
     let mut last_pat: Option<Instant> = None;
     let _web = web::start(&hub)?;
+    logship::spawn(hub.clone())?;
     report_memory_tag("after web");
     let _mdns = esp_idf_svc::mdns::EspMdns::take().and_then(|mut m| {
         m.set_hostname("femto")?;
@@ -132,6 +139,7 @@ fn main() -> anyhow::Result<()> {
     let (mut render_us, mut push_us, mut frames) = (0u64, 0u64, 0u32);
     let mut fps = 0.0f32;
     let mut last_report = Instant::now();
+    let mut last_perf_log = Instant::now();
 
     loop {
         let start = Instant::now();
@@ -417,13 +425,17 @@ fn main() -> anyhow::Result<()> {
         to_lcd.send(done)?;
         frames += 1;
         if frames == 10 {
-            let [bg, face, chrome, ov] = renderer.timings;
-            info!("render {:.1} ms (bg {bg} face {face} chrome {chrome} overlay {ov} us), push {:.1} ms, mood {:?}", render_us as f32 / 10_000.0, push_us as f32 / 10_000.0, engine.resolve_emotion());
             let prof: Vec<u32> = femto_render::scene::PROF.iter().map(|a| a.swap(0, std::sync::atomic::Ordering::Relaxed) / 10).collect();
-            info!("face stages us: {prof:?}");
+            // Every 30 s, not every report: the log is shipped and kept.
+            if last_perf_log.elapsed() > Duration::from_secs(30) {
+                last_perf_log = Instant::now();
+                let [bg, face, chrome, ov] = renderer.timings;
+                info!("render {:.1} ms (bg {bg} face {face} chrome {chrome} overlay {ov} us), push {:.1} ms, mood {:?}", render_us as f32 / 10_000.0, push_us as f32 / 10_000.0, engine.resolve_emotion());
+                info!("face stages us: {prof:?}");
+                report_memory();
+            }
             fps = frames as f32 * 1000.0 / last_report.elapsed().as_millis().max(1) as f32;
             last_report = Instant::now();
-            report_memory();
             (render_us, push_us, frames) = (0, 0, 0);
         }
 

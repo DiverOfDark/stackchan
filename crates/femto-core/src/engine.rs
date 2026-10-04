@@ -102,7 +102,8 @@ pub struct Engine {
     override_em: Option<Emotion>,
     event_em: Option<(Emotion, u64)>,
     caption: String,
-    cap_start: u32,
+    /// Caption characters revealed so far (typing effect; fractional).
+    cap_shown: f32,
     boot_start: u32,
     mouth_level: Option<f32>,
     demo: Option<Demo>,
@@ -134,7 +135,7 @@ impl Engine {
             override_em: None,
             event_em: None,
             caption: String::new(),
-            cap_start: 0,
+            cap_shown: 0.0,
             boot_start: 0,
             mouth_level: None,
             demo: None,
@@ -254,7 +255,7 @@ impl Engine {
     fn set_caption(&mut self, text: String) {
         // A growing transcript keeps typing on from where it was.
         if !text.starts_with(self.caption.as_str()) || self.caption.is_empty() {
-            self.cap_start = self.t;
+            self.cap_shown = 1.0;
         }
         self.caption = text;
     }
@@ -325,11 +326,18 @@ impl Engine {
         if self.screen == Screen::Speaking {
             if let Some(level) = self.mouth_level {
                 tg.mo = level.clamp(0.0, 1.0) * 6.0;
-            } else if (self.t - self.cap_start) < self.caption.chars().count() as u32 {
+            } else if (self.cap_shown as usize) < self.caption.chars().count() {
                 tg.mo = if self.t % 4 < 2 { 5.0 } else { 1.2 };
             }
         }
         self.cur.ease_toward(&tg, 0.3);
+        // Type the caption at ≥ 1 char per tick, faster when behind: speech
+        // (and its text) arrive quicker than 14 chars/s, and the reveal must
+        // never trail the voice by more than a few ticks.
+        let len = self.caption.chars().count() as f32;
+        if self.cap_shown < len {
+            self.cap_shown = (self.cap_shown + ((len - self.cap_shown) / 4.0).max(1.0)).min(len);
+        }
     }
 
     pub fn resolve_emotion(&self) -> Emotion {
@@ -362,7 +370,7 @@ impl Engine {
     // ---- outputs ----------------------------------------------------------
 
     pub fn frame(&self) -> Frame {
-        let shown = self.t.saturating_sub(self.cap_start) as usize + 1;
+        let shown = self.cap_shown as usize;
         Frame {
             screen: self.screen.clone(),
             em: self.resolve_emotion(),
@@ -457,6 +465,16 @@ mod tests {
     }
 
     #[test]
+    fn caption_catches_up_with_fast_speech() {
+        let mut e = engine();
+        let long = "Израсходовано 38% сессии. Тратьте с умом, сэр. Или нет — мне всё равно.";
+        e.voice(VoiceState::Speaking(long.into()));
+        // One char per tick would take 72 ticks (5 s); catch-up takes ~16.
+        e.advance(TICK_MS * 16);
+        assert_eq!(e.frame().caption, long);
+    }
+
+    #[test]
     fn caption_types_out() {
         let mut e = engine();
         e.voice(VoiceState::Speaking("abcdef".into()));
@@ -471,6 +489,9 @@ mod tests {
         e.voice(VoiceState::Listening("abc".into()));
         e.advance(TICK_MS * 10);
         e.voice(VoiceState::Listening("abc def".into()));
+        // Keeps what was shown (no restart from "a") and types on.
+        assert_eq!(e.frame().caption, "abc");
+        e.advance(TICK_MS * 4);
         assert_eq!(e.frame().caption, "abc def");
     }
 

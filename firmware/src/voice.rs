@@ -8,6 +8,7 @@
 //! own energy-based state is the fallback for a backend without them.
 
 use std::ffi::CString;
+use std::time::{Duration, Instant};
 
 use esp_idf_svc::sys::{self, voice};
 use femto_core::{Engine, Event, Settings, VoiceState};
@@ -20,7 +21,13 @@ pub struct Voice {
     events_this_turn: bool,
     user_text: String,
     bot_text: String,
+    /// The bot finished speaking: its caption stays up until this passes
+    /// (or the user speaks), so the end of a reply can still be read.
+    bot_caption_until: Option<Instant>,
 }
+
+/// How long a finished reply's caption stays on screen.
+const CAPTION_LINGER: Duration = Duration::from_secs(4);
 
 #[derive(Deserialize)]
 struct BackendEvent {
@@ -55,7 +62,7 @@ pub fn start(backend_url: &str, cfg: &Settings) -> Option<Voice> {
         return None;
     }
     info!("voice up (backend {})", if backend_url.is_empty() { "<unset>" } else { backend_url });
-    Some(Voice { last: voice::femto_voice_state_t_FEMTO_VOICE_IDLE, events_this_turn: false, user_text: String::new(), bot_text: String::new() })
+    Some(Voice { last: voice::femto_voice_state_t_FEMTO_VOICE_IDLE, events_this_turn: false, user_text: String::new(), bot_text: String::new(), bot_caption_until: None })
 }
 
 impl Voice {
@@ -97,6 +104,12 @@ impl Voice {
             }
             self.last = st;
         }
+        if self.bot_caption_until.is_some_and(|t| Instant::now() > t) {
+            self.bot_caption_until = None;
+            if matches!(engine.screen(), femto_core::Screen::Speaking) {
+                engine.voice(VoiceState::Listening(String::new()));
+            }
+        }
         let speaking = matches!(engine.screen(), femto_core::Screen::Speaking);
         engine.set_mouth_level(speaking.then_some(level));
     }
@@ -105,6 +118,7 @@ impl Voice {
         self.events_this_turn = true;
         match ev.t.as_str() {
             "user_started" => {
+                self.bot_caption_until = None;
                 if !self.bot_text.is_empty() {
                     // A new question after an answer: fresh captions.
                     self.bot_text.clear();
@@ -120,6 +134,7 @@ impl Voice {
             }
             "user_stopped" => engine.voice(VoiceState::Thinking),
             "bot_started" => {
+                self.bot_caption_until = None;
                 self.bot_text.clear();
                 engine.voice(VoiceState::Speaking(String::new()));
             }
@@ -133,7 +148,8 @@ impl Voice {
                 }
                 engine.voice(VoiceState::Speaking(self.bot_text.clone()));
             }
-            "bot_stopped" => engine.voice(VoiceState::Listening(String::new())),
+            // Keep the reply readable for a moment; sync() moves on.
+            "bot_stopped" => self.bot_caption_until = Some(Instant::now() + CAPTION_LINGER),
             other => info!("voice event {other}"),
         }
     }

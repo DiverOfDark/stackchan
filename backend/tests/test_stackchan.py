@@ -97,3 +97,16 @@ def test_event_observer_survives_send_errors():
 
     obs = bot.StackchanEventObserver(boom)
     asyncio.run(obs.on_push_frame(SimpleNamespace(frame=BotStartedSpeakingFrame())))
+
+
+def test_wake_phrase_is_not_a_question():
+    for said in ["Эй, Фемто!", "эй фемто", "Hey, filmta", "Hey Femto.", "[chime]", "(laughter)", ""]:
+        assert bot.strip_wake_phrase(said) == "", said
+
+
+def test_wake_phrase_prefix_is_stripped():
+    assert bot.strip_wake_phrase("Эй, Фемто, сколько у меня осталось?") == "сколько у меня осталось?"
+    assert bot.strip_wake_phrase("Hey Femto what's the time") == "what's the time"
+    # A sentence that merely starts with "эй" stays.
+    assert bot.strip_wake_phrase("эй ты как дела") == "эй ты как дела"
+    assert bot.strip_wake_phrase("Сколько осталось?") == "Сколько осталось?"

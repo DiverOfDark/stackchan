@@ -157,6 +157,15 @@ wakeSamples:
   storageClassName: ""       # empty -> cluster default
   accessModes: [ReadWriteOnce]
 
+# Device logs: the Femto firmware uploads its log (POST /api/device-logs);
+# kept as one file per device per UTC day on the wakeSamples volume (/data),
+# so it needs wakeSamples.enabled. Read back via GET /api/device-logs.
+deviceLogs:
+  enabled: true
+  dir: /data/device-logs     # DEVICE_LOG_DIR
+  keepDays: 14               # DEVICE_LOG_KEEP_DAYS
+  maxMBPerDay: 50            # DEVICE_LOG_MAX_MB_PER_DAY
+
 # ── HTTP signaling / web client service ──────────────────────────────────
 service:
   type: ClusterIP
