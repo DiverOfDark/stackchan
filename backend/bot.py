@@ -906,12 +906,18 @@ class StackchanEventObserver(BaseObserver):
             logger.debug(f"stackchan event send failed: {exc!r}")
 
     async def _beat(self) -> None:
-        while True:
-            await self._emit({"t": "thinking"})
-            await asyncio.sleep(self.THINKING_EVERY)
+        try:
+            while True:
+                await self._emit({"t": "thinking"})
+                await asyncio.sleep(self.THINKING_EVERY)
+        except asyncio.CancelledError:
+            raise
+        except BaseException as exc:  # noqa: BLE001
+            logger.warning(f"thinking heartbeat died: {exc!r}")
 
-    def _stop_heartbeat(self) -> None:
+    def _stop_heartbeat(self, why: str = "") -> None:
         if self._heartbeat:
+            logger.debug(f"thinking heartbeat stopped ({why})")
             self._heartbeat.cancel()
             self._heartbeat = None
 
@@ -928,13 +934,13 @@ class StackchanEventObserver(BaseObserver):
         if data.direction != FrameDirection.DOWNSTREAM:
             return
         if isinstance(frame, LLMFullResponseStartFrame) and self._once(frame):
-            self._stop_heartbeat()
+            self._stop_heartbeat(f"new LLM response from {data.source}")
             self._heartbeat = asyncio.create_task(self._beat())
             return
         # Beat for the LLM's whole run, filler speech included: the answer
         # may still be 30 s out after "One moment".
         if isinstance(frame, (LLMFullResponseEndFrame, InterruptionFrame, EndFrame, CancelFrame)):
-            self._stop_heartbeat()
+            self._stop_heartbeat(f"{type(frame).__name__} from {data.source}")
         msg = None
         if isinstance(frame, UserStartedSpeakingFrame):
             msg = {"t": "user_started"}
