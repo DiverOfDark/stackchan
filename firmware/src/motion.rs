@@ -25,6 +25,10 @@ pub const PITCH_MIN: f32 = 0.0;
 pub const PITCH_MAX: f32 = 60.0;
 /// Torque off after resting this long (no buzz, less power).
 const REST_TORQUE_OFF: Duration = Duration::from_secs(10);
+/// Each 20 ms setpoint is sent as a move lasting this long. Overlapping
+/// moves let the servo blend them into one motion instead of a 50 Hz
+/// start-stop staircase (audible as buzz).
+pub const MOVE_MS: u16 = 60;
 /// Servo feedback is checked this often (UART time is shared with moves).
 const FEEDBACK_EVERY: u32 = 5;
 /// Head this far from where it's driven, twice in a row = a hand holds it.
@@ -64,6 +68,8 @@ pub struct Motion {
     /// A hand is holding the head: torque is off so it can be posed, and
     /// back on once it's let go.
     pub grabbed: bool,
+    /// Duration of each setpoint move (see [`MOVE_MS`]); tunable live.
+    pub move_ms: u16,
 }
 
 impl Motion {
@@ -172,6 +178,7 @@ pub fn start(uart: UART1<'static>, tx: Gpio6<'static>, rx: Gpio7<'static>, nvs: 
         moved_at: None,
         freeze_until: None,
         grabbed: false,
+        move_ms: MOVE_MS,
     }));
     let shared = target.clone();
     crate::psram_stack_thread("motion", 6144, move || {
@@ -186,9 +193,11 @@ pub fn start(uart: UART1<'static>, tx: Gpio6<'static>, rx: Gpio7<'static>, nvs: 
         let mut grabbed = false;
         let mut held_pose = (0.0f32, 0.0f32);
         let mut held_still_since = Instant::now();
+        // Last goal written per axis (None = unknown, e.g. after limp).
+        let mut sent_raw: (Option<u16>, Option<u16>) = (None, None);
         loop {
             tick = tick.wrapping_add(1);
-            let (mut t, allowed, frozen) = {
+            let (mut t, allowed, frozen, move_ms) = {
                 let mut m = shared.lock().unwrap();
                 if std::mem::take(&mut m.rezero) {
                     // Current pose becomes the new centre (raw zero), so the
@@ -227,7 +236,7 @@ pub fn start(uart: UART1<'static>, tx: Gpio6<'static>, rx: Gpio7<'static>, nvs: 
                 }
                 m.grabbed = grabbed;
                 let frozen = m.freeze_until.is_some_and(|u| now < u);
-                (t, m.torque_allowed, frozen)
+                (t, m.torque_allowed, frozen, m.move_ms)
             };
             // Servo feedback: is a hand forcing the head, or has it let go?
             if torque || grabbed {
@@ -294,6 +303,7 @@ pub fn start(uart: UART1<'static>, tx: Gpio6<'static>, rx: Gpio7<'static>, nvs: 
                     if !rest {
                         bus.write_pos(axis.id, axis.raw(), 0, 0).ok();
                     }
+                    sent_raw = (None, None);
                     if let Err(e) = bus.torque(axis.id, !rest) {
                         errors += 1;
                         if errors % 100 == 1 {
@@ -309,8 +319,14 @@ pub fn start(uart: UART1<'static>, tx: Gpio6<'static>, rx: Gpio7<'static>, nvs: 
                 pitch.pos = tp;
             }
             if torque && !settled {
-                for axis in [&yaw, &pitch] {
-                    if let Err(e) = bus.write_pos(axis.id, axis.raw(), 20, 0) {
+                for (axis, sent) in [(&yaw, &mut sent_raw.0), (&pitch, &mut sent_raw.1)] {
+                    // Same goal as last time: nothing new to tell the servo.
+                    let raw = axis.raw();
+                    if *sent == Some(raw) {
+                        continue;
+                    }
+                    *sent = Some(raw);
+                    if let Err(e) = bus.write_pos(axis.id, raw, move_ms, 0) {
                         errors += 1;
                         if errors % 100 == 1 {
                             warn!("servo {} move: {e:?}", axis.id);

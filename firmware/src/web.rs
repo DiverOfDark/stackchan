@@ -491,6 +491,7 @@ pub fn start(hub: &HubRef) -> Result<EspHttpServer<'static>> {
             "yaw": m.pos.0, "pitch": m.pos.1,
             "zero": { "yaw": m.zero.0, "pitch": m.zero.1 },
             "torque": m.torque_allowed,
+            "move_ms": m.move_ms,
             "limits": { "yaw": crate::motion::YAW_LIMIT, "pitch_min": crate::motion::PITCH_MIN, "pitch_max": crate::motion::PITCH_MAX },
         });
         drop(m);
@@ -503,6 +504,8 @@ pub fn start(hub: &HubRef) -> Result<EspHttpServer<'static>> {
             jog: Option<[i32; 2]>,
             torque: Option<bool>,
             nod: Option<bool>,
+            /// Servo move time per setpoint (noise tuning).
+            move_ms: Option<u16>,
         }
         let p: Patch = json_body(&mut req)?;
         let m = hub.lock().unwrap().motion.clone();
@@ -513,6 +516,9 @@ pub fn start(hub: &HubRef) -> Result<EspHttpServer<'static>> {
         }
         if let Some(t) = p.torque {
             m.torque_allowed = t;
+        }
+        if let Some(ms) = p.move_ms {
+            m.move_ms = ms.clamp(20, 200);
         }
         if p.nod == Some(true) {
             m.nod_until = Some(Instant::now() + Duration::from_millis(2500));
