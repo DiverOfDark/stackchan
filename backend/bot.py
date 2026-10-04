@@ -8,16 +8,18 @@
 # Everything (STT, LLM, TTS, VAD) runs locally — no cloud calls in the hot path.
 #
 import asyncio
+import inspect
 import json
 import logging
 import os
 import re
 import time
+import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
 
 import uvicorn
-from fastapi import BackgroundTasks, FastAPI, Request
+from fastapi import BackgroundTasks, FastAPI, Request, WebSocket
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from loguru import logger
 from pydantic import BaseModel
@@ -79,6 +81,7 @@ import aiohttp
 from collections import deque
 
 from whisper_fast import FastWhisperSTTService
+from femto_ws import FemtoTransport, femto_params
 from pipecat.transcriptions.language import Language
 from pipecat.transports.base_transport import TransportParams
 from pipecat.transports.smallwebrtc.request_handler import (
@@ -387,16 +390,7 @@ def esp32_munge(sdp: str) -> str:
 # The bot pipeline — one per WebRTC connection
 # --------------------------------------------------------------------------
 async def run_bot(webrtc_connection, request_data: dict | None = None):
-    """Build and run the STT -> LLM -> TTS pipeline for one connection."""
-    meta = request_data if isinstance(request_data, dict) else {}
-    stackchan = meta.get("device") == STACKCHAN_DEVICE
-    logger.info(f"Starting voice assistant pipeline (device={meta.get('device', 'default')})")
-    system_prompt = SYSTEM_PROMPT
-    language: "Language | None" = Language.RU
-    if stackchan:
-        system_prompt = stackchan_system_prompt(meta, await fetch_stackchan_usage())
-        language = stackchan_language(meta)
-
+    """WebRTC session (browser test client, XIAO device): one pipeline per peer."""
     transport = SmallWebRTCTransport(
         webrtc_connection=webrtc_connection,
         params=TransportParams(
@@ -416,6 +410,24 @@ async def run_bot(webrtc_connection, request_data: dict | None = None):
             audio_out_10ms_chunks=2,
         ),
     )
+    await run_pipeline(transport, webrtc_connection.pc_id, request_data, webrtc_connection.send_app_message)
+
+
+async def run_pipeline(transport, session_id: str, request_data: dict | None, send_event) -> None:
+    """Build and run the STT -> LLM -> TTS pipeline for one connection.
+
+    `transport` is SmallWebRTCTransport or femto_ws.FemtoTransport; both take
+    and produce 16 kHz audio. `send_event(dict)` reaches the Femto device
+    (data channel or WebSocket text frame); sync or async.
+    """
+    meta = request_data if isinstance(request_data, dict) else {}
+    stackchan = meta.get("device") == STACKCHAN_DEVICE
+    logger.info(f"Starting voice assistant pipeline (device={meta.get('device', 'default')}, session={session_id})")
+    system_prompt = SYSTEM_PROMPT
+    language: "Language | None" = Language.RU
+    if stackchan:
+        system_prompt = stackchan_system_prompt(meta, await fetch_stackchan_usage())
+        language = stackchan_language(meta)
 
     # STT — faster-whisper, Russian, INT8 on CPU. Models are cached on the PVC
     # via HF_HOME; the OS page cache keeps repeat loads fast.
@@ -547,11 +559,11 @@ async def run_bot(webrtc_connection, request_data: dict | None = None):
         for label in breakdown.chronological_events():
             logger.info(f"latency-breakdown: {label}")
 
-    pc_id = webrtc_connection.pc_id
+    pc_id = session_id
     transcript_observer = TranscriptObserver(pc_id)
     observers = [latency_observer, transcript_observer]
     if stackchan:
-        observers.append(StackchanEventObserver(webrtc_connection.send_app_message))
+        observers.append(StackchanEventObserver(send_event))
 
     task = PipelineTask(
         pipeline,
@@ -680,8 +692,8 @@ class TranscriptObserver(BaseObserver):
 
 
 class StackchanEventObserver(BaseObserver):
-    """Streams turn events and captions to the Femto StackChan over the WebRTC
-    data channel, so its screen follows the conversation (listening → thinking
+    """Streams turn events and captions to the Femto StackChan (WebRTC data
+    channel or /ws/femto text frames), so its screen follows the conversation (listening → thinking
     → speaking) instead of guessing from audio energy, and shows captions.
 
     Messages (JSON, one per event):
@@ -723,7 +735,9 @@ class StackchanEventObserver(BaseObserver):
         if msg is None or not self._once(frame):
             return
         try:
-            self._send(msg)
+            res = self._send(msg)
+            if inspect.isawaitable(res):
+                await res
         except Exception as exc:  # noqa: BLE001 — never break the pipeline over a caption
             logger.debug(f"stackchan event send failed: {exc!r}")
 
@@ -837,6 +851,27 @@ async def offer(request: SmallWebRTCRequest, background_tasks: BackgroundTasks):
         answer["sdp"] = esp32_munge(answer["sdp"])
         logger.info("Applied ESP32-compatible SDP munge to the answer")
     return answer
+
+
+@app.websocket("/ws/femto")
+async def femto_ws(websocket: WebSocket):
+    """Femto StackChan voice session over a WebSocket (see femto_ws.py).
+
+    The first message is the session metadata (JSON text); after that the
+    connection carries PCM audio both ways until the device closes it.
+    """
+    await websocket.accept()
+    try:
+        meta = json.loads(await websocket.receive_text())
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(f"femto ws: bad hello ({exc!r}); closing")
+        await websocket.close(code=1003)
+        return
+    if not isinstance(meta, dict):
+        meta = {}
+    session_id = f"ws-{uuid.uuid4().hex[:12]}"
+    transport = FemtoTransport(websocket, femto_params())
+    await run_pipeline(transport, session_id, meta, transport.send_event)
 
 
 @app.patch("/api/offer")
