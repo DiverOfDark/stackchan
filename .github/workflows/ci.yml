@@ -89,6 +89,20 @@ jobs:
           cache-from: type=registry,ref=ghcr.io/diverofdark/stackchan-voice:buildcache
           cache-to: ${{ github.ref == 'refs/heads/main' && 'type=registry,ref=ghcr.io/diverofdark/stackchan-voice:buildcache,mode=max,image-manifest=true,oci-mediatypes=true' || '' }}
 
+  promote:
+    name: Promote to deploy
+    # homelab's Argo app tracks the `deploy` branch, not HEAD: a commit is
+    # deployed only once its image exists, so a red build can't take the
+    # voice backend down with an ImagePullBackOff.
+    needs: [image, host, web]
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - run: git push --force origin HEAD:refs/heads/deploy
+
   web:
     name: Web UI
     runs-on: ubuntu-latest

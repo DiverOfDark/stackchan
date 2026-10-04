@@ -330,7 +330,10 @@ impl Engine {
                 tg.mo = if self.t % 4 < 2 { 5.0 } else { 1.2 };
             }
         }
-        self.cur.ease_toward(&tg, 0.3);
+        // Voice states answer the wake word: snap into them about twice as
+        // fast as mood drift, or the face trails the LEDs by half a second.
+        let rate = if self.screen.is_voice() { 0.55 } else { 0.3 };
+        self.cur.ease_toward(&tg, rate);
         // Type the caption at ≥ 1 char per tick, faster when behind: speech
         // (and its text) arrive quicker than 14 chars/s, and the reveal must
         // never trail the voice by more than a few ticks.

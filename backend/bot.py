@@ -84,6 +84,7 @@ from pipecat.processors.aggregators.llm_response_universal import (
     LLMUserAggregatorParams,
 )
 from pipecat.services.elevenlabs.stt import ElevenLabsSTTService
+from pipecat.services.llm_service import LLMService
 from pipecat.services.settings import is_given
 from pipecat.services.elevenlabs.tts import ElevenLabsTTSService
 from pipecat.services.openai.llm import OpenAILLMService
@@ -938,8 +939,10 @@ class StackchanEventObserver(BaseObserver):
             self._heartbeat = asyncio.create_task(self._beat())
             return
         # Beat for the LLM's whole run, filler speech included: the answer
-        # may still be 30 s out after "One moment".
-        if isinstance(frame, (LLMFullResponseEndFrame, InterruptionFrame, EndFrame, CancelFrame)):
+        # may still be 30 s out after "One moment". Only the LLM's own end
+        # counts — the TTS emits one too after speaking the filler.
+        llm_done = isinstance(frame, LLMFullResponseEndFrame) and isinstance(data.source, LLMService)
+        if llm_done or isinstance(frame, (InterruptionFrame, EndFrame, CancelFrame)):
             self._stop_heartbeat(f"{type(frame).__name__} from {type(data.source).__name__}")
         msg = None
         if isinstance(frame, UserStartedSpeakingFrame):

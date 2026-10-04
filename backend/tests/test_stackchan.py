@@ -21,6 +21,9 @@ from pipecat.transports.base_output import BaseOutputTransport
 
 # Stands in for the pipeline's output transport (only isinstance matters).
 OUTPUT = object.__new__(BaseOutputTransport)
+from pipecat.services.llm_service import LLMService
+
+LLM = object.__new__(LLMService)
 
 USAGE = {
     "signed_in": True,
@@ -218,21 +221,27 @@ def test_thinking_heartbeat_while_llm_works():
     sent = []
     obs = bot.StackchanEventObserver(sent.append)
     obs.THINKING_EVERY = 0.05
-    down = lambda f: SimpleNamespace(frame=f, direction=FrameDirection.DOWNSTREAM, source=OUTPUT)
+    beats = lambda: sum(m["t"] == "thinking" for m in sent)
+    frm = lambda f, src: SimpleNamespace(frame=f, direction=FrameDirection.DOWNSTREAM, source=src)
 
     async def run():
-        await obs.on_push_frame(down(LLMFullResponseStartFrame()))
+        await obs.on_push_frame(frm(LLMFullResponseStartFrame(), LLM))
         await asyncio.sleep(0.18)
-        # Speaking (a filler) doesn't stop it; the LLM finishing does.
-        await obs.on_push_frame(down(BotStartedSpeakingFrame()))
-        await asyncio.sleep(0.06)
-        await obs.on_push_frame(down(LLMFullResponseEndFrame()))
-        n = sum(m["t"] == "thinking" for m in sent)
-        await asyncio.sleep(0.15)
-        assert sum(m["t"] == "thinking" for m in sent) == n
-        return n
+        assert beats() >= 3
+        # A filler is spoken, and the TTS ends it with an
+        # LLMFullResponseEndFrame of its own: not the LLM finishing.
+        await obs.on_push_frame(frm(BotStartedSpeakingFrame(), OUTPUT))
+        await obs.on_push_frame(frm(LLMFullResponseEndFrame(), OUTPUT))
+        n = beats()
+        await asyncio.sleep(0.12)
+        assert beats() > n
+        # The LLM itself finishing stops it.
+        await obs.on_push_frame(frm(LLMFullResponseEndFrame(), LLM))
+        n = beats()
+        await asyncio.sleep(0.12)
+        assert beats() == n
 
-    assert asyncio.run(run()) >= 3
+    asyncio.run(run())
 
 
 async def test_filler_when_llm_is_silent():
