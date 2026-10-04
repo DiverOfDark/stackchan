@@ -2,14 +2,14 @@
 
 use crate::usage::{fmt_minutes, UsageView};
 
-/// Word-wrap to `n` chars per line, keeping only the last two lines
-/// (the design's `wrap`).
-pub fn wrap_last_two(s: &str, n: usize) -> Vec<String> {
+/// Word-wrap so each line `fits` (e.g. measured pixel width), keeping only
+/// the last two lines (the design's `wrap`).
+pub fn wrap_last_two(s: &str, mut fits: impl FnMut(&str) -> bool) -> Vec<String> {
     let mut lines = Vec::new();
     let mut cur = String::new();
     for w in s.split(' ') {
-        let candidate_len = if cur.is_empty() { w.chars().count() } else { cur.chars().count() + 1 + w.chars().count() };
-        if candidate_len > n && !cur.is_empty() {
+        let candidate = if cur.is_empty() { w.to_string() } else { format!("{cur} {w}") };
+        if !fits(&candidate) && !cur.is_empty() {
             lines.push(std::mem::take(&mut cur));
             cur.push_str(w);
         } else {
@@ -65,10 +65,14 @@ mod tests {
 
     #[test]
     fn wrap_keeps_last_two() {
-        let l = wrap_last_two("aaa bbb ccc ddd", 7);
+        let chars = |n: usize| move |l: &str| l.chars().count() <= n;
+        let l = wrap_last_two("aaa bbb ccc ddd", chars(7));
         assert_eq!(l, vec!["aaa bbb", "ccc ddd"]);
-        let l = wrap_last_two("one two three four five six", 9);
+        let l = wrap_last_two("one two three four five six", chars(9));
         assert_eq!(l, vec!["four five", "six"]);
+        // Counted in characters, not bytes: Cyrillic is 2 bytes each.
+        let l = wrap_last_two("эй фемто как дела", chars(8));
+        assert_eq!(l, vec!["эй фемто", "как дела"]);
     }
 
     #[test]

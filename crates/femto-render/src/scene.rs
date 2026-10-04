@@ -524,7 +524,11 @@ impl Ctx<'_> {
         let who = if you { "YOU".to_string() } else { self.cfg.name.to_uppercase() };
         let tag = Tag { bg: Some(if you { ink } else { a }), fg: Some(panel), face: Face::BlackItalic, ..Tag::new(11.) };
         self.tag(6., 182., &who, tag);
-        for (i, l) in wrap_last_two(text, 42).iter().enumerate() {
+        // Wrap by measured width: Cyrillic (Fira fallback) runs wider than
+        // Barlow's Latin, so a character count would overflow the box.
+        let f = &mut *self.f;
+        let lines = wrap_last_two(text, |l| f.measure(Face::Medium, 16., l, 0.) <= 290.);
+        for (i, l) in lines.iter().enumerate() {
             self.text(14., 212. + i as f32 * 17., l, Style::new(Face::Medium, 16., ink));
         }
     }

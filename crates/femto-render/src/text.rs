@@ -103,6 +103,16 @@ const FONT_DATA: [(Face, &[u8]); 6] = [
     (Face::Jp, include_bytes!("../../../assets/fonts/NotoSansJP-Black-subset.ttf")),
 ];
 
+/// Cyrillic for the Barlow faces, which have none (Google's Barlow is Latin
+/// only): Fira Sans Condensed at the matching weight, subset to Cyrillic.
+/// Captions carry Russian speech.
+const CYRILLIC_DATA: [(Face, &[u8]); 4] = [
+    (Face::Medium, include_bytes!("../../../assets/fonts/FiraSansCondensed-Medium-cyrillic.ttf")),
+    (Face::SemiBold, include_bytes!("../../../assets/fonts/FiraSansCondensed-SemiBold-cyrillic.ttf")),
+    (Face::BoldItalic, include_bytes!("../../../assets/fonts/FiraSansCondensed-BoldItalic-cyrillic.ttf")),
+    (Face::BlackItalic, include_bytes!("../../../assets/fonts/FiraSansCondensed-ExtraBoldItalic-cyrillic.ttf")),
+];
+
 struct Glyph {
     xmin: i32,
     ymin: i32,
@@ -114,6 +124,8 @@ struct Glyph {
 
 pub struct Fonts {
     fonts: HashMap<Face, Font>,
+    /// Per-face fallback for glyphs the face lacks (see CYRILLIC_DATA).
+    cyrillic: HashMap<Face, Font>,
     bitmaps: HashMap<Face, BitmapFont>,
     /// Keyed by face, size in quarter-pixels, char.
     cache: HashMap<(Face, u32, char), Glyph>,
@@ -131,11 +143,15 @@ impl Fonts {
             .iter()
             .map(|&(face, data)| (face, Font::from_bytes(data, FontSettings::default()).expect("bundled font parses")))
             .collect();
+        let cyrillic = CYRILLIC_DATA
+            .iter()
+            .map(|&(face, data)| (face, Font::from_bytes(data, FontSettings::default()).expect("bundled font parses")))
+            .collect();
         let bitmaps = [Face::Term12, Face::Term12B, Face::Term14B, Face::Term16B]
             .into_iter()
             .map(|f| (f, BitmapFont::parse(f.bitmap().unwrap())))
             .collect();
-        Fonts { fonts, bitmaps, cache: HashMap::new() }
+        Fonts { fonts, cyrillic, bitmaps, cache: HashMap::new() }
     }
 
     fn glyph(&mut self, face: Face, size: f32, ch: char) -> &Glyph {
@@ -148,18 +164,29 @@ impl Fonts {
             });
         }
         let key = (face, (size * 4.0).round() as u32, ch);
-        let fonts = &self.fonts;
-        self.cache.entry(key).or_insert_with(|| {
-            let font = &fonts[&face];
-            // Kana/kanji only exist in the JP subset; everything else falls
-            // back to SemiBold when a face lacks the glyph.
-            let font = if font.has_glyph(ch) { font } else { &fonts[&Face::SemiBold] };
-            let (m, mut cov) = font.rasterize(ch, size);
+        if !self.cache.contains_key(&key) {
+            let (m, mut cov) = self.font_for(face, ch).rasterize(ch, size);
             if size <= 24.0 {
                 crisp(&mut cov);
             }
-            Glyph { xmin: m.xmin, ymin: m.ymin, w: m.width, h: m.height, advance: m.advance_width, cov }
-        })
+            let g = Glyph { xmin: m.xmin, ymin: m.ymin, w: m.width, h: m.height, advance: m.advance_width, cov };
+            self.cache.insert(key, g);
+        }
+        &self.cache[&key]
+    }
+
+    /// The font that draws `ch` in `face`: the face itself, else its
+    /// Cyrillic companion (Mono borrows Medium's), else SemiBold.
+    fn font_for(&self, face: Face, ch: char) -> &Font {
+        let own = &self.fonts[&face];
+        if own.has_glyph(ch) {
+            return own;
+        }
+        let companion = if face == Face::Mono { Face::Medium } else { face };
+        match self.cyrillic.get(&companion) {
+            Some(f) if f.has_glyph(ch) => f,
+            _ => &self.fonts[&Face::SemiBold],
+        }
     }
 
     /// Cached glyph count (diagnostics).
@@ -226,5 +253,26 @@ impl Canvas {
             let advance = g.advance;
             px += advance + ls;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn every_outline_face_draws_cyrillic() {
+        let fonts = Fonts::new();
+        for face in [Face::Medium, Face::SemiBold, Face::BoldItalic, Face::BlackItalic, Face::Mono] {
+            for ch in "Эй, Фемто! ЁЖЩЪЫЬЮЯ ёжщъыьюя «»—№".chars().filter(|c| !c.is_ascii()) {
+                assert!(fonts.font_for(face, ch).has_glyph(ch), "{face:?} lacks {ch}");
+            }
+        }
+    }
+
+    #[test]
+    fn latin_stays_in_barlow() {
+        let fonts = Fonts::new();
+        assert!(std::ptr::eq(fonts.font_for(Face::Medium, 'A'), &fonts.fonts[&Face::Medium]));
     }
 }

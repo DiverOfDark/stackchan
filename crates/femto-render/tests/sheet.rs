@@ -55,6 +55,15 @@ pub fn sheet() -> Vec<(&'static str, Frame)> {
         ("ledger", frame(Screen::Ledger, Emotion::Neutral, 0., 0., 8)),
     ];
     v.push(("wipe", frame(Screen::Wipe { secs_left: 4 }, Emotion::Surprised, 0., 0., 8)));
+    // Not in the design: Russian captions (Cyrillic falls back to Fira Sans).
+    v.push((
+        "speaking-ru",
+        Frame {
+            caption: "Израсходовано 38% сессии. Тратьте с умом, сэр. Или нет — мне всё равно.".into(),
+            p: Params { mo: 5., ..Emotion::Speaking.params() },
+            ..frame(Screen::Speaking, Emotion::Speaking, 0., 0., 8)
+        },
+    ));
     v
 }
 
