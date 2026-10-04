@@ -56,6 +56,15 @@ impl Board {
         let mut pmic = Axp2101::new(dev());
         pmic.init().map_err(|e| anyhow!("AXP2101: {e:?}"))?;
         info!("AXP2101 ok, battery {} %", pmic.battery_pct().unwrap_or(0));
+        // The PMIC latches why it last powered off: the only witness when
+        // the ESP32 itself loses power (no crash dump, USB just vanishes).
+        match pmic.power_history() {
+            Ok(h) => warn!(
+                "power history: last off by {:?} (0x{:02x}), on by {:?} (0x{:02x}), VBUS {}",
+                h.off_reasons(), h.off_src, h.on_reasons(), h.on_src, if h.vbus_good() { "good" } else { "absent" }
+            ),
+            Err(e) => warn!("power history: {e:?}"),
+        }
 
         let mut aw = Aw9523::new(dev());
         aw.init().map_err(|e| anyhow!("AW9523: {e:?}"))?;

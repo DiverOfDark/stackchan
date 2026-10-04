@@ -6,7 +6,12 @@ use crate::{read_reg, write_reg};
 
 pub const ADDR: u8 = 0x34;
 
+const REG_STATUS1: u8 = 0x00;
 const REG_STATUS2: u8 = 0x01;
+const REG_PWRON_SRC: u8 = 0x20;
+const REG_PWROFF_SRC: u8 = 0x21;
+const REG_DC_UVP_OVP_OFF: u8 = 0x23;
+const REG_DC_PWM_CTRL: u8 = 0x81;
 const REG_PWROFF_EN: u8 = 0x10;
 const REG_IRQ_LEVEL: u8 = 0x27;
 const REG_ADC_EN: u8 = 0x30;
@@ -24,6 +29,45 @@ const REG_BAT_PCT: u8 = 0xA4;
 /// Power-key IRQ bits in IRQ status 1 (0x49).
 const PKEY_SHORT: u8 = 1 << 3;
 const PKEY_LONG: u8 = 1 << 2;
+
+/// Why the PMIC last powered off (REG 0x21; latched until the next one).
+const PWROFF_REASONS: [&str; 8] = [
+    "power key held to off level",
+    "software power-off",
+    "power key low past threshold",
+    "VSYS under-voltage",
+    "VBUS over-voltage",
+    "DCDC under-voltage",
+    "DCDC over-voltage",
+    "die over-temperature",
+];
+/// What powered it on (REG 0x20).
+/// (XPowersLib bit order: 0 POWERON low, 1 IRQ low, 2 VBUS insert, 3
+/// charging, 4 battery insert, 5 EN mode.)
+const PWRON_REASONS: [&str; 6] = ["power key", "IRQ pin", "VBUS inserted", "battery charging", "battery inserted", "EN pin"];
+
+/// Snapshot of the PMIC's own record of the last power cycle.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PowerHistory {
+    pub on_src: u8,
+    pub off_src: u8,
+    pub status1: u8,
+}
+
+impl PowerHistory {
+    pub fn on_reasons(&self) -> Vec<&'static str> {
+        PWRON_REASONS.iter().enumerate().filter(|(i, _)| self.on_src & (1 << i) != 0).map(|(_, r)| *r).collect()
+    }
+
+    pub fn off_reasons(&self) -> Vec<&'static str> {
+        PWROFF_REASONS.iter().enumerate().filter(|(i, _)| self.off_src & (1 << i) != 0).map(|(_, r)| *r).collect()
+    }
+
+    /// VBUS (USB 5 V) present and good.
+    pub fn vbus_good(&self) -> bool {
+        self.status1 & (1 << 5) != 0
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub struct PowerKey {
@@ -44,6 +88,15 @@ impl<I: I2c> Axp2101<I> {
         self.i2c
     }
 
+    /// The PMIC's latched power-on / power-off sources (read once at boot).
+    pub fn power_history(&mut self) -> Result<PowerHistory, I::Error> {
+        Ok(PowerHistory {
+            on_src: read_reg(&mut self.i2c, ADDR, REG_PWRON_SRC)?,
+            off_src: read_reg(&mut self.i2c, ADDR, REG_PWROFF_SRC)?,
+            status1: read_reg(&mut self.i2c, ADDR, REG_STATUS1)?,
+        })
+    }
+
     /// Same rail setup as the factory firmware, plus power-key timing for
     /// PRD D4: long-press IRQ at 2.5 s, hard power-off at 10 s.
     pub fn init(&mut self) -> Result<(), I::Error> {
@@ -55,6 +108,15 @@ impl<I: I2c> Axp2101<I> {
         write_reg(&mut self.i2c, ADDR, REG_LDO_EN, 0xBF)?;
         write_reg(&mut self.i2c, ADDR, REG_ALDO3_V, 33 - 5)?;
         write_reg(&mut self.i2c, ADDR, REG_ALDO4_V, 33 - 5)?;
+        // A DCDC dipping 15% below target (servos starting under a weak USB
+        // supply) powered the whole robot off until the button was pressed.
+        // Don't: keep OVP (bit 5) and VSYS UVLO (2.6 V); a real sag on the
+        // 3.3 V rail trips the ESP32's brown-out reset instead, which reboots
+        // by itself. Longest UVP debounce (240 us) as well.
+        let uvp = read_reg(&mut self.i2c, ADDR, REG_DC_UVP_OVP_OFF)?;
+        write_reg(&mut self.i2c, ADDR, REG_DC_UVP_OVP_OFF, uvp & !0b1_1111)?;
+        let pwm = read_reg(&mut self.i2c, ADDR, REG_DC_PWM_CTRL)?;
+        write_reg(&mut self.i2c, ADDR, REG_DC_PWM_CTRL, pwm | 0b11)?;
         // IRQ level / off time: [5:4] IRQ long-press time 0b11 = 2.5 s,
         // [1:0] power-off time 0b11 = 10 s.
         write_reg(&mut self.i2c, ADDR, REG_IRQ_LEVEL, 0b0011_0011)?;
@@ -110,6 +172,25 @@ impl<I: I2c> Axp2101<I> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn init_keeps_dcdc_ovp_but_not_uvp_power_off() {
+        let mut m = MockI2c::default();
+        m.regs.insert((ADDR, REG_DC_UVP_OVP_OFF), 0b0011_1111); // POR default
+        let mut p = Axp2101::new(m);
+        p.init().unwrap();
+        let m = p.release();
+        assert_eq!(m.regs[&(ADDR, REG_DC_UVP_OVP_OFF)], 0b0010_0000);
+        assert_eq!(m.regs[&(ADDR, REG_DC_PWM_CTRL)] & 0b11, 0b11);
+    }
+
+    #[test]
+    fn decodes_power_history() {
+        let h = PowerHistory { on_src: 0b100, off_src: 0b10_0000, status1: 1 << 5 };
+        assert_eq!(h.on_reasons(), vec!["VBUS inserted"]);
+        assert_eq!(h.off_reasons(), vec!["DCDC under-voltage"]);
+        assert!(h.vbus_good());
+    }
     use crate::mock::MockI2c;
 
     #[test]
