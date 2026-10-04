@@ -934,13 +934,13 @@ class StackchanEventObserver(BaseObserver):
         if data.direction != FrameDirection.DOWNSTREAM:
             return
         if isinstance(frame, LLMFullResponseStartFrame) and self._once(frame):
-            self._stop_heartbeat(f"new LLM response from {data.source}")
+            self._stop_heartbeat(f"new LLM response from {type(data.source).__name__}")
             self._heartbeat = asyncio.create_task(self._beat())
             return
         # Beat for the LLM's whole run, filler speech included: the answer
         # may still be 30 s out after "One moment".
         if isinstance(frame, (LLMFullResponseEndFrame, InterruptionFrame, EndFrame, CancelFrame)):
-            self._stop_heartbeat(f"{type(frame).__name__} from {data.source}")
+            self._stop_heartbeat(f"{type(frame).__name__} from {type(data.source).__name__}")
         msg = None
         if isinstance(frame, UserStartedSpeakingFrame):
             msg = {"t": "user_started"}
