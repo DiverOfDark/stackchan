@@ -37,6 +37,10 @@ fn main() -> anyhow::Result<()> {
     // SAFETY: installs a log tap; call once, before other tasks log.
     unsafe { sys::logtap::femto_logtap_install() };
     logtap::init();
+    // Every HTTPS request logs "Certificate validated"; with log upload
+    // that's noise on every batch.
+    // SAFETY: static C string.
+    unsafe { sys::esp_log_level_set(c"esp-x509-crt-bundle".as_ptr(), sys::esp_log_level_t_ESP_LOG_WARN) };
     // Always collecting: lines feed the web viewer and the backend upload.
     // SAFETY: plain flag set.
     unsafe { sys::logtap::femto_logtap_enable(true) };

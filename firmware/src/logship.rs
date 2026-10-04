@@ -78,13 +78,21 @@ pub fn spawn(hub: HubRef) -> Result<()> {
             if !online || url.is_empty() {
                 continue;
             }
+            // Each upload logs a line or two itself (TLS), so drain only
+            // what's queued now; a full batch means there's more backlog.
             loop {
                 let batch = take();
                 if batch.is_empty() {
                     break;
                 }
+                let full = batch.len() >= BATCH / 2;
                 match post(&url, &name, boot, &batch) {
-                    Ok(()) => failing = false,
+                    Ok(()) => {
+                        failing = false;
+                        if !full {
+                            break;
+                        }
+                    }
                     Err(e) => {
                         // Logged once per outage: the failure line itself is
                         // shipped, so don't loop on it.
