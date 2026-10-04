@@ -136,7 +136,8 @@ Each screen except S1–S3 has the **status band**: SESSION % and WEEK %, with 1
 ### 5.6 LEDs (12 × WS2812C in the body)
 Two strips of 6 (LEDs 0–5 left, 6–11 right), driven through the PY32 at 25 Hz by `femto_core::leds` (pure, unit-tested, shown in the simulator).
 - **Idle (Contempt / Satisfied), `usage` mode (default):** left strip = 5-hour session, right = week, 6 segments each, coloured like the status band (bone < 60 %, toxic 60–84 %, accent ≥ 85 %); the leading segment breathes.
-- **Moods:** Listening = VU meter from the mic; Processing = a light chasing around both strips; Speaking = brightness follows the voice; Scanning = mirrored sweep; Alarmed = strobe then hold; Amused = sparks; Rationing = failing-neon flicker; Standby = off. Boot = progress bar; Wi-Fi = slow chase; Setup = attention blink; Wipe = fast blink.
+- **Voice turn** (fixed colours, so status never reads as a mood or usage alert): Listening = steady **cyan**, brightening with the mic level; Processing = two **amber** lights chasing around both strips; Speaking = **violet**, brightness following the voice.
+- **Moods:** Scanning = mirrored sweep; Alarmed = strobe then hold; Amused = sparks; Rationing = failing-neon flicker; Standby = off. Boot = progress bar; Wi-Fi = slow chase; Setup = attention blink; Wipe = fast blink.
 - **Settings:** `led_mode` (usage / mood / off), `led_brightness` (0–100, gamma-corrected), `led_flip` (meter direction along each strip).
 
 ## 6. Functional requirements

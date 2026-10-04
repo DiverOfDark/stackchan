@@ -39,6 +39,11 @@ pub struct LedInput<'a> {
     pub toxic: Rgb,
 }
 
+/// Voice-turn status colours (fixed, not from the palette).
+const LISTEN: (f32, f32, f32) = (0.0, 0.75, 1.0);
+const THINK: (f32, f32, f32) = (1.0, 0.5, 0.0);
+const SPEAK: (f32, f32, f32) = (0.7, 0.15, 1.0);
+
 /// Colours for the 12 LEDs.
 pub fn frame(i: &LedInput) -> [Rgb; COUNT] {
     let mut px = [(0.0f32, 0.0f32, 0.0f32); COUNT];
@@ -94,25 +99,29 @@ fn mood(px: &mut [(f32, f32, f32); COUNT], i: &LedInput, t: f32, a: (f32, f32, f
     };
     match i.em {
         Emotion::Sleepy | Emotion::Dormant => {}
+        // Voice turn: one colour per state, so it reads at a glance and
+        // never looks like a mood or a usage alert (those use the palette).
         Emotion::Listening => {
-            // VU meter from the strip start, like the on-screen bars.
+            // Steady cyan, clearly on; brightens up the strip with the voice.
             let lit = (i.mic.sqrt() * STRIP as f32 * 1.2).min(STRIP as f32);
             for k in 0..STRIP {
-                let v = 0.12 + 0.88 * (lit - k as f32).clamp(0.0, 1.0);
-                px[k] = scale(a, v);
-                px[STRIP + k] = scale(a, v);
+                let v = 0.5 + 0.5 * (lit - k as f32).clamp(0.0, 1.0);
+                px[k] = scale(LISTEN, v);
+                px[STRIP + k] = scale(LISTEN, v);
             }
         }
         Emotion::Thinking => {
-            // One light chasing around both strips (a loop of 12).
-            let head = (t * 10.0) % COUNT as f32;
+            // Two amber lights chasing around both strips (a loop of 12).
+            let head = (t * 8.0) % COUNT as f32;
             for k in 0..COUNT {
                 // Left strip forward, right strip backward: a closed loop.
-                let pos = if k < STRIP { k } else { COUNT - 1 - (k - STRIP) + 0 };
-                px[k] = scale(a, 0.06 + 0.94 * trail(head, pos as f32, COUNT as f32));
+                let pos = if k < STRIP { k } else { COUNT - 1 - (k - STRIP) } as f32;
+                let v = trail(head, pos, COUNT as f32).max(trail((head + COUNT as f32 / 2.0) % COUNT as f32, pos, COUNT as f32));
+                px[k] = scale(THINK, 0.05 + 0.95 * v);
             }
         }
-        Emotion::Speaking => all(px, a, 0.1 + 0.9 * i.speak),
+        // Violet, pulsing with Femto's voice (never fully dark mid-reply).
+        Emotion::Speaking => all(px, SPEAK, 0.2 + 0.8 * i.speak),
         Emotion::Curious => {
             // Sweep back and forth, both strips together.
             let ph = (t * 1.6).fract();
@@ -292,10 +301,30 @@ mod tests {
         let u = usage(0, 0);
         let mut i = input(&Screen::Listening, Emotion::Listening, &u);
         i.mic = 0.0;
-        let quiet: u32 = frame(&i).iter().map(|p| p.0 as u32).sum();
+        let quiet: u32 = frame(&i).iter().map(|p| p.2 as u32).sum();
         i.mic = 0.8;
-        let loud: u32 = frame(&i).iter().map(|p| p.0 as u32).sum();
-        assert!(loud > quiet * 3);
+        let loud: u32 = frame(&i).iter().map(|p| p.2 as u32).sum();
+        assert!(loud > quiet * 3 / 2);
+    }
+
+    #[test]
+    fn voice_states_have_distinct_colours() {
+        let u = usage(0, 0);
+        let lit = |em: Emotion, screen: &Screen| -> Rgb {
+            let mut i = input(screen, em, &u);
+            i.speak = 0.5;
+            // The brightest LED of the frame.
+            frame(&i).into_iter().max_by_key(|p| p.0 as u32 + p.1 as u32 + p.2 as u32).unwrap()
+        };
+        let (l, t, s) = (lit(Emotion::Listening, &Screen::Listening), lit(Emotion::Thinking, &Screen::Thinking), lit(Emotion::Speaking, &Screen::Speaking));
+        // Listening: blue dominant; thinking: red > blue (amber); speaking: blue > green (violet).
+        assert!(l.2 > l.0 && l.1 > l.0, "listening {l:?}");
+        assert!(t.0 > t.2 && t.1 > t.2, "thinking {t:?}");
+        assert!(s.2 > s.1 && s.0 > s.1, "speaking {s:?}");
+        // Listening is visibly on even in silence.
+        let mut i = input(&Screen::Listening, Emotion::Listening, &u);
+        i.mic = 0.0;
+        assert!(frame(&i).iter().all(|p| p.2 > 30), "{:?}", frame(&i));
     }
 
     #[test]
