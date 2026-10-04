@@ -24,6 +24,8 @@ pub struct Voice {
     /// The bot finished speaking: its caption stays up until this passes
     /// (or the user speaks), so the end of a reply can still be read.
     bot_caption_until: Option<Instant>,
+    /// Between user_started and user_stopped.
+    user_speaking: bool,
 }
 
 /// How long a finished reply's caption stays on screen.
@@ -62,7 +64,7 @@ pub fn start(backend_url: &str, cfg: &Settings) -> Option<Voice> {
         return None;
     }
     info!("voice up (backend {})", if backend_url.is_empty() { "<unset>" } else { backend_url });
-    Some(Voice { last: voice::femto_voice_state_t_FEMTO_VOICE_IDLE, events_this_turn: false, user_text: String::new(), bot_text: String::new(), bot_caption_until: None })
+    Some(Voice { last: voice::femto_voice_state_t_FEMTO_VOICE_IDLE, events_this_turn: false, user_text: String::new(), bot_text: String::new(), bot_caption_until: None, user_speaking: false })
 }
 
 impl Voice {
@@ -89,6 +91,7 @@ impl Voice {
             match st {
                 voice::femto_voice_state_t_FEMTO_VOICE_IDLE => {
                     self.events_this_turn = false;
+                    self.user_speaking = false;
                     self.user_text.clear();
                     self.bot_text.clear();
                     engine.voice(VoiceState::Idle);
@@ -118,6 +121,7 @@ impl Voice {
         self.events_this_turn = true;
         match ev.t.as_str() {
             "user_started" => {
+                self.user_speaking = true;
                 self.bot_caption_until = None;
                 if !self.bot_text.is_empty() {
                     // A new question after an answer: fresh captions.
@@ -132,11 +136,16 @@ impl Voice {
                     engine.voice(VoiceState::Listening(self.user_text.clone()));
                 }
             }
-            "user_stopped" => engine.voice(VoiceState::Thinking),
+            "user_stopped" => {
+                self.user_speaking = false;
+                engine.voice(VoiceState::Thinking);
+            }
             // Backend heartbeat while the LLM works: stay on the thinking
             // screen (and amber LEDs) however long the tool call takes.
+            // Also after a filler ("Секунду, сэр.") finishes: the answer is
+            // still coming. Never over the user talking or a reply on screen.
             "thinking" => {
-                if !matches!(engine.screen(), femto_core::Screen::Speaking | femto_core::Screen::Listening) {
+                if !self.user_speaking && !matches!(engine.screen(), femto_core::Screen::Speaking) {
                     engine.voice(VoiceState::Thinking);
                 }
             }

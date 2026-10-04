@@ -223,11 +223,43 @@ def test_thinking_heartbeat_while_llm_works():
     async def run():
         await obs.on_push_frame(down(LLMFullResponseStartFrame()))
         await asyncio.sleep(0.18)
-        # First words are spoken: the heartbeat stops.
+        # Speaking (a filler) doesn't stop it; the LLM finishing does.
         await obs.on_push_frame(down(BotStartedSpeakingFrame()))
+        await asyncio.sleep(0.06)
+        await obs.on_push_frame(down(LLMFullResponseEndFrame()))
         n = sum(m["t"] == "thinking" for m in sent)
         await asyncio.sleep(0.15)
         assert sum(m["t"] == "thinking" for m in sent) == n
         return n
 
     assert asyncio.run(run()) >= 3
+
+
+async def test_filler_when_llm_is_silent():
+    from pipecat.frames.frames import LLMFullResponseEndFrame, LLMFullResponseStartFrame, LLMTextFrame, TTSSpeakFrame
+    from pipecat.tests.utils import SleepFrame, run_test
+
+    lang = bot.TurnLanguage()
+    f = bot.FillerSpeech(lang)
+    f.DELAY = 0.1
+    down, _ = await run_test(
+        f,
+        frames_to_send=[LLMFullResponseStartFrame(), SleepFrame(sleep=0.25), LLMTextFrame("Завтра"), LLMFullResponseEndFrame()],
+        expected_down_frames=[LLMFullResponseStartFrame, TTSSpeakFrame, LLMTextFrame, LLMFullResponseEndFrame],
+    )
+    assert down[1].text in bot.FILLERS[True]
+
+
+async def test_no_filler_when_llm_answers_quickly():
+    from pipecat.frames.frames import LLMFullResponseEndFrame, LLMFullResponseStartFrame, LLMTextFrame
+    from pipecat.tests.utils import SleepFrame, run_test
+
+    lang = bot.TurnLanguage()
+    lang.russian = False
+    f = bot.FillerSpeech(lang)
+    f.DELAY = 0.2
+    await run_test(
+        f,
+        frames_to_send=[LLMFullResponseStartFrame(), LLMTextFrame("Sure"), SleepFrame(sleep=0.3), LLMFullResponseEndFrame()],
+        expected_down_frames=[LLMFullResponseStartFrame, LLMTextFrame, LLMFullResponseEndFrame],
+    )

@@ -57,6 +57,7 @@ from pipecat.frames.frames import (
     InterruptionFrame,
     VADUserStartedSpeakingFrame,
     InterimTranscriptionFrame,
+    TTSSpeakFrame,
     TTSTextFrame,
     UserStartedSpeakingFrame,
     UserStoppedSpeakingFrame,
@@ -558,13 +559,15 @@ async def run_pipeline(transport, session_id: str, request_data: dict | None, se
         except Exception as exc:  # noqa: BLE001
             logger.warning(f"context reset failed: {exc!r}")
 
+    turn_lang = TurnLanguage()
     pipeline = Pipeline(
         [
             transport.input(),
             stt,
-            *([WakePhraseFilter()] if stackchan else []),
+            *([WakePhraseFilter(turn_lang)] if stackchan else []),
             user_aggregator,
             llm,
+            *([FillerSpeech(turn_lang)] if stackchan else []),
             tts,
             transport.output(),
             assistant_aggregator,
@@ -799,7 +802,12 @@ def strip_wake_phrase(text: str) -> str:
 
 class WakePhraseFilter(FrameProcessor):
     """Between STT and the user aggregator: drop transcripts that are only the
-    wake phrase or a sound tag, and strip a leading wake phrase otherwise."""
+    wake phrase or a sound tag, and strip a leading wake phrase otherwise.
+    Also notes the language of the last utterance for FillerSpeech."""
+
+    def __init__(self, lang: "TurnLanguage | None" = None, **kwargs):
+        super().__init__(**kwargs)
+        self._lang = lang
 
     async def process_frame(self, frame, direction):
         await super().process_frame(frame, direction)
@@ -809,6 +817,60 @@ class WakePhraseFilter(FrameProcessor):
                 logger.info(f"dropped transcript {frame.text!r} (wake phrase / sound)")
                 return
             frame.text = text
+            if self._lang is not None:
+                self._lang.russian = bool(re.search(r"[а-яё]", text, re.IGNORECASE))
+        await self.push_frame(frame, direction)
+
+
+class TurnLanguage:
+    """Language of the user's last utterance (shared, per session)."""
+
+    russian = True
+
+
+FILLERS = {
+    True: ["Секунду, сэр.", "Минутку. Проверяю.", "Одну секунду.", "Сейчас узнаю."],
+    False: ["One moment, sir.", "Checking. One moment.", "Bear with me.", "Let me find out."],
+}
+
+
+class FillerSpeech(FrameProcessor):
+    """Between the LLM and TTS: when the LLM has said nothing DELAY s after it
+    starts — the agent is off running a tool (weather, search; 10–40 s) —
+    say a short in-character filler, so the wait doesn't sound broken.
+    The answer follows when it's ready."""
+
+    DELAY = 2.0
+
+    def __init__(self, lang: TurnLanguage, **kwargs):
+        super().__init__(**kwargs)
+        self._lang = lang
+        self._timer: asyncio.Task | None = None
+        self._n = 0
+
+    async def _disarm(self):
+        if self._timer:
+            task, self._timer = self._timer, None
+            await self.cancel_task(task)
+
+    async def _fire(self):
+        await asyncio.sleep(self.DELAY)
+        self._timer = None
+        phrases = FILLERS[self._lang.russian]
+        self._n += 1
+        text = phrases[self._n % len(phrases)]
+        logger.info(f"LLM silent {self.DELAY:.0f}s: filler {text!r}")
+        await self.push_frame(TTSSpeakFrame(text))
+
+    async def process_frame(self, frame, direction):
+        await super().process_frame(frame, direction)
+        if isinstance(frame, LLMFullResponseStartFrame):
+            await self._disarm()
+            self._timer = self.create_task(self._fire())
+        elif isinstance(frame, LLMTextFrame) and frame.text.strip():
+            await self._disarm()
+        elif isinstance(frame, (LLMFullResponseEndFrame, InterruptionFrame, EndFrame, CancelFrame)):
+            await self._disarm()
         await self.push_frame(frame, direction)
 
 
@@ -823,7 +885,7 @@ class StackchanEventObserver(BaseObserver):
       {"t": "bot_started"} / {"t": "bot_stopped"}
       {"t": "bot_text", "text": ...}      # TTS text as it's spoken
       {"t": "thinking"}                   # every THINKING_EVERY s while the
-                                          # LLM works and nothing is spoken yet
+                                          # LLM works
     Every frame is seen once per hop through the pipeline; frame ids dedupe.
     """
 
@@ -871,7 +933,9 @@ class StackchanEventObserver(BaseObserver):
             self._stop_heartbeat()
             self._heartbeat = asyncio.create_task(self._beat())
             return
-        if isinstance(frame, (LLMFullResponseEndFrame, BotStartedSpeakingFrame, InterruptionFrame, EndFrame, CancelFrame)):
+        # Beat for the LLM's whole run, filler speech included: the answer
+        # may still be 30 s out after "One moment".
+        if isinstance(frame, (LLMFullResponseEndFrame, InterruptionFrame, EndFrame, CancelFrame)):
             self._stop_heartbeat()
         msg = None
         if isinstance(frame, UserStartedSpeakingFrame):
