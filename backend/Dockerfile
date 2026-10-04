@@ -8,8 +8,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         ca-certificates ffmpeg libgomp1 \
     && rm -rf /var/lib/apt/lists/*
 
-# uv — the Python package/dependency manager.
-COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
+# uv — the Python package/dependency manager. Pinned to a minor version:
+# a moving tag would invalidate the cached dependency layer below.
+COPY --from=ghcr.io/astral-sh/uv:0.10 /uv /uvx /bin/
 
 ENV UV_LINK_MODE=copy \
     UV_COMPILE_BYTECODE=1 \
