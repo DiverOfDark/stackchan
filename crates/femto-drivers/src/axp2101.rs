@@ -11,6 +11,9 @@ const REG_STATUS2: u8 = 0x01;
 const REG_PWRON_SRC: u8 = 0x20;
 const REG_PWROFF_SRC: u8 = 0x21;
 const REG_DC_UVP_OVP_OFF: u8 = 0x23;
+const REG_VBAT_H: u8 = 0x34;
+const REG_VBUS_H: u8 = 0x38;
+const REG_VSYS_H: u8 = 0x3A;
 const REG_DC_PWM_CTRL: u8 = 0x81;
 const REG_PWROFF_EN: u8 = 0x10;
 const REG_IRQ_LEVEL: u8 = 0x27;
@@ -69,6 +72,28 @@ impl PowerHistory {
     }
 }
 
+/// Battery and supply readings (ADC + charger status).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PowerNow {
+    pub battery_pct: u8,
+    pub vbat_mv: u16,
+    pub vbus_mv: u16,
+    pub vsys_mv: u16,
+    pub vbus_good: bool,
+    /// Battery current: charging (+1), discharging (-1) or idle (0).
+    pub direction: i8,
+    /// The charger is cutting its USB draw because VBUS sags: the supply
+    /// (port, charger or cable) can't deliver what the robot uses.
+    pub vindpm: bool,
+}
+
+impl PowerNow {
+    /// On USB but draining the battery: it will run flat and power off.
+    pub fn starved(&self) -> bool {
+        self.vindpm || (self.vbus_good && self.direction < 0)
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub struct PowerKey {
     pub short: bool,
@@ -86,6 +111,36 @@ impl<I: I2c> Axp2101<I> {
 
     pub fn release(self) -> I {
         self.i2c
+    }
+
+    pub fn power_now(&mut self) -> Result<PowerNow, I::Error> {
+        let s1 = read_reg(&mut self.i2c, ADDR, REG_STATUS1)?;
+        let s2 = read_reg(&mut self.i2c, ADDR, REG_STATUS2)?;
+        let mut adc = |h: u8| -> Result<u16, I::Error> {
+            let hi = read_reg(&mut self.i2c, ADDR, h)?;
+            let lo = read_reg(&mut self.i2c, ADDR, h + 1)?;
+            Ok((((hi & 0x3F) as u16) << 8) | lo as u16)
+        };
+        let (vbat_mv, vbus_mv, vsys_mv) = (adc(REG_VBAT_H)?, adc(REG_VBUS_H)?, adc(REG_VSYS_H)?);
+        Ok(PowerNow {
+            battery_pct: read_reg(&mut self.i2c, ADDR, REG_BAT_PCT)?,
+            vbat_mv,
+            vbus_mv,
+            vsys_mv,
+            vbus_good: s1 & (1 << 5) != 0,
+            direction: match (s2 >> 5) & 0b11 {
+                0b01 => 1,
+                0b10 => -1,
+                _ => 0,
+            },
+            vindpm: s2 & (1 << 3) != 0,
+        })
+    }
+
+    /// Constant-current charge setting (REG 62H, from efuse unless set).
+    pub fn charge_current_ma(&mut self) -> Result<u16, I::Error> {
+        let n = (read_reg(&mut self.i2c, ADDR, REG_ICC_CHG)? & 0x1F) as u16;
+        Ok(if n <= 8 { 25 * n } else { 200 + 100 * (n - 8) })
     }
 
     /// The PMIC's latched power-on / power-off sources (read once at boot).
@@ -182,6 +237,19 @@ mod tests {
         let m = p.release();
         assert_eq!(m.regs[&(ADDR, REG_DC_UVP_OVP_OFF)], 0b0010_0000);
         assert_eq!(m.regs[&(ADDR, REG_DC_PWM_CTRL)] & 0b11, 0b11);
+    }
+
+    #[test]
+    fn reads_power_now() {
+        let mut m = MockI2c::default();
+        m.regs.insert((ADDR, REG_STATUS1), 1 << 5);
+        m.regs.insert((ADDR, REG_STATUS2), (0b10 << 5) | (1 << 3)); // discharging, VINDPM
+        m.regs.insert((ADDR, REG_VBUS_H), 0x13);
+        m.regs.insert((ADDR, REG_VBUS_H + 1), 0x88); // 0x1388 = 5000 mV
+        m.regs.insert((ADDR, REG_BAT_PCT), 37);
+        let p = Axp2101::new(m).power_now().unwrap();
+        assert_eq!((p.vbus_mv, p.battery_pct, p.direction), (5000, 37, -1));
+        assert!(p.vbus_good && p.vindpm && p.starved());
     }
 
     #[test]

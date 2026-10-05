@@ -65,6 +65,7 @@ impl Board {
             ),
             Err(e) => warn!("power history: {e:?}"),
         }
+        info!("battery charge current {} mA", pmic.charge_current_ma().unwrap_or(0));
 
         let mut aw = Aw9523::new(dev());
         aw.init().map_err(|e| anyhow!("AW9523: {e:?}"))?;

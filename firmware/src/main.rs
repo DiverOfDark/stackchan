@@ -445,6 +445,7 @@ fn main() -> anyhow::Result<()> {
                 info!("render {:.1} ms (bg {bg} face {face} chrome {chrome} overlay {ov} us), push {:.1} ms, mood {:?}", render_us as f32 / 10_000.0, push_us as f32 / 10_000.0, engine.resolve_emotion());
                 info!("face stages us: {prof:?}");
                 report_memory();
+                report_power(&mut board.pmic);
             }
             fps = frames as f32 * 1000.0 / last_report.elapsed().as_millis().max(1) as f32;
             last_report = Instant::now();
@@ -747,6 +748,31 @@ fn report_memory_tag(tag: &str) {
     // SAFETY: plain FFI getters.
     let (free, largest) = unsafe { (sys::heap_caps_get_free_size(sys::MALLOC_CAP_INTERNAL), sys::heap_caps_get_largest_free_block(sys::MALLOC_CAP_INTERNAL)) };
     info!("internal heap [{tag}]: {} KB free, largest block {} KB", free / 1024, largest / 1024);
+}
+
+/// Battery and supply, every 30 s: a battery draining on USB (weak port,
+/// charger or cable) is visible hours before it runs flat and the PMIC cuts
+/// power (VSYS under-voltage).
+fn report_power(pmic: &mut femto_drivers::axp2101::Axp2101<board::Bus>) {
+    let Ok(p) = pmic.power_now() else { return };
+    let dir = match p.direction {
+        1 => "charging",
+        -1 => "discharging",
+        _ => "idle",
+    };
+    let line = format!(
+        "power: battery {}% {dir} ({} mV), USB {} ({} mV), VSYS {} mV",
+        p.battery_pct,
+        p.vbat_mv,
+        if p.vbus_good { "good" } else { "absent" },
+        p.vbus_mv,
+        p.vsys_mv
+    );
+    if p.starved() {
+        warn!("{line} — supply too weak for the robot{}", if p.vindpm { " (charger throttling USB input)" } else { "" });
+    } else {
+        info!("{line}");
+    }
 }
 
 fn report_memory() {
