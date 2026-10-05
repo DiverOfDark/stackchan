@@ -274,6 +274,11 @@ fn main() -> anyhow::Result<()> {
 
         if let Some(v) = voice.as_mut() {
             v.sync(&mut engine);
+            // Wake word only with someone around: a face in the last
+            // WAKE_PRESENCE, or the first WAKE_PRESENCE after boot (someone
+            // just switched it on). No camera → no way to tell → always.
+            let present = tracker.lost_for() < WAKE_PRESENCE || boot_at.elapsed() < WAKE_PRESENCE;
+            v.set_wake_armed(!cfg.camera || present);
         }
 
         // Network → engine.
@@ -414,6 +419,7 @@ fn main() -> anyhow::Result<()> {
                 let (st, mic) = v.status();
                 s.voice_state = Some(st);
                 s.mic_level = mic;
+                s.wake_armed = v.wake_armed();
             }
         }
         // Hand the frame to the LCD thread; continue on the other buffer.
@@ -470,6 +476,9 @@ fn factory_wipe() -> ! {
     }
     unsafe { sys::esp_restart() }
 }
+
+/// The wake word listens only if a face was seen this recently.
+const WAKE_PRESENCE: Duration = Duration::from_secs(10 * 60);
 
 /// Head stays frozen this long after the last sign of being carried.
 const HANDLED_HOLD: Duration = Duration::from_secs(3);

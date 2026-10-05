@@ -41,7 +41,7 @@ export interface Status {
   panel: string;
   wifi: { ssid: string | null; ip: string | null; rssi: number | null; connected: boolean };
   vision?: { face: { x: number; y: number } | null; seen_s_ago: number | null };
-  voice?: { state: 'idle' | 'connecting' | 'listening' | 'thinking' | 'speaking' | null; mic: number };
+  voice?: { state: 'idle' | 'connecting' | 'listening' | 'thinking' | 'speaking' | null; mic: number; wake_armed?: boolean };
   usage: {
     signed_in: boolean;
     session_pct: number | null;

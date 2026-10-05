@@ -35,6 +35,10 @@ float femto_voice_level(void);
 /** Push-to-talk: start a turn as if the wake word fired. */
 void femto_voice_wake(void);
 
+/** Listen for the wake word or not (e.g. only with someone around). Push-
+ *  to-talk works either way. Armed by default. */
+void femto_voice_set_wake_armed(bool armed);
+
 void femto_voice_set_volume(int volume);
 
 /** Mic level 0..1 (diagnostics / loud-noise reaction). */

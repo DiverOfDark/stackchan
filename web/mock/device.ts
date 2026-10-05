@@ -83,7 +83,7 @@ export function mockDevice(opts: { setup?: boolean } = {}): Plugin {
     heap: { internal_kb: 196, psram_kb: 5214 },
     fps: 12.1,
     vision: { face: { x: Math.sin(Date.now() / 2000) * 0.5, y: -0.2 }, seen_s_ago: 0.3 },
-    voice: { state: 'idle', mic: Math.abs(Math.sin(Date.now() / 700)) * 0.4 },
+    voice: { state: 'idle', mic: Math.abs(Math.sin(Date.now() / 700)) * 0.4, wake_armed: true },
     dirty: JSON.stringify(saved) !== JSON.stringify(live),
   });
 

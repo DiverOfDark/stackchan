@@ -120,7 +120,7 @@ fn status_json(hub: &HubRef) -> Value {
         },
         "heap": { "internal_kb": internal / 1024, "psram_kb": psram / 1024 },
         "fps": s.fps,
-        "voice": { "state": s.voice_state, "mic": s.mic_level },
+        "voice": { "state": s.voice_state, "mic": s.mic_level, "wake_armed": s.wake_armed },
         "vision": { "face": s.face.map(|(x, y)| json!({ "x": x, "y": y })), "seen_s_ago": s.face_age_s },
         "dirty": h.live != h.saved,
     })

@@ -59,6 +59,8 @@ pub struct Snapshot {
     pub face_age_s: Option<f32>,
     pub voice_state: Option<&'static str>,
     pub mic_level: f32,
+    /// Listening for the wake word (someone seen lately).
+    pub wake_armed: bool,
 }
 
 #[derive(Clone, Debug, Default)]

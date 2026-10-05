@@ -327,6 +327,8 @@ void Session::captureTask()
     static int16_t mono_wake[domain::kFramesPerPacket];
     static int16_t mono_uplink[domain::kFramesPerPacket];
     static const int16_t zero_pcm[domain::kFramesPerPacket] = {0};
+    constexpr int kRearmFrames = 50;   // 1 s of 20 ms frames
+    int rearm_frames = 0;
 
     while (running_.load()) {
         if (audio_.read(raw, domain::kFramesPerPacket) != ESP_OK) {
@@ -354,8 +356,18 @@ void Session::captureTask()
                 turn_deadline_ = now + pdMS_TO_TICKS(kAwaitResponseMs);
         }
 
-        wake_word_process(mono_wake, domain::kFramesPerPacket);
-        const bool woke = wake_word_detected() || ptt_.exchange(false);
+        // Wake word only while armed (someone's been around lately); the
+        // model isn't fed otherwise. After re-arming, ignore it for a second
+        // so the stale end of its sliding window can't fire.
+        bool heard = false;
+        if (wake_armed_.load()) {
+            wake_word_process(mono_wake, domain::kFramesPerPacket);
+            heard = wake_word_detected() && rearm_frames == 0;
+            if (rearm_frames > 0) --rearm_frames;
+        } else {
+            rearm_frames = kRearmFrames;
+        }
+        const bool woke = heard || ptt_.exchange(false);
         if (woke) {
             if (!conversation_active_.exchange(true)) {
                 ESP_LOGI(kTag, "wake → turn armed");

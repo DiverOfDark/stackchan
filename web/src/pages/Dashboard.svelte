@@ -17,7 +17,7 @@
     <div class="row">
       <div class="grow">
         <div class="label">Voice</div>
-        <div class="mono">{status.voice.state ?? 'off'} · mic {Math.round(status.voice.mic * 100)}%</div>
+        <div class="mono">{status.voice.state ?? 'off'} · mic {Math.round(status.voice.mic * 100)}% · wake word {status.voice.wake_armed === false ? 'off (nobody around)' : 'on'}</div>
         <div class="meter"><i style:flex={Math.max(0.001, status.voice.mic)} style:background="var(--a)"></i><i style:flex={Math.max(0.001, 1 - status.voice.mic)}></i></div>
       </div>
       <button class="primary" onclick={() => attempt(api.talk())}>Talk</button>

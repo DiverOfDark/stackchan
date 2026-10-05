@@ -26,6 +26,8 @@ pub struct Voice {
     bot_caption_until: Option<Instant>,
     /// Between user_started and user_stopped.
     user_speaking: bool,
+    /// Listening for the wake word (see `set_wake_armed`).
+    wake_armed: bool,
 }
 
 /// How long a finished reply's caption stays on screen.
@@ -64,7 +66,7 @@ pub fn start(backend_url: &str, cfg: &Settings) -> Option<Voice> {
         return None;
     }
     info!("voice up (backend {})", if backend_url.is_empty() { "<unset>" } else { backend_url });
-    Some(Voice { last: voice::femto_voice_state_t_FEMTO_VOICE_IDLE, events_this_turn: false, user_text: String::new(), bot_text: String::new(), bot_caption_until: None, user_speaking: false })
+    Some(Voice { last: voice::femto_voice_state_t_FEMTO_VOICE_IDLE, events_this_turn: false, user_text: String::new(), bot_text: String::new(), bot_caption_until: None, user_speaking: false, wake_armed: true })
 }
 
 impl Voice {
@@ -187,6 +189,21 @@ impl Voice {
     pub fn push_to_talk(&self) {
         // SAFETY: plain call.
         unsafe { voice::femto_voice_wake() };
+    }
+
+    pub fn wake_armed(&self) -> bool {
+        self.wake_armed
+    }
+
+    /// Listen for the wake word only while someone's around (the UI loop
+    /// decides). Push-to-talk works regardless.
+    pub fn set_wake_armed(&mut self, armed: bool) {
+        if armed != self.wake_armed {
+            info!("wake word {}", if armed { "armed: someone's here" } else { "disarmed: nobody seen for a while" });
+            self.wake_armed = armed;
+            // SAFETY: plain call.
+            unsafe { voice::femto_voice_set_wake_armed(armed) };
+        }
     }
 
     pub fn set_volume(&self, v: u8) {

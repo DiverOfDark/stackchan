@@ -45,6 +45,7 @@ public:
     float level() const { return level_.load(); }
     float micLevel() const { return mic_level_.load(); }
     void wake() { ptt_ = true; }
+    void setWakeArmed(bool armed) { wake_armed_ = armed; }
     void setRequestData(std::string json) { hello_ = std::move(json); }
     /** Pop one backend event (JSON); false when none. */
     bool nextEvent(std::string &out);
@@ -81,6 +82,7 @@ private:
     std::atomic<bool> conversation_active_{false};
     std::atomic<bool> bot_replied_{false};
     std::atomic<bool> ptt_{false};
+    std::atomic<bool> wake_armed_{true};
     std::atomic<int> chirp_pending_{-1};
     std::atomic<TickType_t> turn_deadline_{0};
     std::atomic<TickType_t> last_rx_frame_tick_{0};

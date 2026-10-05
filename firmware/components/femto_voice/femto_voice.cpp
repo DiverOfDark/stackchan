@@ -25,6 +25,7 @@ extern "C" femto_voice_state_t femto_voice_state(void) { return s_session ? s_se
 extern "C" float femto_voice_level(void) { return s_session ? s_session->level() : 0.0f; }
 extern "C" float femto_voice_mic_level(void) { return s_session ? s_session->micLevel() : 0.0f; }
 extern "C" void femto_voice_wake(void) { if (s_session) s_session->wake(); }
+extern "C" void femto_voice_set_wake_armed(bool armed) { if (s_session) s_session->setWakeArmed(armed); }
 extern "C" void femto_voice_set_volume(int volume) { s_audio.setVolume(volume); }
 
 extern "C" size_t femto_voice_next_event(char *out, size_t cap)
