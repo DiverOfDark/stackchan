@@ -46,6 +46,7 @@ public:
     float micLevel() const { return mic_level_.load(); }
     void wake() { ptt_ = true; }
     void setWakeArmed(bool armed) { wake_armed_ = armed; }
+    std::size_t takeWakeSample(int16_t *out, std::size_t cap, femto_wake_sample_meta_t *meta);
     void setRequestData(std::string json) { hello_ = std::move(json); }
     /** Pop one backend event (JSON); false when none. */
     bool nextEvent(std::string &out);
@@ -96,6 +97,13 @@ private:
     std::mutex events_mtx_;
     std::deque<std::string> events_;
     std::atomic<uint32_t> rx_audio_chunks_{0};
+    // Wake snapshot: the capture task copies its rolling mic history here
+    // when the wake word fires; Rust uploads it (logship.rs-style).
+    std::mutex wake_mtx_;
+    int16_t *wake_pcm_ = nullptr;
+    std::size_t wake_pcm_len_ = 0;
+    femto_wake_sample_meta_t wake_meta_{};
+    bool wake_pending_ = false;
 };
 
 }  // namespace femto

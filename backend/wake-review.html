@@ -85,7 +85,7 @@ function render() {
     card.dataset.name = s.wav;
     card.innerHTML = `
       <div>
-        <div class="meta">peak <b>${m.peak ?? '?'}</b> · avg <b>${m.avg ?? '?'}</b> · hits <b>${m.hits ?? '?'}</b>
+        <div class="meta"><b>${m.device ?? 'xiao'}</b> · peak <b>${m.peak ?? '?'}</b> · avg <b>${m.avg ?? '?'}</b> · hits <b>${m.hits ?? '?'}</b>
           · win [${m.win ?? ''}] · ${(s.bytes/1024|0)} KB</div>
         <div class="name">${s.wav} <span class="tag ${label}">${label}</span></div>
         <audio controls preload="none" src="/wake-samples/${encodeURIComponent(s.wav)}"></audio>

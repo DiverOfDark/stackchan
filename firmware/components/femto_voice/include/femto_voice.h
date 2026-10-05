@@ -35,6 +35,21 @@ float femto_voice_level(void);
 /** Push-to-talk: start a turn as if the wake word fired. */
 void femto_voice_wake(void);
 
+/** Audio that made the wake word fire, for labelling at the backend's
+ *  /wake-review (true and false wakes become training data). */
+typedef struct {
+    uint32_t fire_seq;
+    float peak, avg;
+    int hits;
+    float window[5];
+    uint32_t uptime_ms;
+} femto_wake_sample_meta_t;
+
+/** Take the newest unread wake snapshot: up to `cap` samples of 16 kHz mono
+ *  PCM (the ~3 s ending at the fire) into `out`. Returns the sample count,
+ *  0 if there's no new one. */
+size_t femto_voice_take_wake_sample(int16_t *out, size_t cap, femto_wake_sample_meta_t *meta);
+
 /** Listen for the wake word or not (e.g. only with someone around). Push-
  *  to-talk works either way. Armed by default. */
 void femto_voice_set_wake_armed(bool armed);

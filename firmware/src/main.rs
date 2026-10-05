@@ -9,6 +9,7 @@ mod dns;
 mod hub;
 mod leds;
 mod logship;
+mod wakeship;
 mod logtap;
 mod store;
 mod tz;
@@ -80,6 +81,7 @@ fn main() -> anyhow::Result<()> {
     let mut last_pat: Option<Instant> = None;
     let _web = web::start(&hub)?;
     logship::spawn(hub.clone())?;
+    wakeship::spawn(hub.clone())?;
     report_memory_tag("after web");
     let _mdns = esp_idf_svc::mdns::EspMdns::take().and_then(|mut m| {
         m.set_hostname("femto")?;

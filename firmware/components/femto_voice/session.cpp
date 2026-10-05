@@ -82,6 +82,9 @@ constexpr int  kSendPrio              = 7;
 constexpr int  kMainCore              = 0;
 constexpr int  kAvCore                = 1;
 constexpr UBaseType_t kPsram          = MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT;
+// Mic history kept for wake snapshots (ends at the fire, so it holds the
+// phrase plus some lead-in), as on the original device.
+constexpr std::size_t kWakeHistory    = domain::kSampleRateHz * 3;   // 3 s, 96 KB PSRAM
 }  // namespace
 
 namespace femto {
@@ -104,6 +107,17 @@ void Backlog::push(const void* data, std::size_t len)
         if (count_ < cap_) count_++;
         else head_ = (head_ + 1) % cap_;   // full: drop the oldest byte
     }
+}
+
+std::size_t Session::takeWakeSample(int16_t* out, std::size_t cap, femto_wake_sample_meta_t* meta)
+{
+    std::lock_guard<std::mutex> lk(wake_mtx_);
+    if (!wake_pending_ || !wake_pcm_) return 0;
+    wake_pending_ = false;
+    const std::size_t n = std::min(cap, wake_pcm_len_);
+    std::memcpy(out, wake_pcm_, n * sizeof(int16_t));
+    if (meta) *meta = wake_meta_;
+    return n;
 }
 
 std::size_t Backlog::pop(void* out, std::size_t max)
@@ -329,6 +343,10 @@ void Session::captureTask()
     static const int16_t zero_pcm[domain::kFramesPerPacket] = {0};
     constexpr int kRearmFrames = 50;   // 1 s of 20 ms frames
     int rearm_frames = 0;
+    // Rolling mic history for wake snapshots.
+    int16_t* hist = static_cast<int16_t*>(heap_caps_malloc(kWakeHistory * sizeof(int16_t), kPsram));
+    wake_pcm_ = static_cast<int16_t*>(heap_caps_malloc(kWakeHistory * sizeof(int16_t), kPsram));
+    std::size_t hist_head = 0, hist_len = 0;
 
     while (running_.load()) {
         if (audio_.read(raw, domain::kFramesPerPacket) != ESP_OK) {
@@ -366,6 +384,28 @@ void Session::captureTask()
             if (rearm_frames > 0) --rearm_frames;
         } else {
             rearm_frames = kRearmFrames;
+        }
+        if (hist) {
+            for (std::size_t i = 0; i < domain::kFramesPerPacket; ++i) {
+                hist[(hist_head + hist_len) % kWakeHistory] = mono_uplink[i];
+                if (hist_len < kWakeHistory) hist_len++;
+                else hist_head = (hist_head + 1) % kWakeHistory;
+            }
+        }
+        if (heard && hist && wake_pcm_ && !conversation_active_.load()) {
+            // Snapshot what made it fire (true or false wake) for review.
+            std::lock_guard<std::mutex> lk(wake_mtx_);
+            for (std::size_t i = 0; i < hist_len; ++i) wake_pcm_[i] = hist[(hist_head + i) % kWakeHistory];
+            wake_pcm_len_ = hist_len;
+            wake_word_metrics_t m;
+            wake_word_get_metrics(&m);
+            wake_meta_.fire_seq = m.fire_seq;
+            wake_meta_.peak = m.peak;
+            wake_meta_.avg = m.avg;
+            wake_meta_.hits = m.hits;
+            for (int i = 0; i < 5; ++i) wake_meta_.window[i] = m.window[i];
+            wake_meta_.uptime_ms = pdTICKS_TO_MS(now);
+            wake_pending_ = true;
         }
         const bool woke = heard || ptt_.exchange(false);
         if (woke) {
