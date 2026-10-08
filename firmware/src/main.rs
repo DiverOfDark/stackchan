@@ -481,7 +481,7 @@ fn factory_wipe() -> ! {
 }
 
 /// The wake word listens only if a face was seen this recently.
-const WAKE_PRESENCE: Duration = Duration::from_secs(10 * 60);
+const WAKE_PRESENCE: Duration = Duration::from_secs(2 * 60);
 
 /// Head stays frozen this long after the last sign of being carried.
 const HANDLED_HOLD: Duration = Duration::from_secs(3);
