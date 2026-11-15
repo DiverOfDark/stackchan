@@ -209,6 +209,10 @@ and around teardown. `peer_->tick()` stays lock-free (same task as teardown).
   socket connects and dropped if it is slower than that.
 - The Live API streams output continuously, silence included; only audible
   frames are forwarded so the device's playback buffer drains between replies.
+- **Loudness:** voices differ by 12 dB or more (a custom "quiet" voice was
+  barely audible). `Leveler` amplifies the speech to `LIVE_OUTPUT_DBFS` (-17 dBFS
+  RMS, at most `LIVE_OUTPUT_MAX_GAIN_DB` = 24), limits peaks, never attenuates, and
+  starts each session at the gain the previous one settled on.
 - **False wakes:** the device opens a wake-word turn with the last 1.5 s of mic
   history (the wake phrase). If the model transcribes no speech within
   `LIVE_NO_SPEECH_SECS` (8), the backend sends `{"t": "sleep"}` to a device whose

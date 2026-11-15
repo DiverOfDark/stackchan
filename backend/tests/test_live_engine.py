@@ -8,9 +8,9 @@ from array import array
 from websockets.asyncio.server import serve
 
 import live_engine
-from live_engine import LiveConfig, WordSplitter, chunk_text, is_loud, run_live_session, split_frames
+from live_engine import Leveler, LiveConfig, WordSplitter, chunk_text, is_loud, run_live_session, split_frames
 
-LOUD = array("h", [3000, -3000] * 160).tobytes()   # 20 ms
+LOUD = array("h", [5000, -5000] * 160).tobytes()   # 20 ms, already at the output level
 QUIET = bytes(640)
 
 
@@ -244,3 +244,44 @@ async def test_run_live_puts_persona_language_and_voice_in_the_instructions(monk
     assert "Your voice: A dry, low male voice." in cfg.instructions
     assert cfg.instructions.endswith(live_engine.LIVE_RULES)
     assert cfg.can_sleep and cfg.session_id == "s1"
+
+
+def _tone(amplitude, frames):
+    import math
+
+    one = array("h", [int(amplitude * math.sin(2 * math.pi * 200 * i / 16000)) for i in range(320)]).tobytes()
+    return [one] * frames
+
+
+def _rms_dbfs(frame):
+    import math
+
+    pcm = array("h", frame)
+    return 20 * math.log10((sum(x * x for x in pcm) / len(pcm)) ** 0.5 / 32768)
+
+
+def test_leveler_raises_a_quiet_voice_to_the_target():
+    lv = Leveler(target_dbfs=-17, max_gain_db=24)
+    quiet = _tone(600, 150)                       # about -38 dBFS
+    assert _rms_dbfs(quiet[0]) < -35
+    out = [lv.process(f) for f in quiet]
+    assert -18 < _rms_dbfs(out[-1]) < -16
+    # It gets there gradually: no jump on the first frame.
+    assert _rms_dbfs(out[0]) < -35
+
+
+def test_leveler_never_attenuates_or_clips():
+    lv = Leveler(target_dbfs=-17, max_gain_db=24)
+    loud = _tone(20000, 50)
+    assert [lv.process(f) for f in loud] == loud
+    # A peak in an otherwise quiet voice is held under full scale.
+    lv = Leveler(target_dbfs=-17, max_gain_db=24, gain=10.0)
+    spike = array("h", [300] * 319 + [9000]).tobytes()
+    out = array("h", lv.process(spike))
+    assert max(out) <= 30000 and out[0] > 300
+
+
+def test_leveler_leaves_silence_alone_and_starts_from_a_given_gain():
+    lv = Leveler(gain=4.0)
+    assert lv.process(QUIET) == QUIET and lv.gain == 4.0
+    assert array("h", lv.process(array("h", [100] * 320).tobytes()))[0] == 400
