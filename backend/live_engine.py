@@ -55,6 +55,13 @@ SEND_AHEAD_S = 0.3
 # The Live API streams output continuously, silence included. Only audible
 # audio is forwarded, so the device's playback buffer drains between replies.
 LOUD_PEAK = 200
+# Loudness the model's speech is brought to (RMS of the spoken parts), and
+# the most it may be amplified to get there.
+TARGET_DBFS = float(os.getenv("LIVE_OUTPUT_DBFS", "-17"))
+MAX_GAIN_DB = float(os.getenv("LIVE_OUTPUT_MAX_GAIN_DB", "24"))
+# The gain the last session settled on: the voice is the same next time, so
+# a new session starts there instead of quiet.
+_settled_gain = 1.0
 HANGOVER_S = 0.4
 # A user turn ends when its transcript has been quiet this long.
 USER_TURN_GAP_S = 1.0
@@ -89,6 +96,46 @@ def split_frames(buf: bytearray) -> list[bytes]:
     frames = [bytes(buf[i * FRAME_BYTES:(i + 1) * FRAME_BYTES]) for i in range(n)]
     del buf[: n * FRAME_BYTES]
     return frames
+
+
+class Leveler:
+    """Brings the model's speech to one loudness, whatever voice it uses.
+
+    Voices differ a lot: a custom "quiet, cold" voice came out 12 dB below
+    the default one and was barely audible on the robot's small speaker. The
+    gain follows the average level of the speech heard so far, moves slowly so
+    words don't pump, and is cut per frame where a peak would clip. It only
+    ever amplifies.
+    """
+
+    FULL_SCALE = 32768.0
+    PEAK_LIMIT = 30000.0
+    MAX_STEP = 1.06          # gain change per 20 ms frame (about 0.5 dB)
+
+    def __init__(self, target_dbfs: float = TARGET_DBFS, max_gain_db: float = MAX_GAIN_DB, gain: float = 1.0):
+        self._target = self.FULL_SCALE * 10 ** (target_dbfs / 20)
+        self._max_gain = 10 ** (max_gain_db / 20)
+        self._power = 0.0    # running mean square of speech frames
+        self._frames = 0
+        self.gain = min(max(gain, 1.0), self._max_gain)
+
+    def process(self, frame: bytes) -> bytes:
+        pcm = array("h")
+        pcm.frombytes(frame[: len(frame) // 2 * 2])
+        if not pcm:
+            return frame
+        peak = max(max(pcm), -min(pcm))
+        if peak >= LOUD_PEAK:
+            power = sum(x * x for x in pcm) / len(pcm)
+            # Plain average over the first second, then a slow moving one.
+            self._frames = min(self._frames + 1, 250)
+            self._power += (power - self._power) / self._frames
+            want = min(max(self._target / (self._power ** 0.5 or 1.0), 1.0), self._max_gain)
+            self.gain = min(max(want, self.gain / self.MAX_STEP), self.gain * self.MAX_STEP)
+        gain = min(self.gain, self.PEAK_LIMIT / peak) if peak else self.gain
+        if gain <= 1.0:
+            return frame
+        return array("h", [int(x * gain) for x in pcm]).tobytes()
 
 
 def is_loud(frame: bytes) -> bool:
@@ -190,6 +237,8 @@ class LiveSession:
 
     async def _downlink(self) -> None:
         """Speech audio: paced to the device a little ahead of real time."""
+        global _settled_gain
+        leveler = Leveler(gain=_settled_gain)
         next_send = 0.0
         last_loud = 0.0
         while True:
@@ -222,7 +271,8 @@ class LiveSession:
             wait = next_send - now - SEND_AHEAD_S
             if wait > 0:
                 await asyncio.sleep(wait)
-            await self._dev.send_bytes(frame)
+            await self._dev.send_bytes(leveler.process(frame))
+            _settled_gain = leveler.gain
 
     # ---- turns -----------------------------------------------------------
 
