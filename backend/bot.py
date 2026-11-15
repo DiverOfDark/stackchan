@@ -115,6 +115,14 @@ HERMES_BASE_URL = os.getenv(
 HERMES_MODEL = os.getenv("HERMES_MODEL", "")
 HERMES_API_KEY = os.getenv("HERMES_API_KEY", "")
 
+# ── Voice engine ─────────────────────────────────────────────────────────
+# `pipeline` is the pipecat STT → LLM → TTS chain below. `live` hands the
+# Femto robot's audio to OpenAI's speech-to-speech model, which delegates
+# tool work to Hermes (see live_engine.py). Other devices always use the
+# pipeline.
+VOICE_ENGINE = os.getenv("VOICE_ENGINE", "pipeline").lower()   # pipeline | live
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
+
 WHISPER_MODEL = os.getenv("WHISPER_MODEL", "deepdml/faster-whisper-large-v3-turbo-ct2")
 WHISPER_COMPUTE_TYPE = os.getenv("WHISPER_COMPUTE_TYPE", "int8")
 # faster-whisper defaults are beam_size=5 / best_of=5; we run 1/1 for ~30-50%
@@ -1097,8 +1105,75 @@ async def femto_ws(websocket: WebSocket):
     if not isinstance(meta, dict):
         meta = {}
     session_id = f"ws-{uuid.uuid4().hex[:12]}"
+    if VOICE_ENGINE == "live" and OPENAI_API_KEY and meta.get("device") == STACKCHAN_DEVICE:
+        await run_live(websocket, session_id, meta)
+        return
     transport = FemtoTransport(websocket, femto_params())
     await run_pipeline(transport, session_id, meta, transport.send_event)
+
+
+_LIVE_DELEGATE_INSTRUCTION = (
+    "You are the reasoning backend of a voice robot. A fast voice model talks "
+    "to the user and has passed this request to you. Do the work, using tools "
+    "when needed, and return only the result as plain text the voice model can "
+    "say aloud: no markdown, lists, emoji or code; spell out units and times."
+)
+
+
+async def _hermes_delegate(system_prompt: str, history: list[dict]) -> str:
+    """Run one delegated request through Hermes and return its final text."""
+    from openai import AsyncOpenAI
+
+    client = AsyncOpenAI(api_key=HERMES_API_KEY or "none", base_url=HERMES_BASE_URL)
+    try:
+        stream = await client.chat.completions.create(
+            model=HERMES_MODEL,
+            messages=[{"role": "system", "content": system_prompt}, *history],
+            stream=True,
+        )
+        parts: list[str] = []
+        async for chunk in stream:
+            if chunk.choices and chunk.choices[0].delta.content:
+                parts.append(chunk.choices[0].delta.content)
+        return "".join(parts)
+    finally:
+        await client.close()
+
+
+async def run_live(websocket: WebSocket, session_id: str, meta: dict) -> None:
+    """One Femto session on the speech-to-speech engine."""
+    from live_engine import LIVE_RULES, LiveConfig, run_live_session
+
+    name = str(meta.get("name") or "Femto")[:24]
+    honorific = str(meta.get("honorific") or "sir")[:12]
+    persona = STACKCHAN_SYSTEM_PROMPT.format(name=name, honorific=honorific)
+    lang = {"ru": " Always speak Russian.", "en": " Always speak English."}.get(str(meta.get("lang")), "")
+    usage_text: list[str] = []
+
+    async def startup_context() -> str | None:
+        text = stackchan_usage_context(await fetch_stackchan_usage())
+        usage_text.append(text)
+        return text
+
+    async def delegate(history: list[dict]) -> str:
+        system = " ".join([persona, *usage_text, _LIVE_DELEGATE_INSTRUCTION])
+        return await _hermes_delegate(system, history)
+
+    caps = meta.get("caps") if isinstance(meta.get("caps"), list) else []
+    await run_live_session(
+        websocket,
+        LiveConfig(
+            api_key=OPENAI_API_KEY,
+            instructions=f"{persona}{lang} {LIVE_RULES}",
+            delegate=delegate,
+            startup_context=startup_context,
+            on_transcript=lambda role, text: broadcast_transcript(
+                {"pc_id": session_id, "role": role, "text": text}
+            ),
+            can_sleep="sleep" in caps,
+            session_id=session_id,
+        ),
+    )
 
 
 @app.patch("/api/offer")

@@ -21,7 +21,10 @@
 
 namespace domain {
 
-enum class Chirp : uint8_t { Wake, End };
+// Ack is the wake-word acknowledgement: a 180 ms blip, short because the mic
+// is muted while a chirp plays and the user is usually mid-sentence
+// ("Hey Femto, what's the weather") when it fires.
+enum class Chirp : uint8_t { Wake, End, Ack };
 
 // Upper bound on samples a chirp can produce (~875 ms at 16 kHz).
 inline constexpr std::size_t kChirpMaxSamples = 14000;
@@ -47,8 +50,12 @@ inline std::size_t synth_chirp(Chirp kind, int16_t* out, std::size_t cap)
         {415.30, 100.0, 380.0, 1.00},   // Ab4 — tritone
         {293.66, 280.0, 540.0, 1.00},   // D4 — settles
     };
-    const Note* ns = (kind == Chirp::Wake) ? wake : end_;
-    const int   nn = 3;
+    const Note ack[] = {
+        {293.66,  0.0,  90.0, 0.80},    // D4
+        {415.30, 60.0, 120.0, 1.00},    // Ab4 — the same tritone, in passing
+    };
+    const Note* ns = (kind == Chirp::Wake) ? wake : (kind == Chirp::End) ? end_ : ack;
+    const int   nn = (kind == Chirp::Ack) ? 2 : 3;
 
     double total_ms = 0.0;
     for (int i = 0; i < nn; ++i)

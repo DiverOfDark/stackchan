@@ -16,6 +16,9 @@ data:
   PIPER_VOICE: {{ .Values.piper.voice | quote }}
   STT_PROVIDER: {{ .Values.stt.provider | quote }}
   TTS_PROVIDER: {{ .Values.tts.provider | quote }}
+  VOICE_ENGINE: {{ .Values.voiceEngine | quote }}
+  OPENAI_LIVE_MODEL: {{ .Values.openai.liveModel | quote }}
+  OPENAI_LIVE_VOICE: {{ .Values.openai.liveVoice | quote }}
   ELEVENLABS_VOICE_ID: {{ .Values.elevenlabs.voiceId | quote }}
   ELEVENLABS_TTS_MODEL: {{ .Values.elevenlabs.ttsModel | quote }}
   ELEVENLABS_STT_MODEL: {{ .Values.elevenlabs.sttModel | quote }}

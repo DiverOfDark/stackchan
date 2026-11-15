@@ -56,6 +56,8 @@ pub fn start(backend_url: &str, cfg: &Settings) -> Option<Voice> {
         "name": cfg.name,
         "honorific": cfg.honorific.as_str(),
         "lang": lang,
+        // Optional backend events this firmware understands.
+        "caps": ["sleep"],
     })
     .to_string();
     let meta = CString::new(meta).ok()?;

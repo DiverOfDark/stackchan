@@ -85,6 +85,8 @@ constexpr UBaseType_t kPsram          = MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT;
 // Mic history kept for wake snapshots (ends at the fire, so it holds the
 // phrase plus some lead-in), as on the original device.
 constexpr std::size_t kWakeHistory    = domain::kSampleRateHz * 3;   // 3 s, 96 KB PSRAM
+// How much of that history opens a wake-word turn's uplink: the wake phrase.
+constexpr std::size_t kWakePrerollSamples = domain::kSampleRateHz * 3 / 2;
 }  // namespace
 
 namespace femto {
@@ -228,6 +230,11 @@ void Session::onText(std::string json)
         // 15–40 s on a tool call): keep the turn open while it says so.
         const TickType_t until = xTaskGetTickCount() + pdMS_TO_TICKS(kAwaitResponseMs);
         if (until > turn_deadline_.load()) turn_deadline_ = until;
+    }
+    if (json.find("\"sleep\"") != std::string::npos) {
+        // Nobody spoke after the wake word (a false wake): end the turn
+        // quietly instead of listening out the full timeout.
+        sleep_requested_ = true;
     }
     if (json.find("\"interrupted\"") != std::string::npos) {
         // Barge-in: the queued reply is stale. Safe to reset here: the
@@ -412,12 +419,25 @@ void Session::captureTask()
             if (!conversation_active_.exchange(true)) {
                 ESP_LOGI(kTag, "wake → turn armed");
                 uplink_.clear();
+                sleep_requested_ = false;
+                if (heard && hist) {
+                    // Send the wake phrase itself: the backend hears "Hey
+                    // Femto, <question>" from the start, and a speech model
+                    // can tell a real wake from a false one.
+                    const std::size_t n = std::min(hist_len, kWakePrerollSamples);
+                    for (std::size_t i = hist_len - n; i < hist_len; ++i)
+                        uplink_.push(&hist[(hist_head + i) % kWakeHistory], sizeof(int16_t));
+                }
                 bot_replied_ = false;
-                chirp_pending_ = static_cast<int>(domain::Chirp::Wake);
+                chirp_pending_ = static_cast<int>(heard ? domain::Chirp::Ack : domain::Chirp::Wake);
             }
             turn_deadline_ = now + pdMS_TO_TICKS(kAwaitResponseMs);
         }
 
+        if (conversation_active_.load() && sleep_requested_.exchange(false)) {
+            conversation_active_ = false;
+            ESP_LOGI(kTag, "backend heard no speech — false wake, back to sleep");
+        }
         if (conversation_active_.load() && now > turn_deadline_.load()) {
             conversation_active_ = false;
             chirp_pending_ = static_cast<int>(domain::Chirp::End);

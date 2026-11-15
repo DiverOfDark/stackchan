@@ -221,6 +221,29 @@ and around teardown. `peer_->tick()` stays lock-free (same task as teardown).
   (browser UI to play + label). `/` (test-client) links to it. The page ships in
   the image — Dockerfile copies `*.html`.
 
+## Speech-to-speech engine for Femto (`backend/live_engine.py`)
+- `VOICE_ENGINE=live` (chart `voiceEngine: live`) routes the Femto robot's
+  `/ws/femto` sessions to OpenAI's `gpt-live-1` instead of the pipecat pipeline.
+  The model hears the mic and speaks itself: no Scribe, VAD, turn analyzer or
+  ElevenLabs voice on this path. Other devices, and Femto when `OPENAI_API_KEY`
+  is unset, keep using the pipeline.
+- **Hermes is the delegate.** The live model has no tools. When it delegates,
+  `bot.py` `_hermes_delegate` sends the conversation transcript to Hermes and the
+  answer goes back as a `session.commentary.append`, which the model says aloud.
+  One delegation at a time; `LIVE_DELEGATION_TIMEOUT_SECS` (120).
+- **Never append context to a running session**: the model reads
+  `session.thinking.append` aloud unprompted. Session-specific context (the
+  Claude usage paragraph) goes into the starting instructions, fetched while the
+  socket connects and dropped if it is slower than that.
+- The Live API streams output continuously, silence included; only audible
+  frames are forwarded so the device's playback buffer drains between replies.
+- **False wakes:** the device opens a wake-word turn with the last 1.5 s of mic
+  history (the wake phrase). If the model transcribes no speech within
+  `LIVE_NO_SPEECH_SECS` (8), the backend sends `{"t": "sleep"}` to a device whose
+  hello lists `"caps": ["sleep"]` and the turn ends silently.
+- Key: chart ExternalSecret → openbao `trackhound` property `openai_api_key`.
+  Billing is $0.05 per session minute; each session logs `billed Ns` on close.
+
 ## Firmware layering (strict, bottom-up; depend only downward)
 - `pv_domain` — pure C++17, **zero ESP-IDF deps**, host-testable with Catch2
   (codecs, FSMs, gates, parsers). Keep its `REQUIRES` list empty.

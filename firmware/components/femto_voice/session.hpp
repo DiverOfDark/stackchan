@@ -82,6 +82,7 @@ private:
     std::atomic<bool> link_dead_{false};
     std::atomic<bool> conversation_active_{false};
     std::atomic<bool> bot_replied_{false};
+    std::atomic<bool> sleep_requested_{false};   // backend: false wake
     std::atomic<bool> ptt_{false};
     std::atomic<bool> wake_armed_{true};
     std::atomic<int> chirp_pending_{-1};

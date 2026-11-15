@@ -73,6 +73,13 @@ spec:
                   name: {{ include "voice-assistant.elevenlabsSecretName" . }}
                   key: {{ .Values.elevenlabs.apiKey.secretKey }}
             {{- end }}
+            {{- if eq .Values.voiceEngine "live" }}
+            - name: OPENAI_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.openai.apiKey.existingSecret | default (printf "%s-openai" (include "voice-assistant.fullname" .)) }}
+                  key: {{ .Values.openai.apiKey.secretKey }}
+            {{- end }}
             - name: STUNNER_TURN_USERNAME
               valueFrom:
                 secretKeyRef:

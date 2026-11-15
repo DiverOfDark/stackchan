@@ -80,6 +80,26 @@ elevenlabs:
     value: ""
     existingSecret: ""
 
+# ── Voice engine for the Femto robot ─────────────────────────────────────
+# `pipeline` = the STT → LLM → TTS chain above. `live` = OpenAI's
+# speech-to-speech model hears and speaks directly and delegates tool work
+# to Hermes (backend/live_engine.py). Other devices always use `pipeline`.
+voiceEngine: pipeline   # pipeline | live
+openai:
+  liveModel: "gpt-live-1"
+  liveVoice: ""           # empty = the API's default voice
+  apiKey:
+    secretKey: OPENAI_API_KEY
+    # Only read when voiceEngine is `live`. Defaults to the key trackhound
+    # already keeps in OpenBao.
+    externalSecret:
+      store: openbao-store
+      storeKind: ClusterSecretStore
+      refreshInterval: "1h"
+      remoteKey: "trackhound"
+      property: "openai_api_key"
+    existingSecret: ""
+
 # ── System prompt (Russian; Agent-Smith persona by default) ──────────────
 # Voice-shaping (narration + spell-out-units) instructions are appended in
 # bot.py regardless of this value.
