@@ -51,32 +51,10 @@ Name of the K8s Secret that holds the Hermes API key.
 {{- end -}}
 
 {{/*
-Name of the K8s Secret that holds the ElevenLabs API key.
+Name of the K8s Secret that holds the OpenAI API key.
 */}}
-{{- define "voice-assistant.elevenlabsSecretName" -}}
-{{- if .Values.elevenlabs.apiKey.existingSecret -}}
-{{- .Values.elevenlabs.apiKey.existingSecret -}}
-{{- else -}}
-{{- printf "%s-elevenlabs" (include "voice-assistant.fullname" .) -}}
-{{- end -}}
-{{- end -}}
-
-{{/*
-Name of the K8s Secret that holds the STUNner TURN credentials.
-*/}}
-{{- define "voice-assistant.turnSecretName" -}}
-{{- if .Values.stunner.auth.existingSecret -}}
-{{- .Values.stunner.auth.existingSecret -}}
-{{- else -}}
-{{- printf "%s-turn" (include "voice-assistant.fullname" .) -}}
-{{- end -}}
-{{- end -}}
-
-{{/*
-Cluster-scoped GatewayClass name. Falls back to the release fullname.
-*/}}
-{{- define "voice-assistant.gatewayClassName" -}}
-{{- default (include "voice-assistant.fullname" .) .Values.stunner.gatewayClassName -}}
+{{- define "voice-assistant.openaiSecretName" -}}
+{{- default (printf "%s-openai" (include "voice-assistant.fullname" .)) .Values.openai.apiKey.existingSecret -}}
 {{- end -}}
 
 {{/*
@@ -87,16 +65,11 @@ TLS secret name for the Ingress.
 {{- end -}}
 
 {{/*
-Validate that exactly one source is configured for the Hermes API key
-and (if no existing Secret) for the STUNner TURN password.
+Validate that a source is configured for the Hermes API key.
 */}}
 {{- define "voice-assistant.validate" -}}
 {{- $h := .Values.hermes.apiKey -}}
 {{- if and (not $h.existingSecret) (not $h.externalSecret.enabled) (not $h.value) -}}
 {{- fail "Set one of: hermes.apiKey.existingSecret | hermes.apiKey.externalSecret.enabled=true | hermes.apiKey.value" -}}
-{{- end -}}
-{{- $s := .Values.stunner.auth -}}
-{{- if and (not $s.existingSecret) (not $s.externalSecret.enabled) (not $s.password) -}}
-{{- fail "Set one of: stunner.auth.existingSecret | stunner.auth.externalSecret.enabled=true | stunner.auth.password" -}}
 {{- end -}}
 {{- end -}}

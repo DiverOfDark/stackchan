@@ -2,8 +2,8 @@
 
 Custom firmware for the official M5Stack StackChan (CoreS3 + StackChan body): a
 contemptuous dystopian robot butler that shows Claude usage, follows your face
-with its head, and talks through its own [pipecat](https://docs.pipecat.ai)
-voice backend (`backend/`). Rust on ESP-IDF 5.5, with a Svelte web UI for setup, settings,
+with its head, and talks through its own voice backend (`backend/`, OpenAI
+speech-to-speech with a self-hosted agent for tool work). Rust on ESP-IDF 5.5, with a Svelte web UI for setup, settings,
 camera, logs and OTA updates.
 
 See [`docs/PRD.md`](docs/PRD.md) for the full spec.
@@ -15,7 +15,7 @@ See [`docs/PRD.md`](docs/PRD.md) for the full spec.
 | `crates/` | Host-testable Rust: face engine, renderer, drivers, desktop simulator |
 | `firmware/` | ESP32-S3 binary (Xtensa `esp` toolchain) and C components |
 | `web/` | Web UI, embedded in the firmware image |
-| `backend/` | Voice backend (pipecat: STT → LLM → TTS; Femto over a WebSocket, the XIAO over WebRTC), Dockerfile, Helm chart |
+| `backend/` | Voice backend (bridges Femto's WebSocket to OpenAI's speech-to-speech model; Hermes does tool work), Dockerfile, Helm chart |
 | `tools/` | OTA upload, stock-firmware restore, font/design export, wake-word training (`tools/wake-word/`) |
 | `legacy/xiao/` | The original XIAO ESP32-S3 voice device firmware (frozen) |
 

@@ -1,19 +1,14 @@
 apiVersion: v2
 name: voice-assistant
-description: Self-hosted Russian streaming voice agent (Pipecat + SmallWebRTC + STUNner).
+description: Femto voice backend (OpenAI speech-to-speech, Hermes for tool work).
 type: application
-version: 0.1.0
-appVersion: "0.1.0"
+version: 0.2.0
+appVersion: "0.2.0"
 kubeVersion: ">=1.27.0-0"
 keywords:
-  - pipecat
   - voice
   - voice-assistant
-  - webrtc
-  - stunner
-  - whisper
-  - piper
-  - russian
+  - stackchan
 home: https://github.com/DiverOfDark/stackchan
 sources:
   - https://github.com/DiverOfDark/stackchan/tree/main/backend

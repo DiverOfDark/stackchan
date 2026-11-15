@@ -11,7 +11,7 @@ cannot answer alone it *delegates*: we run the request through the agent LLM
                                │
                                └─ delegation ──▶ agent LLM (tools, long tasks)
 
-The device sees the same wire format as the pipecat path (see femto_ws.py).
+The device speaks 16 kHz PCM16 in binary frames and JSON events in text frames.
 One addition: {"t": "sleep"} tells a device that advertised the "sleep"
 capability to end the turn silently, because nobody spoke after the wake
 word fired.
@@ -34,12 +34,23 @@ from websockets.exceptions import ConnectionClosed
 
 LIVE_URL = os.getenv("OPENAI_LIVE_URL", "wss://api.openai.com/v1/live/sessions")
 LIVE_MODEL = os.getenv("OPENAI_LIVE_MODEL", "gpt-live-1")
-LIVE_VOICE = os.getenv("OPENAI_LIVE_VOICE", "")
+# A built-in voice name ("marin", …) or the id of a voice made with
+# POST /v1/audio/voices ("voice_…"). Empty = the API's default.
+LIVE_VOICE = os.getenv("OPENAI_LIVE_VOICE", "").strip()
+# The description a prompt-made voice was created from; OpenAI asks for it to
+# be repeated in the session instructions.
+LIVE_VOICE_PROMPT = os.getenv("OPENAI_LIVE_VOICE_PROMPT", "").strip()
+
+
+def voice_setting(voice: str):
+    """`audio.output.voice` for a voice name or a custom voice id."""
+    return {"id": voice} if voice.startswith("voice_") else voice
 
 SAMPLE_RATE = 16000
 FRAME_BYTES = 640            # 20 ms
 FRAME_S = 0.02
-# Speech goes out this far ahead of real time (see femto_ws.SEND_AHEAD_S).
+# Speech goes out this far ahead of real time, so network jitter doesn't
+# starve the device's playback buffer.
 SEND_AHEAD_S = 0.3
 # The Live API streams output continuously, silence included. Only audible
 # audio is forwarded, so the device's playback buffer drains between replies.
@@ -358,7 +369,7 @@ class LiveSession:
             "delegation": {"type": "client"},
         }
         if LIVE_VOICE:
-            session["audio"]["output"] = {"voice": LIVE_VOICE}
+            session["audio"]["output"] = {"voice": voice_setting(LIVE_VOICE)}
         t0 = time.monotonic()
         context = asyncio.create_task(cfg.startup_context()) if cfg.startup_context else None
         async with ws_connect(
