@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Femto voice backend</title>
+<style>
+  body { font: 15px/1.5 system-ui, sans-serif; background: #0b0f14; color: #d7dde5; margin: 0; padding: 24px; }
+  h1 { font-size: 18px; margin: 0 0 4px; }
+  a { color: #60a5fa; }
+  .hint { color: #7b8794; font-size: 13px; }
+  #log { margin-top: 16px; display: flex; flex-direction: column; gap: 6px; }
+  .row { padding: 6px 10px; border-radius: 6px; background: #131a22; }
+  .row.user { border-left: 3px solid #34d399; }
+  .row.assistant { border-left: 3px solid #60a5fa; }
+  .meta { color: #7b8794; font-size: 12px; margin-right: 8px; }
+</style>
+</head>
+<body>
+<h1>Femto voice backend</h1>
+<div class="hint">Live transcript of what Femto hears and says. <span id="state">connecting…</span>
+  · <a href="/wake-review">wake samples</a> · <a href="/api/device-logs">device logs</a></div>
+<div id="log"></div>
+<script>
+const log = document.getElementById("log"), state = document.getElementById("state");
+const es = new EventSource("/api/transcripts/stream");
+es.onopen = () => { state.textContent = "connected"; };
+es.onerror = () => { state.textContent = "reconnecting…"; };
+es.onmessage = (m) => {
+  const e = JSON.parse(m.data), row = document.createElement("div"), meta = document.createElement("span");
+  row.className = "row " + e.role;
+  meta.className = "meta";
+  meta.textContent = new Date(e.ts * 1000).toLocaleTimeString() + " " + (e.role === "user" ? "heard" : "said");
+  row.append(meta, document.createTextNode(e.text));
+  log.prepend(row);
+};
+</script>
+</body>
+</html>

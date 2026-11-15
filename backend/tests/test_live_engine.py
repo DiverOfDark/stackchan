@@ -203,7 +203,7 @@ async def test_false_wake_leaves_an_older_device_alone(monkeypatch):
     server.close()
 
 
-def test_femto_ws_routes_the_robot_to_the_live_engine(monkeypatch):
+def test_femto_ws_hands_the_hello_to_the_live_engine(monkeypatch):
     import bot
     from fastapi.testclient import TestClient
 
@@ -213,21 +213,34 @@ def test_femto_ws_routes_the_robot_to_the_live_engine(monkeypatch):
         calls.append(meta)
         await websocket.close()
 
-    async def fake_pipeline(transport, session_id, meta, send_event):
-        calls.append("pipeline")
-
     monkeypatch.setattr(bot, "run_live", fake_run_live)
-    monkeypatch.setattr(bot, "run_pipeline", fake_pipeline)
-    monkeypatch.setattr(bot, "VOICE_ENGINE", "live")
     monkeypatch.setattr(bot, "OPENAI_API_KEY", "k")
-    client = TestClient(bot.app)
     hello = {"device": "femto-stackchan", "name": "Femto", "caps": ["sleep"]}
-    with client.websocket_connect("/ws/femto") as ws:
+    with TestClient(bot.app).websocket_connect("/ws/femto") as ws:
         ws.send_text(json.dumps(hello))
     assert calls == [hello]
 
-    # Without a key, or for another device, the pipeline still runs.
-    monkeypatch.setattr(bot, "OPENAI_API_KEY", "")
-    with client.websocket_connect("/ws/femto") as ws:
-        ws.send_text(json.dumps(hello))
-    assert calls[-1] == "pipeline"
+
+def test_voice_setting_takes_a_name_or_a_custom_voice_id():
+    assert live_engine.voice_setting("marin") == "marin"
+    assert live_engine.voice_setting("voice_abc123") == {"id": "voice_abc123"}
+
+
+async def test_run_live_puts_persona_language_and_voice_in_the_instructions(monkeypatch):
+    import bot
+
+    seen: list = []
+
+    async def fake_session(ws, cfg):
+        seen.append(cfg)
+
+    monkeypatch.setattr(bot, "run_live_session", fake_session)
+    monkeypatch.setattr(bot, "LIVE_VOICE_PROMPT", "A dry, low male voice.")
+    monkeypatch.setattr(bot, "OPENAI_API_KEY", "k")
+    await bot.run_live(object(), "s1", {"name": "Femto", "honorific": "guv", "lang": "ru", "caps": ["sleep"]})
+    cfg = seen[0]
+    assert "Femto" in cfg.instructions and "guv" in cfg.instructions
+    assert "Always speak Russian." in cfg.instructions
+    assert "Your voice: A dry, low male voice." in cfg.instructions
+    assert cfg.instructions.endswith(live_engine.LIVE_RULES)
+    assert cfg.can_sleep and cfg.session_id == "s1"

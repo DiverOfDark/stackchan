@@ -6,27 +6,27 @@
 > below are updated; the Femto firmware itself is `firmware/` at the repo root.
 
 
-Streaming **Russian** voice assistant: a hardware device (ESP32-S3 + Seeed
-ReSpeaker XVF3800) talks over WebRTC to an in-cluster **pipecat** backend
-(STT → local LLM → TTS). STT/TTS are **provider-switchable**: the default is
-ElevenLabs (cloud Scribe STT + custom Agent-Smith voice), with a fully local
-no-cloud fallback (FastWhisper STT + Piper TTS). The LLM + signaling + media
-relay are always self-hosted in-cluster. See **Backend** below.
+Voice backend for the **Femto** robot (M5Stack CoreS3, firmware in `firmware/`).
+The robot opens a WebSocket at wake and streams 16 kHz PCM; the backend bridges
+it to OpenAI's speech-to-speech model (`gpt-live-1`), which delegates anything
+that needs tools to **Hermes**, the self-hosted agent LLM. See **Backend** below.
 
-> `backend/README.md` and `legacy/xiao/README.md` cover setup/quickstart but predate
-> recent work and are **stale in places** (they still describe G.711, a
-> persistent connection, and the `ru_RU-irina-medium` voice). This file is the
-> current source of truth for architecture + dev workflow. When they conflict,
-> trust this file or the code.
+> **The pipecat pipeline is gone** (Scribe/Whisper STT → Hermes → ElevenLabs/Piper
+> TTS, WebRTC, STUNner). The backend no longer serves `/api/offer`, so the old
+> XIAO device (`legacy/xiao/`) cannot connect to it. The sections below about
+> G.722, WebRTC, TURN, the LED ring and the XIAO dev workflow describe that
+> frozen firmware only; Femto reuses its `pv_*` and `wake_word` components.
 
 ## Repo layout
 
-- `backend/` — pipecat backend (`bot.py`), Whisper wrapper, Dockerfile, tests. Deployed to k8s.
+- `backend/` — the backend (`bot.py`, `live_engine.py`), Dockerfile, tests. Deployed to k8s.
 - `legacy/xiao/` — the original XIAO ESP32-S3 firmware (ESP-IDF / PlatformIO, layered C++17, see below). Frozen; Femto (`firmware/`) reuses its libpeer, `pv_*` and `wake_word` components.
 - `backend/chart/` — Helm chart for the backend.
-- Backend image is built+deployed via **ArgoCD** from `main` (image tag `sha-<commit>`).
+- Backend image: CI builds it on every push to `main`, then moves the `deploy`
+  branch, which **ArgoCD** tracks (image tag `sha-<commit>`). Helm values live in
+  the homelab repo (`k3s-apps/voice-assistant.yaml`).
 
-## The two halves talk like this
+## The two halves talked like this (XIAO, legacy)
 
 ```
 device (ESP32-S3)  ──HTTPS POST /api/offer──►  Traefik ingress (voice-assistant.kirillorlov.pro :443)  ──►  backend :7860
@@ -188,49 +188,21 @@ and around teardown. `peer_->tick()` stays lock-free (same task as teardown).
   contention). Works off-session (wake/end happen with no peer). Synthesized
   from scratch — **do not** embed copyrighted game audio.
 
-## Backend (`backend/bot.py`, pipecat)
-- Pipeline: SmallWebRTC in → STT → LLMUserAggregator → OpenAI-compatible LLM →
-  TTS → SmallWebRTC out. Silero VAD + turn analyzer for end-of-utterance.
-- **STT/TTS are provider-switchable** via `STT_PROVIDER` / `TTS_PROVIDER` env:
-  - `elevenlabs` (default): ElevenLabs **Scribe** STT (`scribe_v2`, ru) + **custom
-    Agent-Smith voice** TTS (`eleven_flash_v2_5`, `ELEVENLABS_VOICE_ID` set per-deploy
-    via chart values, `pcm_16000`). Cloud — needs `ELEVENLABS_API_KEY` (chart ExternalSecret →
-    openbao `voice-assistant/elevenlabs` property `api_key`). Scribe needs the
-    shared `_aiohttp_session` (lifespan). Voice character: `ELEVENLABS_STABILITY`
-    (lower=more menacing) / `ELEVENLABS_SIMILARITY`.
-  - `whisper`/`piper`: the local, no-cloud fallback (FastWhisper large-v3-turbo
-    INT8, Piper). lifespan only prewarms the local model a chosen provider uses.
-- **Persona:** the LLM system prompt (chart `values.yaml systemPrompt`, authoritative
-  in-cluster) is an Agent Smith style — calm/cold/measured but still helpful, Russian.
-- `idle_timeout_secs=None`: the **device** owns session lifecycle (connect on
-  wake, hang up after the turn); the backend must not unilaterally cancel a live
-  conversation. (Default 300 s used to kill the persistent connection at 5 min.)
-- **No greeting** on connect (`on_client_connected` just logs) — on-demand means
-  the user is already speaking when it connects; the LED wake-ack is the cue.
-- `ESP32_COMPAT=true` activates `esp32_munge()`: drops sha-384/512 fingerprints
-  (device mbedTLS is sha-256 only) and rewrites STUNner relay candidates as host
-  candidates. Does **not** touch codec/rtpmap lines.
-- Note: Piper model currently loads **per connection** (~1.4 s) — minor latency,
-  candidate for a future optimization (load once / share).
-- **Wake-sample collection endpoints** (gated on `WAKE_SAMPLE_DIR`, a mounted PVC
-  via chart `wakeSamples`): `POST /wake-sample` (device uploads WAV body + metrics
-  query → `<base>.wav`+`.json`, rotates beyond `WAKE_SAMPLE_MAX`); `GET
-  /wake-samples` (list + metrics, incl. each clip's `label`); `GET
-  /wake-samples/{name}` (download); `POST /wake-samples/{name}/label`
-  (positive/negative/unlabeled → stored in the `.json`); `GET /wake-review`
-  (browser UI to play + label). `/` (test-client) links to it. The page ships in
-  the image — Dockerfile copies `*.html`.
-
-## Speech-to-speech engine for Femto (`backend/live_engine.py`)
-- `VOICE_ENGINE=live` (chart `voiceEngine: live`) routes the Femto robot's
-  `/ws/femto` sessions to OpenAI's `gpt-live-1` instead of the pipecat pipeline.
-  The model hears the mic and speaks itself: no Scribe, VAD, turn analyzer or
-  ElevenLabs voice on this path. Other devices, and Femto when `OPENAI_API_KEY`
-  is unset, keep using the pipeline.
+## Backend (`backend/bot.py` + `backend/live_engine.py`)
+- **One path:** `/ws/femto` → `run_live` → `live_engine.run_live_session`. The
+  first WebSocket message is the hello JSON (`device`, `name`, `honorific`,
+  `lang`, `caps`); after that binary frames are 16 kHz PCM16 both ways and text
+  frames are JSON events (`user_started`, `user_text`, `user_stopped`,
+  `bot_started`, `bot_text`, `bot_stopped`, `thinking`, `sleep`).
+- The model hears the mic and speaks itself: no separate STT, VAD, turn
+  detection or TTS. Without `OPENAI_API_KEY` the socket is closed with 1011.
+- **Persona:** `STACKCHAN_SYSTEM_PROMPT` (chart `stackchan.systemPrompt`,
+  `{name}`/`{honorific}` placeholders) + the live Claude usage paragraph from
+  trmnl-cyberpunk + `LIVE_RULES`.
 - **Hermes is the delegate.** The live model has no tools. When it delegates,
-  `bot.py` `_hermes_delegate` sends the conversation transcript to Hermes and the
-  answer goes back as a `session.commentary.append`, which the model says aloud.
-  One delegation at a time; `LIVE_DELEGATION_TIMEOUT_SECS` (120).
+  `_hermes_delegate` sends the conversation transcript to Hermes and the answer
+  goes back as a `session.commentary.append`, which the model says aloud. One
+  delegation at a time; `LIVE_DELEGATION_TIMEOUT_SECS` (120).
 - **Never append context to a running session**: the model reads
   `session.thinking.append` aloud unprompted. Session-specific context (the
   Claude usage paragraph) goes into the starting instructions, fetched while the
@@ -241,8 +213,40 @@ and around teardown. `peer_->tick()` stays lock-free (same task as teardown).
   history (the wake phrase). If the model transcribes no speech within
   `LIVE_NO_SPEECH_SECS` (8), the backend sends `{"t": "sleep"}` to a device whose
   hello lists `"caps": ["sleep"]` and the turn ends silently.
+- The **device** owns session lifecycle (connect on wake, hang up after the
+  turn). No greeting on connect: the user is already speaking.
 - Key: chart ExternalSecret → openbao `trackhound` property `openai_api_key`.
   Billing is $0.05 per session minute; each session logs `billed Ns` on close.
+- **Pages:** `/` is a live transcript log (SSE `/api/transcripts/stream`),
+  `/wake-review` labels wake samples. Both ship in the image (Dockerfile copies
+  `*.html`).
+- **Wake-sample collection endpoints** (gated on `WAKE_SAMPLE_DIR`, a mounted PVC
+  via chart `wakeSamples`): `POST /wake-sample` (device uploads WAV body + metrics
+  query → `<base>.wav`+`.json`, rotates beyond `WAKE_SAMPLE_MAX`); `GET
+  /wake-samples` (list + metrics, incl. each clip's `label`); `GET
+  /wake-samples/{name}` (download); `POST /wake-samples/{name}/label`
+  (positive/negative/unlabeled → stored in the `.json`).
+- **Device logs:** `POST /api/device-logs` (one file per device per UTC day on
+  the same PVC), read back via `GET /api/device-logs[/{device}/{date}]`.
+
+### Custom voice
+- `OPENAI_LIVE_VOICE` (chart `openai.liveVoice`) is a built-in voice name (the
+  API default is `marin`) or the id of a custom voice (`voice_…`), which is sent
+  as `audio.output.voice.id`. The voice is fixed for a session.
+- **Voices made from a text description** are open to every API customer, free
+  to create, work only with `gpt-live-1`, and are limited to 100 per
+  organization:
+  ```bash
+  curl https://api.openai.com/v1/audio/voices -H "Authorization: Bearer $OPENAI_API_KEY" \
+    -H "Content-Type: application/json" \
+    -d '{"type":"prompt","name":"femto","model":"auto","prompt":"<accent, age, pitch, timbre, pace>"}'
+  ```
+  The response's `id` goes into `openai.liveVoice`, and the same description
+  into `openai.liveVoicePrompt` (OpenAI asks for it to be repeated in the session
+  instructions; `run_live` adds it). `script_hint` (≤2000 characters of sample
+  speech) is optional. The response has no audio: listen in a Live session.
+- Voices cloned from a recording need a consent recording and are limited to
+  customers approved by OpenAI sales.
 
 ## Firmware layering (strict, bottom-up; depend only downward)
 - `pv_domain` — pure C++17, **zero ESP-IDF deps**, host-testable with Catch2
@@ -281,8 +285,8 @@ g++ -std=gnu++17 -O2 -Icomponents/pv_domain/include \
     /tmp/driver.cpp components/pv_domain/src/g722.cpp -o /tmp/check && /tmp/check
 ```
 
-**Backend deploy**: commit to `main`, `git push origin main` → ArgoCD builds the
-image and syncs. Watch:
+**Backend deploy**: commit to `main`, `git push origin main` → CI builds the
+image and moves `deploy` → ArgoCD syncs. Watch:
 ```bash
 kubectl -n argocd get application voice-assistant -o jsonpath='{.status.sync.status}/{.status.health.status} {.status.sync.revision}{"\n"}'
 kubectl -n voice-assistant get deploy voice-assistant -o jsonpath='{.spec.template.spec.containers[0].image}{"\n"}'
@@ -323,8 +327,7 @@ deploy together.
   (gates can't help) — the fix is collecting field hard negatives via `/wake-review`
   and retraining. First hard-negative-trained model is shipped; keep labeling +
   retraining to drive the rate down, and re-tune the gates per new model.
-- Piper loads per connection on the backend (latency).
 - XVF3800 AEC config still uses a half-duplex echo guard (`kEchoGuardMs`) rather
   than full AEC reference tuning.
-- The Agent Smith voice (ElevenLabs Scribe STT + custom-voice TTS) is now the
-  default; tune persona via `systemPrompt` and timbre via stability/similarity.
+- No echo cancellation on Femto: the mic uplink is muted while the robot speaks,
+  so it cannot be interrupted by voice.

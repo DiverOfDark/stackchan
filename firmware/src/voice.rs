@@ -1,4 +1,4 @@
-//! Voice (PRD §6.4): wake word "Эй, Фемто", WebRTC to the pipecat backend
+//! Voice (PRD §6.4): wake word "Эй, Фемто", a WebSocket to the voice backend
 //! and CoreS3 audio, in the femto_voice C++ component. This side maps the
 //! conversation onto the engine's voice screens.
 //!

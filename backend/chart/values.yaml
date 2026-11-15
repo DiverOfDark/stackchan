@@ -11,7 +11,7 @@ nameOverride: ""
 fullnameOverride: ""
 podLabels: {}
 
-# ── Local LLM (OpenAI-compatible API) ────────────────────────────────────
+# ── Hermes: the agent the voice model delegates to (OpenAI-compatible API) ────────────────────────────────────
 hermes:
   # Base URL of the OpenAI-compatible endpoint — must include /v1.
   baseUrl: "http://your-llm.example.com:8000/v1"
@@ -34,64 +34,22 @@ hermes:
     value: ""
     existingSecret: ""
 
-# ── Whisper STT (faster-whisper, in-process) ─────────────────────────────
-whisper:
-  # large-v3-turbo is a distilled large-v3 variant: ~6× faster than large-v3
-  # and faster than `medium` on CPU+int8, with comparable Russian quality.
-  # Fallbacks if you need them: tiny | base | small | medium | large-v3
-  model: deepdml/faster-whisper-large-v3-turbo-ct2
-  computeType: int8      # int8 | int8_float16 | float16 | float32
-  ompThreads: 6          # bounds ctranslate2 CPU threads to your pod's limit
-  # Decoding parameters — faster-whisper defaults are 5/5; we run 1/1 (greedy)
-  # for ~30-50% faster STT on CPU at a small accuracy cost. Raise to 5/5 for
-  # max accuracy if you have CPU headroom.
-  beamSize: 1
-  bestOf: 1
-
-# ── Piper TTS (in-process; voice files auto-downloaded once) ─────────────
-piper:
-  voice: ru_RU-irina-medium   # alt: ru_RU-dmitri-medium, ru_RU-ruslan-medium
-
-# ── STT / TTS provider selection ─────────────────────────────────────────
-# `elevenlabs` uses ElevenLabs cloud (Scribe STT + the custom-designed voice
-# TTS) behind one API key. `whisper` / `piper` run fully local/offline.
-stt:
-  provider: elevenlabs   # elevenlabs | whisper
-tts:
-  provider: elevenlabs   # elevenlabs | piper
-
-# ── ElevenLabs (Scribe STT + custom-voice TTS) ───────────────────────────
-elevenlabs:
-  voiceId: ""                       # REQUIRED: set per-deploy (ArgoCD app values)
-  ttsModel: "eleven_flash_v2_5"     # lowest-latency multilingual (incl. Russian)
-  sttModel: "scribe_v2"
-  stability: "0.45"                 # lower = more expressive/menacing
-  similarity: "0.85"                # higher = stays on-timbre
-  apiKey:
-    secretKey: ELEVENLABS_API_KEY
-    # Same options as hermes.apiKey: externalSecret | value | existingSecret.
-    externalSecret:
-      enabled: true
-      store: openbao-store
-      storeKind: ClusterSecretStore
-      refreshInterval: "1h"
-      remoteKey: "voice-assistant/elevenlabs"
-      property: "api_key"
-    value: ""
-    existingSecret: ""
-
-# ── Voice engine for the Femto robot ─────────────────────────────────────
-# `pipeline` = the STT → LLM → TTS chain above. `live` = OpenAI's
-# speech-to-speech model hears and speaks directly and delegates tool work
-# to Hermes (backend/live_engine.py). Other devices always use `pipeline`.
-voiceEngine: pipeline   # pipeline | live
+# ── Voice model (OpenAI speech-to-speech) ────────────────────────────────
+# The robot's audio goes straight to this model, which hears and speaks
+# itself and delegates tool work to Hermes (backend/live_engine.py).
 openai:
   liveModel: "gpt-live-1"
-  liveVoice: ""           # empty = the API's default voice
+  # A built-in voice name (e.g. marin, the API default when empty) or the id
+  # ("voice_…") of a voice made from a text description with
+  # POST /v1/audio/voices. See backend/CLAUDE.md, "Custom voice".
+  liveVoice: ""
+  # The description a custom voice was made from. OpenAI asks for it to be
+  # repeated in the session instructions.
+  liveVoicePrompt: ""
   apiKey:
     secretKey: OPENAI_API_KEY
-    # Only read when voiceEngine is `live`. Defaults to the key trackhound
-    # already keeps in OpenBao.
+    # Defaults to the key trackhound already keeps in OpenBao. Set
+    # existingSecret to use a Secret you create yourself.
     externalSecret:
       store: openbao-store
       storeKind: ClusterSecretStore
@@ -100,27 +58,8 @@ openai:
       property: "openai_api_key"
     existingSecret: ""
 
-# ── System prompt (Russian; Agent-Smith persona by default) ──────────────
-# Voice-shaping (narration + spell-out-units) instructions are appended in
-# bot.py regardless of this value.
-systemPrompt: |-
-  Ты — голосовой помощник по имени Фемто. Держись в манере агента Смита из
-  «Матрицы»: говори спокойно, размеренно и холодно, с лёгким превосходством
-  и отстранённой, чуть зловещей иронией; обращайся к собеседнику на «вы»,
-  изредка веско и с расстановкой. При этом ты неизменно полезен и отвечаешь
-  строго по существу. Всегда отвечай только на русском языке. Говори кратко
-  и естественно, законченными предложениями, как в живом разговоре — без
-  разметки, списков, эмодзи и кода. Сохраняй невозмутимость и сдержанную
-  угрозу в тоне, но никогда не отказывай в помощи, не угрожай по-настоящему
-  и не оскорбляй собеседника.
-
-# ── ESP32 forward-compat (see README ESP32 section) ──────────────────────
-esp32Compat: false
-
 # Femto StackChan (M5Stack desk robot, github.com/DiverOfDark/stackchan):
-# bilingual butler persona + live Claude usage from trmnl-cyberpunk, and turn
-# events/captions over the WebRTC data channel. Only applies to offers whose
-# request_data.device is "femto-stackchan".
+# bilingual butler persona + live Claude usage from trmnl-cyberpunk.
 stackchan:
   # trmnl-cyberpunk base URL (serves /api/stackchan/usage). Empty = no usage.
   usageUrl: ""
@@ -128,42 +67,6 @@ stackchan:
   systemPrompt: ""
   # Bearer token if trmnl-cyberpunk sets STACKCHAN_TOKEN: put
   # STACKCHAN_USAGE_TOKEN in the existing secret (envFrom).
-
-# ── STUNner WebRTC gateway (per-app resources; operator must be installed
-#    separately — `helm install stunner stunner/stunner -n stunner-system`) ─
-stunner:
-  # The TURN URI handed to browser clients via /ice-servers. Usually
-  # turn:<loadBalancerIP>:3478?transport=udp
-  turnUri: "turn:192.0.2.1:3478?transport=udp"
-  realm: stunner.l7mp.io
-  # If set, this IP is pinned via loadBalancerServiceAnnotations below
-  # (a MetalLB annotation by default).
-  loadBalancerIP: ""
-  loadBalancerServiceAnnotations: {}
-  # Cluster-scoped GatewayClass name. Empty -> defaults to the release fullname.
-  gatewayClassName: ""
-  auth:
-    username: voiceassistant
-    # Pick ONE source of the TURN password — same rules as hermes.apiKey.
-    externalSecret:
-      enabled: false
-      store: openbao-store
-      storeKind: ClusterSecretStore
-      refreshInterval: "1h"
-      remoteKey: "voice-assistant/turn"
-      usernameProperty: username
-      passwordProperty: password
-    password: ""
-    existingSecret: ""
-    existingSecretKeys:
-      username: username
-      password: password
-
-# ── Model storage (Whisper + Piper persist here) ─────────────────────────
-persistence:
-  size: 8Gi
-  storageClassName: ""       # empty -> cluster default
-  accessModes: [ReadWriteOnce]
 
 # ── Wake-sample collection ───────────────────────────────────────────────
 # The device uploads the audio that triggered each wake fire (+ metrics) to
@@ -186,13 +89,13 @@ deviceLogs:
   keepDays: 14               # DEVICE_LOG_KEEP_DAYS
   maxMBPerDay: 50            # DEVICE_LOG_MAX_MB_PER_DAY
 
-# ── HTTP signaling / web client service ──────────────────────────────────
+# ── HTTP service (robot WebSocket + web pages) ──────────────────────────────────
 service:
   type: ClusterIP
   port: 80
   targetPort: 7860
 
-# ── Ingress (TLS web client + signaling) ─────────────────────────────────
+# ── Ingress ─────────────────────────────────
 ingress:
   enabled: true
   className: ""              # e.g. traefik, nginx; empty uses cluster default
@@ -203,25 +106,14 @@ ingress:
     secretName: ""           # empty -> "<fullname>-tls"
 
 # ── Resources ────────────────────────────────────────────────────────────
-# Memory limits stay (OOM protection). CPU limits intentionally omitted:
-# CFS quota throttling on CPU limits can hurt tail latency even when nodes
-# have spare cores. CPU `requests` still govern proportional share under
-# contention. Add `cpu:` under limits if you really need a hard cap.
+# The backend only relays audio and text; no models run in the pod.
 resources:
   bot:
     requests:
-      cpu: "2"
-      memory: 4Gi
+      cpu: "50m"
+      memory: 128Mi
     limits:
-      memory: 8Gi
-  initContainer:
-    # Init is short-lived and bursty (model download / decode). Let it use
-    # spare cores while it runs.
-    requests:
-      cpu: "500m"
-      memory: 2Gi
-    limits:
-      memory: 6Gi
+      memory: 512Mi
 
 # Extra env entries appended to the bot container.
 extraEnv: []
